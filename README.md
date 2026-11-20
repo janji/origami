@@ -1,5 +1,24 @@
 # Origami
 
+```text
+                        +
+                        #*
+        #                *++                      :
+      *@##*              **++                   =-              +
+            *+            @#+++               -=:            *=
+             *#=          #@#+#+            ==::          ++=
+               #*+=       #@@#+#+         --=::        +*--
+                ***++      *@@*+#%+     ===:::      **+==
+                  ###===   #@@@#+%%+   -*=:++:   *++===
+                   *#*+=#=  *@@@#+#%++*#=:++: +*+*=#=
+                     *@*==#+*@@@@*+%%%+-+++*@%+==*=
+                      *#@*==#####*++++++*%%**=#*=
+                        *#**@@@@@@#=######+====
+                          ==******-:+==++=::
+                              --**=:==::
+                                   :
+```
+
 Origami runs mixture-of-experts language models that are much larger than your Mac's memory, on Apple Silicon.
 The idea: in these models each token uses only a few "experts" out of hundreds. Origami keeps the always-used
 weights in memory and reads each token's experts from the SSD as they are needed, with a cache, read-ahead and
@@ -9,6 +28,34 @@ It is one native binary (Swift and Metal, no Python, no MLX) with a local server
 and Ollama APIs, and a dashboard in the browser.
 
 **New here?** Start with [the guide](docs/guide.md): install, first run, every feature in short, and what is planned.
+The current release is 3.1.1 ([what changed](CHANGELOG.md)).
+
+![The dashboard's Now tab: the model, its speed, where the last request's time went, where experts were read from, memory and health](docs/images/dashboard-now.png)
+
+*The dashboard while Qwen3.8-Flash-Next serves on an M2 Pro with 32 GB (Origami 3.1.0, at the opt-in `faster`
+level). More pictures [below](#the-dashboard).*
+
+## What it does
+
+- **Runs models larger than memory.** The always-used weights stay in memory; each token's experts are read from
+  the SSD as they are needed, with a cache, read-ahead and fused Metal kernels.
+- **Exact by default.** At `quality exact` replies are the model's own. Faster levels and low-bit experts are
+  opt-in, measured on checkable tasks, and named in the status, the dashboard and the logs.
+- **A hot copy.** While it serves, Origami copies the experts it misses most to the fastest drive with room and
+  keeps that copy following what you use.
+- **Saved prompts.** Follow-ups and repeated prompts reuse the model's saved state, also after a restart, so only
+  the first read of a long prompt is slow.
+- **Three APIs, one server.** OpenAI (chat completions and Responses), Anthropic and Ollama, with streaming, tool
+  calls, JSON mode with a schema, images (Qwen) and thinking controls.
+- **A dashboard in the browser.** Live speed and why a request was slow, memory, drives, models and files, and the
+  settings as dials that show what this Mac's memory makes of each move.
+- **Memory that fits your Mac.** An automatic limit that gives way when macOS is short of memory and climbs back;
+  `origami tune --memory` measures this Mac's fastest limit and `origami tune` its timing settings.
+- **Several models on one port.** Load and switch between them by name; requests wait in a queue.
+- **Looks after the drive.** Measures each drive's speed, tells you when the model's drive reads slowly and
+  rewrites its files in place (`origami refresh`), and carries on by itself when a drive is replugged.
+- **Tools for the rest.** `origami setup` finds or downloads the model (resumable), `doctor` says what to fix,
+  `bench` and `report` measure your Mac, `verify` checks the copies, `service install` starts it at login.
 
 ## Supported models
 
@@ -33,7 +80,7 @@ Origami has been run on two Macs so far: an M2 Pro with 32 GB of memory on macOS
 | M1 family, 24 GB or more | Expected to work, with slower prompt reading (no bfloat16 matrix units). Its kernels, forced on the M2 Pro, gave the same replies with prompt reading about 10% slower. Run on an M1 with 16 GB only (last row). |
 | M5 family, 24 GB or more | Expected to work. Long prompts use the M5's matrix units, so replies may differ slightly from other Macs. Never run. |
 | 64 GB or more | Expected to be faster: more experts stay in memory (all of Qwen's from 128 GB). Planned by simulation, never run. |
-| 16 GB | Not recommended: the always-resident part of Qwen needs about 11 GB, so only an 8K context fits; `origami setup` warns. Under 16 GB it refuses. Tested on an M1 MacBook Air with Qwen on a portable USB SSD (0.7 GB/s) and other apps open: it works and is slow, about 0.8–1.3 tok/s of writing, 15–23 s to the first word of a short question and 142–159 s for a 4,650-token prompt (three single runs). |
+| 16 GB | Not recommended: the always-resident part of Qwen needs about 11 GB, so only an 8K context fits; `origami setup` warns. Under 16 GB it refuses. Tested on an M1 MacBook Air: it works and is slow ([its numbers](#on-a-16-gb-m1-macbook-air)). |
 
 **If you run Origami on any other Mac, please help:** start the server, run `origami report`, and paste its output
 into a GitHub issue. It shows the Mac, the memory plan and a short benchmark, with home-folder paths shortened.
@@ -107,7 +154,46 @@ place ([troubleshooting](docs/troubleshooting.md#the-model-drive-got-slow)).
 
 One request runs at a time; others wait in a queue.
 
+## The dashboard
+
+`origami dashboard` opens it. The **Now** tab is the picture at the top of this page. **Setup** has the context,
+quality, thinking and memory as dials, with this Mac's memory answering each move, and tuning:
+
+![The Setup tab: dials for context, quality, thinking and the memory limit beside a picture of this Mac's memory](docs/images/dashboard-setup.png)
+
+**Models** loads, adds and removes models, and shows where the experts are read from, each drive's share of the
+reads, and every file Origami keeps:
+
+![The Models tab: three models, and where the loaded model's experts are read from](docs/images/dashboard-models.png)
+
+The fourth tab, **Connect**, has the address and model name an app needs, who can reach Origami, and the log. The
+pictures are of Origami 3.1.0 on the development Mac (3.1.1 looks the same); that Mac's network name and its access
+line are left out of them. Every control: [docs/dashboard.md](docs/dashboard.md).
+
 ## What to expect
+
+**Speed is not one number.** The figures below are single runs under the conditions they name, not promises: the
+same model on the same Mac writes several times faster or slower from one request to the next. What decides it:
+
+- **Cold or warm.** After a start, or after switching models, nothing is in memory: every expert a reply needs is
+  read from the drive once, so the first replies are the slowest.
+- **Which experts are in memory.** A reply close to what the model just did finds most of its experts in memory. A
+  new topic, language or kind of task reads new ones.
+- **The hot copy.** How many of the misses it holds, and how fast its drive is.
+- **Saved prompts.** A follow-up or a repeated prompt skips what was read before, and its first word comes in a
+  fraction of the time. A new long prompt is read in full.
+- **Context and memory.** A longer context, and other apps, leave less memory for experts. When macOS is short of
+  memory Origami shrinks its cache for a while, and that request is slower.
+- **The drive.** Its speed, its cable and port (USB 2, USB 3, Thunderbolt), and whether it throttles or has slowed
+  down on heavily read files.
+- **Quality and thinking.** The faster levels read fewer experts. Thinking writes tokens before the answer starts.
+
+The picture at the top shows it: the same 25-token request waited 4.9 s for its first word and wrote 8.9 tok/s the
+first time, then 0.1 s and 14.5 tok/s on its repeats, with the prompt reused and the experts in memory (Qwen at the
+opt-in `faster` level). The dashboard's Now tab says for every request where its time went and, when it was slow,
+why. `origami bench` measures your own Mac.
+
+### On an M2 Pro with 32 GB
 
 Measured with Origami 3.1 on the development Mac: an M2 Pro with 32 GB on macOS 26, the models on an external NVMe
 drive over Thunderbolt (its files freshly rewritten, see [the model drive got
@@ -142,6 +228,22 @@ the dashboard and the logs say so. Same Mac ([docs/models.md](docs/models.md#low
 | GLM with lte-ai's Strata Q2_K/Q3_K experts file, 20 GB hot copy | 1.73–1.88 tok/s; 39 s to the first token | 12 of 14 (10) | 92% |
 
 DeepSeek variants are not measured yet.
+
+### On a 16 GB M1 MacBook Air
+
+The smallest Mac Origami starts on, with Qwen3.8-Flash-Next (MLX 4-bit) on a portable exFAT SSD over USB 3 that
+reads 0.6–0.7 GB/s, an 8K context, exact mode, and other apps open. Three runs of `origami bench` with Origami 3.1.0
+and 3.1.1 (the last one built on that Mac), each soon after a start, with no hot copy and then 38 GB and 18 GB of it:
+
+| Request | First word | Speed |
+|---|---|---|
+| Short question (23 tokens) | 15–23 s | 0.8–1.1 tok/s writing |
+| Story (31 tokens) | 18–28 s | 1.0–1.3 tok/s writing |
+| 4,650-token document | 142–159 s | 29–33 tok/s reading |
+
+A follow-up that reused its conversation (627 of 657 prompt tokens) answered in 41 s where the first turn took 183 s.
+The first request after a start takes about a minute there even for 20 tokens: every expert is read once at the
+drive's speed.
 
 ## Settings you may need
 

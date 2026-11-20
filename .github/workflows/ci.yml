@@ -107,7 +107,8 @@ jobs:
           "$RUNNER_TEMP/conditions"
   thread-sanitizer:
     runs-on: macos-26
-    timeout-minutes: 75
+    # 63 to over 75 minutes on GitHub's runners, run to run.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Thread Sanitizer checks

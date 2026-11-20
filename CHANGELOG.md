@@ -35,7 +35,8 @@ there with the macOS 27 tools. It fixes what that Mac showed.
   no GPU Origami accepts, so the four scripts that need one throughout are skipped there as steps.
 - Removed: the conversion scripts of the research draft model that 3.1.0 deleted (`scripts/convert_dspark.py`,
   `scripts/dspark_codec.py` and their check), and with them the checks' need for numpy.
-- Docs: the README's table of Macs has the M1 with 16 GB, and the clone address.
+- Docs: the README has a list of what Origami does, pictures of the dashboard and its crane, the numbers measured
+  on the M1 with 16 GB, what makes speed vary from one request to the next, and the clone address.
 
 ## 3.1.0 (2026-11-18, not published)
 
