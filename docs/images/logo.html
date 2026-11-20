@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>html, body { margin: 0; background: transparent; } canvas { display: block; }</style>
+<canvas id="art"></canvas>
+<script>
+// Origami's logo: the dashboard's crane (same facets, light and character ramp) over the name set in folded letters.
+// docs/images/logo-dark.png and logo-light.png are this page in Chrome at twice its size, with a transparent
+// background; add #light to the address for the light one. The page's title says its size in CSS pixels.
+const light = location.hash.includes("light");
+const HI = light ? [20, 20, 18] : [236, 235, 230], LO = light ? [150, 149, 142] : [84, 84, 80], DOT = light ? [150, 149, 142] : [110, 109, 103];
+const ACCENT = light ? [164, 80, 12] : [229, 138, 69];
+const RAMP = " .:-=+*#%@";
+const split = (a, b, tip, lightFace, dark) => { const m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; return [[[a, m, tip], lightFace], [[m, b, tip], dark]]; };
+const CRANE = [
+  ...split([47, 36], [61, 37], [76, 5], 0.70, 0.55),
+  ...split([56, 37], [67, 41], [96, 11], 0.92, 0.72),
+  [[[33, 41], [50, 33], [50, 41]], 1.00], [[[50, 33], [67, 41], [50, 41]], 0.80],
+  [[[33, 41], [50, 41], [50, 49]], 0.68], [[[50, 41], [67, 41], [50, 49]], 0.52],
+  ...split([34, 41], [44, 37], [10, 9], 0.98, 0.76),
+  [[[10, 9], [3, 15], [13.5, 13]], 1.00],
+  ...split([40, 37], [58, 37], [32, 0], 1.00, 0.84),
+];
+function inside(x, y, poly) {
+  let hit = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [x1, y1] = poly[i], [x2, y2] = poly[j];
+    if ((y1 > y) !== (y2 > y) && x < ((x2 - x1) * (y - y1)) / (y2 - y1) + x1) hit = !hit;
+  }
+  return hit;
+}
+function edge(x, y, poly) {
+  let best = 1e9;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [x1, y1] = poly[j], [x2, y2] = poly[i], dx = x2 - x1, dy = y2 - y1;
+    const t = Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)));
+    best = Math.min(best, Math.hypot(x - x1 - t * dx, y - y1 - t * dy));
+  }
+  return best;
+}
+const noise = (c, r) => { const v = Math.sin(c * 127.1 + r * 311.7) * 43758.5453; return v - Math.floor(v); };
+const FONT = {
+  O: [".####.", "##..##", "##..##", "##..##", "##..##", "##..##", ".####."],
+  R: ["#####.", "##..##", "##..##", "#####.", "##.##.", "##..##", "##..##"],
+  I: ["######", "..##..", "..##..", "..##..", "..##..", "..##..", "######"],
+  G: [".#####", "##....", "##....", "##.###", "##..##", "##..##", ".####."],
+  A: [".####.", "##..##", "##..##", "######", "##..##", "##..##", "##..##"],
+  M: ["##...##", "###.###", "#######", "##.#.##", "##...##", "##...##", "##...##"],
+};
+const WORD = "ORIGAMI", PX = 2, GAP = 3;
+const starts = [], widths = [...WORD].map((ch) => FONT[ch][0].length * PX);
+widths.reduce((x, w, i) => (starts[i] = x, x + w + GAP), 0);
+const cols = 118, craneScale = 0.92, craneRows = Math.ceil(52 * craneScale / 2), craneTop = 2, wordTop = craneTop + craneRows + 2, rows = wordTop + 7 + 3;
+const size = 13, canvas = document.getElementById("art"), ctx = canvas.getContext("2d"), dpr = window.devicePixelRatio || 1;
+ctx.font = size + 'px ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace';
+const cw = ctx.measureText("M").width, lh = size * 1.18;
+const width = Math.ceil(cols * cw), height = Math.ceil(rows * lh);
+canvas.style.width = width + "px"; canvas.style.height = height + "px";
+canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+ctx.font = size + 'px ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace'; ctx.textBaseline = "top";
+const left = Math.round(cols / 2 - 50 * craneScale), wordWidth = starts[WORD.length - 1] + widths[WORD.length - 1], wordLeft = Math.round((cols - wordWidth) / 2);
+const ink = (k, from = LO, to = HI) => "rgb(" + from.map((v, i) => Math.round(v + (to[i] - v) * k)).join(",") + ")";
+function letterCell(c, r) {
+  const x = c - wordLeft, y = r - wordTop;
+  if (x < 0 || y < 0 || y >= 7 || x >= wordWidth) return null;
+  const n = starts.findLastIndex((start) => x >= start), lx = x - starts[n];
+  if (lx >= widths[n] || FONT[WORD[n]][y][Math.floor(lx / PX)] !== "#") return null;
+  // Each letter is folded along its diagonal: the upper face takes the light, the lower one is the paper's other side.
+  const u = lx / (widths[n] - 1), v = y / 6, upper = u + v < 1.02;
+  return { k: (upper ? 0.96 : 0.86) + 0.1 * (0.5 - (u + v) / 2) + (noise(c, r) - 0.5) * 0.12 - (Math.abs(u + v - 1.02) < 0.08 ? 0.3 : 0), upper };
+}
+for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+  const x = (c + 0.5 - left) / craneScale, y = ((r + 0.5 - craneTop) * 2) / craneScale;
+  let face = null;
+  for (const f of CRANE) if (inside(x, y, f[0])) face = f;
+  const letter = letterCell(c, r);
+  let k = null, color = null;
+  if (face) {
+    const crease = edge(x, y, face[0]) < 0.9 / craneScale, fall = 0.1 * (0.5 - (x + y) / 150);
+    k = Math.max(0.14, face[1] + fall - (crease ? 0.28 : 0) + (noise(c, r) - 0.5) * 0.1);
+    // A band of light crossing the paper, as on the dashboard while a request runs.
+    k = Math.min(1, k + 0.3 * Math.exp(-(((x + y * 0.6) - 62) ** 2) / 160));
+  } else if (letter) {
+    k = letter.k; color = letter.upper ? null : ACCENT;
+  }
+  if (k != null) {
+    k = Math.min(1, Math.max(0, k));
+    ctx.fillStyle = color ? ink(0.35 + 0.65 * k, LO, color) : ink(k);
+    ctx.fillText(RAMP[Math.max(1, Math.min(RAMP.length - 1, Math.round(k * (RAMP.length - 1))))], c * cw, r * lh);
+  } else if (c % 2 === 0 && r % 2 === 0) {
+    const fade = Math.min(1, Math.min(c, cols - 1 - c) / (cols * 0.14), Math.min(r, rows - 1 - r) / (rows * 0.2));
+    const glow = Math.max(0, 1 - Math.hypot((c - cols / 2) / (cols * 0.62), (r - rows / 2) / (rows * 0.62))) * fade;
+    if (glow > 0.05) { ctx.fillStyle = "rgba(" + DOT.join(",") + "," + Math.min(0.8, glow).toFixed(3) + ")"; ctx.fillText(".", c * cw, r * lh); }
+  }
+}
+document.title = width + "x" + height;
+</script>

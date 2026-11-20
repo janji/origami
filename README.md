@@ -1,6 +1,12 @@
 # Origami
 
-<p align="center"><img src="docs/images/crane.png" width="600" alt="Origami's paper crane, drawn in characters as on its dashboard"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/logo-light.png">
+    <img src="docs/images/logo-light.png" width="660" alt="Origami: a paper crane over the name, drawn in characters">
+  </picture>
+</p>
 
 Origami runs mixture-of-experts language models that are much larger than your Mac's memory, on Apple Silicon.
 The idea: in these models each token uses only a few "experts" out of hundreds. Origami keeps the always-used
