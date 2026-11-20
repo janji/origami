@@ -220,23 +220,24 @@ DeepSeek variants are not measured yet.
 
 ### Next to Strata, on the same file
 
-[Strata](https://github.com/Niko1221/Strata) v0.2.17 and Origami 3.1.2 on this Mac on 20 November 2026, both reading
-the experts from the same file (ISTA-DASLab's GSQ-RCO IQ3_S GGUF of Qwen3.8-Flash-Next) on the same Thunderbolt
-drive, with no experts' copy and Origami held to the memory Strata took (12.5 GB). An 8K context, greedy, thinking
-off, 320 tokens written, each engine started fresh:
+[Strata](https://github.com/Niko1221/Strata) v0.2.17 and Origami on this Mac, both reading the experts from the same
+file (ISTA-DASLab's GSQ-RCO IQ3_S GGUF of Qwen3.8-Flash-Next) on the same Thunderbolt drive, with no experts' copy
+and Origami held to the memory Strata took (12.5 GB). An 8K context, greedy, thinking off, 320 tokens written, each
+engine started fresh. Strata and Origami 3.1.2 were measured on 20 November 2026:
 
-| | Strata v0.2.17 | Origami 3.1.2 |
-|---|---|---|
-| Writing | 4.1–4.2 tok/s | 6.1 tok/s |
-| First token, 1,076-token prompt | 23.1 s | 19.8 s |
-| First token, 7,426-token prompt | 115.8 s | 54.3 s |
-| First token, the same 1K prompt again | 1.35 s | 1.38 s |
-| First token, the same 8K prompt again | 1.18 s | 5.10 s |
-| Peak memory | 12.8 GB | 9.9 GB |
+| | Strata v0.2.17 | Origami 3.1.2 | Origami 3.1.3 |
+|---|---|---|---|
+| Writing | 4.1–4.2 tok/s | 6.1 tok/s | as 3.1.2 |
+| First token, 1,076-token prompt | 23.1 s | 19.8 s | as 3.1.2 |
+| First token, 7,426-token prompt | 115.8 s | 54.3 s | as 3.1.2 |
+| First token, the same 1K prompt again | 1.35 s | 1.38 s | **0.15 s** |
+| First token, the same 8K prompt again | 1.18 s | 5.10 s | **0.16 s** |
+| Peak memory | 12.8 GB | 9.9 GB | as 3.1.2 |
 
-The two repeated-prompt rows were Origami waiting for the reply's saved prompts to reach the drive. Origami 3.1.3
-no longer waits there: 0.15 s for both prompts, measured the next day with the 4-bit model and without running
-Strata again.
+In 3.1.2 a repeated prompt waited for the reply's saved prompts to reach the drive; 3.1.3 changes that and nothing
+else on this path. Its two times are from the next day, with the same settings and prompts but the 4-bit model
+instead of the IQ3_S file, twice each, with 3.1.2 run in turn beside it (1.5–9.8 s); "as 3.1.2" rows were not
+measured again, and Strata was not run again.
 
 One run per engine and cell: the repeat was spoiled by the drive slowing down. The Mac was short of memory (4.9 GB
 of swap in use before the start), so both engines are slower here than on a quiet Mac. Strata's instructions put the
