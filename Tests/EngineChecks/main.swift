@@ -633,6 +633,7 @@ let tests: [(String, () throws -> Void)] =
         ("pinned_reductions_admission", pinnedReductionsRejectInvalidOrUnadmittedWork),
         ("prompt_cache_save_queue", PrefixReuseSelfChecks.saveQueueOrderAndBarrier),
         ("prompt_cache_save_wait_bounded", PrefixReuseSelfChecks.saveDrainBounded),
+        ("prompt_cache_saves_deferred", PrefixReuseSelfChecks.savesDeferred),
         ("prefill_read_scope_arithmetic_boundaries", prefillReadScopesPreserveArithmeticTilesAndTails),
         ("pinned_rms_resident_buffer_geometry", pinnedRMSGeometryAndResidentQuantizedBuffers),
         ("assembled_layer_continuation", assembledLayersPreserveContinuation),

@@ -144,6 +144,49 @@ package enum PrefixReuseSelfChecks {
         return url
     }
 
+    /// A request that continues the conversation from memory puts the saves off (`finishSaves(deferring:)`): none is
+    /// written before `resumeSaves`, then they run in order; one whose image the conversation dropped meanwhile is skipped.
+    package static func savesDeferred() throws {
+        let ledger = try MemoryLedger(ceiling: 4_000_000_000, transientMargin: 0)
+        let parent = try folder()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try autoreleasepool {
+            let cache = try cache(parent.appendingPathComponent("0123456789abcdef"), ledger)
+            let controller = try PrefixReuseController(
+                identity: identity(), ledger: ledger,
+                memoryBytes: try ConversationGeometry(context: 8192).conversationBytes, promptCache: cache, conversationContext: 8192)
+            let kept = (0..<600).map { Int64($0 % 1000 + 1) }
+            let dropped = kept + [7]
+            let keptImage = try image(ledger, ids: kept)
+            var droppedImage: ModelCheckpoint? = try image(ledger, ids: dropped)
+            // The queue is held at a running item while the saves are queued behind it and then put off.
+            let gate = DispatchSemaphore(value: 0)
+            let after = DispatchSemaphore(value: 0)
+            controller.afterSaves { gate.wait() }
+            try controller.persistConversation(droppedImage!)
+            try controller.persistConversation(keptImage)
+            controller.afterSaves { after.signal() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { gate.signal() }
+            try controller.finishSaves(deferring: true)
+            try require(
+                !cache.contains(kept[...]) && !cache.contains(dropped[...]) && after.wait(timeout: .now()) == .timedOut,
+                "Saves put off were written")
+            droppedImage = nil
+            controller.resumeSaves()
+            try controller.finishSaves()
+            try require(
+                cache.contains(kept[...]) && !cache.contains(dropped[...]) && controller.statistics.saves == 1
+                    && after.wait(timeout: .now()) == .success,
+                "Saves put off did not run after the request (\(controller.statistics.saves) saved)")
+            // Whatever waits for the saves ends the putting off.
+            try controller.finishSaves(deferring: true)
+            controller.afterSaves { after.signal() }
+            try controller.drainSaves()
+            try require(after.wait(timeout: .now()) == .success, "A wait for the saves left them put off")
+        }
+        try require(ledger.snapshot().reserved == 0, "Deferred save fixture leaked a reservation")
+    }
+
     /// A saved prompt that does not fit the conversation's arena (or meets a drive error) stays saved for a later
     /// request; one that fails its checks is dropped.
     /// A saved image holding fast decode rows (left by a server that allowed fast) is never reused by an exact request,

@@ -30,15 +30,27 @@ public final class PrefixReuseController: @unchecked Sendable {
     private let promptCache: PromptCache?
     // Asynchronous writes: prompt-cache saves run on one serial queue after the response has ended. The next
     // request, cache commands and shutdown wait for them first (`finishSaves`, `drainSaves`), so a save never
-    // overlaps another request's work and the memory plan is unchanged.
+    // overlaps another request's work and the memory plan is unchanged. A request that continues the conversation
+    // from memory does not wait: it puts them off until it ends (`finishSaves(deferring:)`, `resumeSaves`).
     private let saveQueue = DispatchQueue(label: "origami.prompt-cache.saves", qos: .userInitiated)
     private let pendingSaves = DispatchGroup()
     private let saveLock = NSLock()
     private var finished: (saves: UInt64, failures: UInt64) = (0, 0)
     /// The save the queue runs now: when it started and how long it may take (under `saveLock`).
     private var running: (started: DispatchTime, bound: Double)?
-    /// A captured image is immutable; the queue only reads it.
-    private struct QueuedSave: @unchecked Sendable { let image: ModelCheckpoint, kind: String? }
+    /// A captured image is immutable; the queue only reads it. A save put off keeps its image only while the
+    /// conversation does (`later`), so the request it gave way to never runs beside a reader it cannot evict.
+    private final class QueuedSave: @unchecked Sendable {
+        var image: ModelCheckpoint?
+        weak var later: ModelCheckpoint?
+        let kind: String?
+        init(image: ModelCheckpoint, kind: String?) { (self.image, self.kind) = (image, kind) }
+    }
+    /// Queued work: false when it stopped because saves are put off (`stopped`), to run again from `resumeSaves`.
+    private typealias Work = @Sendable (_ stopped: () -> Bool) -> Bool
+    /// Saves are put off, and the work waiting for `resumeSaves`, in order (under `saveLock`).
+    private var deferring = false
+    private var deferred: [(bytes: UInt64, work: Work)] = []
 
     /// The last decision's name in `statistics.reasons` / `lastDecision`.
     private enum Reason: String {
@@ -135,6 +147,8 @@ public final class PrefixReuseController: @unchecked Sendable {
             record(.liveConversationHit)
             return
         }
+        // Saves this request put off, expecting to continue from memory: the disk is asked after all, so they are written first.
+        try finishSaves()
         guard let promptCache else {
             statistics.misses += 1
             record(.diskUnavailable)
@@ -217,12 +231,19 @@ public final class PrefixReuseController: @unchecked Sendable {
         let save = QueuedSave(image: image, kind: kind)
         let tokens = image.frontier.consumedTokenCount
         let bytes = (try? PagedCheckpointFormat.layout(capacity: tokens, tokens: tokens, hasLogits: image.nextLogits != nil).bytes) ?? 0
-        afterSaves(bytes: UInt64(bytes)) { [self] in
+        // The reply has ended: the saves it put off run before its own.
+        resumeSaves()
+        enqueue(bytes: UInt64(bytes)) { [self] stopped in
+            // Put off earlier, and the conversation dropped the image since: its newer images are saved instead.
+            guard let image = save.image ?? save.later else { return true }
             do {
-                try promptCache!.write(save.image, kind: save.kind)
+                try promptCache!.write(image, kind: save.kind, shouldContinue: { !stopped() })
                 saveLock.lock()
                 finished.saves += 1
                 saveLock.unlock()
+            } catch is IOOperationCancelled {
+                (save.later, save.image) = (image, nil)
+                return false
             } catch {
                 saveLock.lock()
                 finished.failures += 1
@@ -230,6 +251,7 @@ public final class PrefixReuseController: @unchecked Sendable {
                 // Paused for disk space: the cache logged that once.
                 if promptCache!.savesPaused == nil { Self.report("durable conversation save failed", error) }
             }
+            return true
         }
         record(.saveQueued)
     }
@@ -237,13 +259,36 @@ public final class PrefixReuseController: @unchecked Sendable {
     /// Runs `work` on the save queue after every save queued before it (X-Origami-Keep pins an entry once it is written).
     /// `bytes`: what it writes, which bounds how long a waiter waits for it (`drainSaves`).
     package func afterSaves(bytes: UInt64 = 0, _ work: @escaping @Sendable () -> Void) {
+        enqueue(bytes: bytes) { stopped in
+            guard !stopped() else { return false }
+            work()
+            return true
+        }
+    }
+    private func enqueue(bytes: UInt64, _ work: @escaping Work) {
         pendingSaves.enter()
         saveQueue.async { [self] in
             saveLock.withLock { running = (.now(), Self.saveBound(bytes: bytes)) }
-            work()
-            saveLock.withLock { running = nil }
+            let done = work { [self] in saveLock.withLock { deferring } }
+            // Stopped: it waits for `resumeSaves`, or runs again at once when that came meanwhile.
+            let again = saveLock.withLock { () -> Bool in
+                running = nil
+                if !done, deferring { deferred.append((bytes, work)) }
+                return !done && !deferring
+            }
+            if again { enqueue(bytes: bytes, work) }
             pendingSaves.leave()
         }
+    }
+    /// Ends `finishSaves(deferring:)`: the work put off runs, in its order. The request's end, and whatever waits for
+    /// the saves. Any thread.
+    package func resumeSaves() {
+        let waiting = saveLock.withLock { () -> [(bytes: UInt64, work: Work)] in
+            deferring = false
+            defer { deferred = [] }
+            return deferred
+        }
+        for item in waiting { enqueue(bytes: item.bytes, item.work) }
     }
     /// How long a save of `bytes` may run before its drive is taken for stopped (ROADMAP R2): as a demand read of as
     /// many bytes at 1 GB/s (`ExpertReadStall`: 20 times that, at least its floor), so only a drive writing under
@@ -253,6 +298,10 @@ public final class PrefixReuseController: @unchecked Sendable {
     /// waiter with `drive_stalled` (and every later one at once until it ends): a write cannot be cancelled, and the
     /// next request must not run beside it. Any thread.
     package func drainSaves(cancellation: GenerationControl? = nil) throws {
+        resumeSaves()
+        try waitForSaves(cancellation: cancellation)
+    }
+    private func waitForSaves(cancellation: GenerationControl?) throws {
         while pendingSaves.wait(timeout: .now() + 0.2) == .timedOut {
             try cancellation?.check()
             let late = saveLock.withLock {
@@ -269,8 +318,11 @@ public final class PrefixReuseController: @unchecked Sendable {
         }
     }
     /// The next request's first step, on the thread that owns `statistics`: waits for the saves, then counts them.
-    package func finishSaves(cancellation: GenerationControl? = nil) throws {
-        try drainSaves(cancellation: cancellation)
+    /// `deferring` (the request continues the conversation from memory, so it needs none of them): the saves are put
+    /// off instead, the running one stopping at its next page, until `resumeSaves`; the wait is only for that stop.
+    package func finishSaves(cancellation: GenerationControl? = nil, deferring: Bool = false) throws {
+        if deferring { saveLock.withLock { self.deferring = true } } else { resumeSaves() }
+        try waitForSaves(cancellation: cancellation)
         saveLock.lock()
         let done = finished
         finished = (0, 0)

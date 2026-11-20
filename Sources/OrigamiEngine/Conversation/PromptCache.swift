@@ -465,7 +465,8 @@ public final class PromptCache {
     }
 
     /// Saves `image` as `kind` ("system" for a system-prompt snapshot; nil for prompt and conversation images).
-    package func write(_ image: ModelCheckpoint, kind: String? = nil) throws {
+    /// `shouldContinue` false stops the save at its next page (`IOOperationCancelled`), the slot's old image kept.
+    package func write(_ image: ModelCheckpoint, kind: String? = nil, shouldContinue: () -> Bool = { true }) throws {
         guard savesOff == nil else { return }
         try Self.refuseAfterLostGPU()
         let ids = image.consumedIDs[...]
@@ -503,7 +504,7 @@ public final class PromptCache {
             lock.lock()
             let base = lastWritten.flatMap { $0 != slot ? slots[$0] : nil }
             lock.unlock()
-            try slots[slot].write(image, base: base)
+            try slots[slot].writePaged(image, base: base, shouldContinue: shouldContinue)
             pause(nil)
             settle(attempt, slot: slot, nil)
         } catch {
@@ -821,7 +822,10 @@ public final class PromptCache {
     }
     private func settle(_ tokens: [Int32], slot: Int, _ error: Error?) {
         lock.withLock {
-            guard let n = attempts.lastIndex(where: { $0.slot == slot && $0.fate == .pending && $0.ids == tokens }) else { return }
+            // A save put off stays pending (`save_not_finished`) until it runs again.
+            guard !(error is IOOperationCancelled),
+                let n = attempts.lastIndex(where: { $0.slot == slot && $0.fate == .pending && $0.ids == tokens })
+            else { return }
             attempts[n].fate =
                 error == nil ? .saved : (error as? EngineError)?.code == "prompt_cache_disk_space" ? .skipped : .failed
         }

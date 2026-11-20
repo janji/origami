@@ -95,6 +95,14 @@ Shipped (CHANGELOG.md; the record behind it is in 0.5, item 11a). Seen at its de
 
 - **A hard link made to a model file gives the model another identity.** The fingerprint binds each file's change time (`LocalModelIdentity.file`), and `ln` changes it: a low-bit variant whose experts file was hard-linked into another folder lost its counts, saved prompts, memory measurement and would have lost its hot copy (all keyed by the fingerprint; the files stay on disk under the old key). Removing the link changes it again. Either leave the change time out when size, modification time, birth time and inode are unchanged, or re-key what the old fingerprint owns at the next start, as `origami refresh` does. S.
 
+## 0.10 3.1.3: the next turn does not wait for the saves (2026-11-21)
+
+Shipped (CHANGELOG.md). Found by a comparison with Strata v0.2.17 on 2026-11-20, which answered a repeated 8K prompt in 1.2 s against Origami's 5.1 s: the time was the wait for the previous reply's prompt-cache saves. Left:
+
+- **A save put off can be skipped.** It keeps its image only while the conversation does, so a state the next request's growth evicts (an older snapshot, such as the system prompt's) is not written, and a later new chat reads that part again. *Reopens when* a request's record shows such a loss (`restore_fallbacks`).
+- **GLM and DeepSeek** save through `PromptCache.writeState` inside the request and are unchanged; whether their next turn waits is not measured. S.
+- **A new chat right after a reply** still waits for the saves (it may need them from disk, and its growth may evict what they hold).
+
 ## 1. Phase 0: done
 
 H1 and H2 were done on 2026-11-10, H3 on 2026-11-11. H3's screen on the real GLM and DeepSeek (one cold start per variant, replies identical to control everywhere) found no experiment switch that beats the default by 3%: early prefetch, prefetch into allocated slots, arriving-first, read lanes at any worker count, buffered reads, the protected cache, compact shrink, the admission variants, grouped prefill gate/up, Engram overlap and memo are neutral or worse; adaptive prefetch off, warm-after-restore and one prompt slice hurt. They are deleted (S4). Not screened: Qwen's switches, DeepSeek's restore and startup looks, the draft items (parked), and O18, which refuses exact mode. The screen's own findings were fixed and confirmed on the real models the same day (the hedge rule, the restart reply, the second long conversation); what is left of them is parked in section 7 (drive slowdown, GLM resume points). Baselines on 3.1 (short runs, 8 GB copy): first token on a 2,500-token prompt GLM 80 s, DeepSeek 149 s, Qwen 37 s; 200-token decode 0.72, 1.08 and 6.59 tok/s.

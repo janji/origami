@@ -17,7 +17,7 @@ It is one native binary (Swift and Metal, no Python, no MLX) with a local server
 and Ollama APIs, and a dashboard in the browser.
 
 **New here?** Start with [the guide](docs/guide.md): install, first run, every feature in short, and what is planned.
-The current release is 3.1.2 ([what changed](CHANGELOG.md)).
+The current release is 3.1.3 ([what changed](CHANGELOG.md)).
 
 ![The dashboard's Now tab: the model, its speed, where the last request's time went, where experts were read from, memory and health](docs/images/dashboard-now.png)
 
@@ -217,6 +217,32 @@ the dashboard and the logs say so. Same Mac ([docs/models.md](docs/models.md#low
 | GLM with lte-ai's Strata Q2_K/Q3_K experts file, 20 GB hot copy | 1.73–1.88 tok/s; 39 s to the first token | 12 of 14 (10) | 92% |
 
 DeepSeek variants are not measured yet.
+
+### Next to Strata, on the same file
+
+[Strata](https://github.com/Niko1221/Strata) v0.2.17 and Origami 3.1.2 on this Mac on 20 November 2026, both reading
+the experts from the same file (ISTA-DASLab's GSQ-RCO IQ3_S GGUF of Qwen3.8-Flash-Next) on the same Thunderbolt
+drive, with no experts' copy and Origami held to the memory Strata took (12.5 GB). An 8K context, greedy, thinking
+off, 320 tokens written, each engine started fresh:
+
+| | Strata v0.2.17 | Origami 3.1.2 |
+|---|---|---|
+| Writing | 4.1–4.2 tok/s | 6.1 tok/s |
+| First token, 1,076-token prompt | 23.1 s | 19.8 s |
+| First token, 7,426-token prompt | 115.8 s | 54.3 s |
+| First token, the same 1K prompt again | 1.35 s | 1.38 s |
+| First token, the same 8K prompt again | 1.18 s | 5.10 s |
+| Peak memory | 12.8 GB | 9.9 GB |
+
+The two repeated-prompt rows were Origami waiting for the reply's saved prompts to reach the drive. Origami 3.1.3
+no longer waits there: 0.15 s for both prompts, measured the next day with the 4-bit model and without running
+Strata again.
+
+One run per engine and cell: the repeat was spoiled by the drive slowing down. The Mac was short of memory (4.9 GB
+of swap in use before the start), so both engines are slower here than on a quiet Mac. Strata's instructions put the
+model on the internal SSD; here it was on the external drive for both. With each engine as it installs (Strata with
+its experts' copy on the internal SSD, Origami with automatic memory and no hot copy) Strata wrote 4.2–4.4 tok/s and
+Origami 6.3–6.7. The replies' quality was not scored, and prompts longer than 8K were not compared.
 
 ### On a 16 GB M1 MacBook Air
 

@@ -4,6 +4,18 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.3 (2026-11-21)
+
+**Replies:** unchanged.
+
+- **Qwen: the next turn of a conversation no longer waits for the last reply's saved prompts to be written.** A
+  request that arrived within seconds of the previous reply (an agent's next step, a regenerated reply, a repeated
+  prompt) waited for up to three prompt-cache images to reach the drive: 1.2 to 4.0 s before its first token on an
+  M2 Pro with the data folder on an external drive. A request that continues the conversation from memory now puts
+  those saves off until it has answered; any other request waits as before. Measured on the 4-bit model, old and new
+  build in turn: a repeated 1K or 8K prompt's first token after 0.15 s, against 1.5 to 9.8 s. New check:
+  `prompt_cache_saves_deferred`.
+
 ## 3.1.2 (2026-11-20)
 
 **Replies:** unchanged.

@@ -246,11 +246,6 @@ public final class NativeServingBackend: ServingBackend, @unchecked Sendable {
             throw ServingFailure.promptEncoding(error)
         }
         let encodingEnded = ProcessInfo.processInfo.systemUptime
-        // CPU-only prompt preparation can overlap the preceding immutable save.
-        // Drain before touching live model/cache state, keeping retained readers
-        // within the existing conversation quota and avoiding competing SSD reads.
-        try driver.prefixReuse?.finishSaves(cancellation: cancellation)
-        let savesEnded = ProcessInfo.processInfo.systemUptime
         var images: PromptImages?
         var decoded: [PromptImage] = []
         if !urls.isEmpty {
@@ -279,16 +274,29 @@ public final class NativeServingBackend: ServingBackend, @unchecked Sendable {
         }
         request.maximumTokens = try request.outputBudget(promptTokens: prompt.count)
         try cancellation.check()
+        let isolated = request.tune?.qwenPrefillScope != nil || request.teacherTokens != nil
+        // CPU-only prompt preparation can overlap the preceding immutable save.
+        // Drain before touching live model/cache state, keeping retained readers
+        // within the existing conversation quota and avoiding competing SSD reads.
+        // A request that continues the conversation from memory puts the saves off until it ends instead (`retire`).
+        let savesStarted = ProcessInfo.processInfo.systemUptime
+        try driver.prefixReuse?.finishSaves(
+            cancellation: cancellation,
+            deferring: !isolated && driver.prefixReuse?.conversation?.continues(prompt, images: images?.keys ?? []) == true)
+        let savesEnded = ProcessInfo.processInfo.systemUptime
         let state: SequenceState
         let stateStarted = ProcessInfo.processInfo.systemUptime
         do {
             state = try driver.prepareState(
                 prompt: prompt, maximumOutput: request.maximumTokens, quality: request.quality, images: images?.keys ?? [],
-                isolatedPrefill: request.tune?.qwenPrefillScope != nil || request.teacherTokens != nil)
-        } catch { throw ServingFailure.from(error) }
+                isolatedPrefill: isolated)
+        } catch {
+            driver.prefixReuse?.resumeSaves()
+            throw ServingFailure.from(error)
+        }
         state.images = images
         let stages = [
-            "prompt_encoding": encodingEnded - encodingStarted, "prior_save_wait": savesEnded - encodingEnded,
+            "prompt_encoding": encodingEnded - encodingStarted, "prior_save_wait": savesEnded - savesStarted,
             "state_prepare": ProcessInfo.processInfo.systemUptime - stateStarted,
         ]
         let token = try admission.begin()
@@ -364,6 +372,7 @@ public final class NativeServingBackend: ServingBackend, @unchecked Sendable {
         admission.retire(token) {
             driver.executor.finish(state)
             driver.executor.shouldContinue = { true }
+            driver.prefixReuse?.resumeSaves()
         }
     }
 

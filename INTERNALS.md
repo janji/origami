@@ -1607,13 +1607,18 @@ headers at once and a `: keepalive` comment every 10 s.
 
 `NativeServingBackend.prepare` holds the backend lock for its steps:
 
-1. wait up to 30 s for a predecessor still unwinding, then for the previous reply's prompt-cache saves
-   (`finishSaves`);
+1. wait up to 30 s for a predecessor still unwinding;
 2. refuse fast mode where `allow_fast` is false;
 3. encode the prompt (`ServingPrompt`, `TokenizerStack`);
 4. decode and expand the images (`PromptImage`);
 5. clamp the output budget to the room the prompt leaves (a prompt that leaves none is refused in Anthropic's
    wording);
+   then wait for the previous reply's prompt-cache saves (`finishSaves`). A request that continues the conversation
+   from memory (`PersistentConversation.continues`: the live timeline or the last prompt's image is a prefix of it)
+   does not wait: the running save stops at its next page and the saves are put off until the request ends
+   (`resumeSaves`, from the reply's own saves or `retire`), each keeping its image only while the conversation does.
+   A request put off for and then started cold after all writes them before it asks the disk (`restoreConversation`).
+   Check: `prompt_cache_saves_deferred`;
 6. `GenerationDriver.prepareState`: `PersistentConversation.prepare` picks the live timeline if it is a prefix of the
    new prompt, else the longest in-memory frontier that is, else a cold state; then `SerialExecutor.begin` or
    `resume` sizes the expert cache for prefill;

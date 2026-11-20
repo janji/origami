@@ -184,6 +184,18 @@ public final class PersistentConversation {
         }
     }
 
+    /// The request continues this conversation from memory, at or after its last prompt: the live timeline or the
+    /// last prompt's image is a prefix of it. Such a request needs no saved prompt from disk, and the frontiers its
+    /// growth may evict are earlier states of the conversation it saves again at its end.
+    package func continues(_ prompt: [Int], images: [ImageKey] = []) -> Bool {
+        let ids = prompt.map(Int64.init)
+        func matches(_ saved: [Int64], _ keys: [ImageKey]) -> Bool {
+            !saved.isEmpty && ids.starts(with: saved) && ImageKey.below(keys, saved.count) == ImageKey.below(images, saved.count)
+        }
+        if let state = live, state.valid, state.tokenCount == consumedIDs.count, matches(consumedIDs, timelineImages) { return true }
+        return protectedPrompt.map { matches($0.consumedIDs, $0.images) } ?? false
+    }
+
     /// Isolated prefill tuning bypasses even a complete matching image, without removing unrelated cached images.
     package func reusableFrontier(for ids: [Int64], images: [ImageKey] = [], exactTimeline: Bool = false, reuse: Bool = true) throws
         -> ModelCheckpoint?
