@@ -1,0 +1,121 @@
+# Model-free checks on every push: debug and release builds without warnings in Origami's sources, the CLI contract,
+# the dashboard control checks (a real server on its own port and data folder), engine-checks (with the fuzz replay
+# checks), short fuzzing runs, and the Python and standalone Swift checks; a separate job runs the Thread Sanitizer
+# checks. No model is downloaded. The build needs the macOS 26 SDK (Metal 4). On a runner whose GPU cannot run
+# Origami's kernels (GitHub's virtual machines), a check that fails after asking for a Metal device reports "skipped"
+# with the reason; any other failure fails the run, and so does a skip that is neither for the GPU nor for an outside
+# input named in docs/switches.md. The script checks that need a GPU throughout are skipped there as steps (`GPU`).
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+# GitHub's named bash shell runs `bash -eo pipefail`: a build piped through `tee` fails its step when the build fails.
+defaults:
+  run:
+    shell: bash
+jobs:
+  checks:
+    runs-on: macos-26
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          swift --version
+          node --version
+          python3 --version
+      - name: Debug build (no warnings in Origami's sources)
+        run: |
+          swift build --force-resolved-versions 2>&1 | tee build-debug.log
+          ! grep "warning:" build-debug.log | grep -v "/.build/"
+      # Warnings are errors for Origami's own targets; the dependencies are built with warnings suppressed, as SwiftPM
+      # always builds them. The grep also catches a C warning in CExactIO.
+      - name: Release build (warnings are errors in Origami's sources)
+        run: |
+          swift build -c release --force-resolved-versions -Xswiftc -warnings-as-errors 2>&1 | tee build-release.log
+          ! grep "warning:" build-release.log | grep -v "/.build/"
+      # A compiler fault that made a build crash on its first request (see the script): read from the binaries themselves.
+      - name: Error register check
+        if: ${{ !cancelled() }}
+        run: python3 -B Tests/error-register-check.py .build/release/origami .build/release/engine-checks
+      # GitHub's virtual Macs have a paravirtual GPU, which Origami refuses. engine-checks skips what needs a real one
+      # check by check; the scripts that start servers and plan a model's memory need one throughout and are skipped
+      # there as whole steps. Run them on an Apple-silicon Mac before a release (AGENTS.md).
+      - name: GPU
+        id: gpu
+        if: ${{ !cancelled() }}
+        run: |
+          said=$(ORIGAMI_CONFIG="$RUNNER_TEMP/gpu-probe.json" ORIGAMI_DATA_DIR="$RUNNER_TEMP/gpu-probe" .build/release/origami doctor 2>&1 || true)
+          case "$said" in
+            *"is not supported: Origami needs an Apple-silicon GPU"*)
+              echo "supported=false" >> "$GITHUB_OUTPUT"
+              echo "No supported GPU on this runner: the command-line, dashboard, memory-search and ingress checks are skipped." ;;
+            *) echo "supported=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: CLI checks
+        if: ${{ !cancelled() && steps.gpu.outputs.supported == 'true' }}
+        run: Tests/cli-checks.sh .build/release/origami
+      - name: Dashboard control checks
+        if: ${{ !cancelled() && steps.gpu.outputs.supported == 'true' }}
+        run: python3 -B Tests/dashboard-control-checks.py .build/release/origami
+      - name: Engine checks
+        if: ${{ !cancelled() }}
+        run: |
+          .build/release/engine-checks > engine-checks.json || status=$?
+          python3 Tests/engine-checks-report.py engine-checks.json || status=1
+          exit ${status:-0}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-checks
+          path: engine-checks.json
+      # The replay checks above keep each fuzz target's seeds and regression inputs; these runs mutate further.
+      - name: Fuzz (30 s per target)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz"
+          for target in gguf safetensors http template socket; do
+            .build/release/engine-checks --fuzz "$target" --seconds 30 --seed "$GITHUB_RUN_NUMBER" --out "$RUNNER_TEMP/fuzz" || exit 1
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-findings
+          path: ${{ runner.temp }}/fuzz
+      - name: Python checks
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -B Tests/feature-screen-checks.py
+          python3 -B -m unittest discover -s Tools/bench
+          python3 -B Tests/tuning-flow-checks.py .build/release/origami
+          python3 -B Tests/tuning-job-checks.py --output "$RUNNER_TEMP/tuning-job-checks"
+          python3 -B Tests/auto-measure-checks.py --output "$RUNNER_TEMP/auto-measure-checks"
+          python3 -B Tests/family-status-observations-checks.py
+          python3 -B Tests/front-proxy-metrics-checks.py
+      - name: Python checks that need the GPU
+        if: ${{ !cancelled() && steps.gpu.outputs.supported == 'true' }}
+        run: |
+          python3 -B Tests/tune-memory-checks.py .build/release/origami
+          python3 -B Tests/front-ingress-checks.py .build/release/origami
+      - name: Standalone Swift checks
+        if: ${{ !cancelled() }}
+        run: |
+          swiftc -parse-as-library -o "$RUNNER_TEMP/provenance" Tests/observation-provenance-checks.swift Sources/origami/ObservationProvenance.swift
+          "$RUNNER_TEMP/provenance"
+          swiftc -parse-as-library -o "$RUNNER_TEMP/conditions" Tests/tuning-conditions-checks.swift Sources/origami/TuningConditions.swift
+          "$RUNNER_TEMP/conditions"
+  thread-sanitizer:
+    runs-on: macos-26
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Thread Sanitizer checks
+        run: Tests/tsan-checks.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tsan-report
+          path: |
+            .build/tsan/tsan-report.txt
+            .build/tsan/tsan-checks.json

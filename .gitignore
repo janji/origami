@@ -1,0 +1,7 @@
+.build/
+.build-dashboard/
+.DS_Store
+.artifacts/
+AGENTS.local.md
+*.local.md
+__pycache__/

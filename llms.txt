@@ -1,0 +1,53 @@
+# Origami
+
+> A local server for large mixture-of-experts models on Apple Silicon Macs: Qwen3.8-Flash-Next (the main, most
+> tested path; text and images), GLM-5.3-Flash and DeepSeek-V4.1-Flash (text only). The model stays on disk; Origami
+> keeps the always-used weights in memory and reads the experts each token needs from the SSD. One native Swift/Metal
+> binary (`origami`) that speaks the OpenAI, Anthropic and Ollama APIs. Tested on two Macs so far: an M2 Pro with
+> 32 GB on macOS 26 and an M1 MacBook Air with 16 GB on macOS 27 (slow). Needs macOS 15+ and 24 GB of memory or more (`origami setup` refuses under 16 GB).
+
+## Docs
+
+- [README.md](README.md): what it is, supported Macs and models, install, speed to expect (the one place for speed
+  figures), licenses.
+- [docs/guide.md](docs/guide.md): start here; every feature in order, from install to what is planned.
+- [docs/models.md](docs/models.md): getting each model, formats and conversions, low-bit experts, the quality dial.
+- [docs/settings.md](docs/settings.md): every setting; memory, context and drives; saved prompts; where files live;
+  which settings change replies.
+- [docs/integration.md](docs/integration.md): endpoints and request fields, thinking, images, chat commands, app
+  recipes (Claude Code, Codex, Pi, Open WebUI, Ollama, llama-swap), the background service, API keys, LAN and TLS.
+- [docs/dashboard.md](docs/dashboard.md): the dashboard's four tabs, the hot copy control, files, tuning.
+- [docs/troubleshooting.md](docs/troubleshooting.md): diagnostic commands, common problems, a slow model drive.
+- [docs/switches.md](docs/switches.md): every `ORIGAMI_*` environment variable.
+- [docs/content-receipts.md](docs/content-receipts.md): checking model files against known checksums.
+- [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), [INTERNALS.md](INTERNALS.md),
+  [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md).
+
+## Key facts
+
+- Start: `origami setup`, then `origami serve` (port 11439), then `origami dashboard`. `origami help <command>` shows
+  a command's options.
+- Base URL `http://127.0.0.1:11439/v1`. Endpoints: `POST /v1/chat/completions`, `POST /v1/responses` (no
+  `previous_response_id`), `POST /v1/messages`, `POST /v1/messages/count_tokens`, Ollama `POST /api/chat`,
+  `POST /api/generate`, `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version`; `GET /v1/models`,
+  `GET /health`, `GET /v1/status`, `GET /dashboard`.
+- Model name: by default one model, `origami`, and any name gets the model chosen in the dashboard. With
+  `list_models true` every model is listed and a request naming another one loads it (one model loaded at a time).
+- Exact by default: replies are the model's own. Fast levels are opt-in and change replies: Qwen `faster`, `fastest`;
+  GLM `faster`; DeepSeek `dynamic-fastest`. Per request `"origami_mode": "<level>"` or `<model>-<level>`;
+  `allow_fast false` forbids them. An exact request never reuses fast-mode state.
+- One request runs at a time; up to 64 wait. Use streaming: SSE streams send `: keepalive` every 10 s, and a
+  non-streamed request whose client closes its sending side is treated as gone. Set client timeouts to 10 minutes or
+  more.
+- Context: `context`, default 8k, up to 262144. Coding agents need 32k or more.
+- Thinking: `reasoning_effort` (`none` … `max`) or `max_thinking_tokens`; the server default is `none`.
+- Saved prompts are reused across turns and restarts (`usage.prompt_tokens_details.cached_tokens`); `X-Origami-Keep`
+  pins a session; `"prompt_cache_policy": "no_store"` skips saving.
+- Settings: `origami config` lists them; `origami config set <key> <value>`. File:
+  `~/Library/Application Support/Origami/config.json` (`--config` or `ORIGAMI_CONFIG` names another). Named models:
+  `models.json` in the data folder (`data_dir`, default `~/Library/Application Support/Origami`). Order: flag, then
+  `ORIGAMI_<KEY>` variable, then the named model's own value, then the settings file.
+- API key: off by default; `api_key` makes every request send `Authorization: Bearer <key>` or `x-api-key`.
+  Listens on 127.0.0.1 unless `listen lan`.
+- Problems: `origami doctor` says what to fix; `origami report` prints a block for a GitHub issue; the last 50 log
+  lines are in `/v1/status` `events`.

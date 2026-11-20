@@ -1,0 +1,206 @@
+{
+ "_comment": "Layer 0 MLP tensors of shard 1 of mlx-community/Qwen3.8-Flash-Next-4bit (rev 07b5dc6c): dtype, shape, bytes.",
+ "tensors": {
+  "language_model.model.layers.0.mlp.gate.biases": {
+   "dtype": "BF16",
+   "length": 40960,
+   "shape": [
+    512,
+    40
+   ]
+  },
+  "language_model.model.layers.0.mlp.gate.scales": {
+   "dtype": "BF16",
+   "length": 40960,
+   "shape": [
+    512,
+    40
+   ]
+  },
+  "language_model.model.layers.0.mlp.gate.weight": {
+   "dtype": "U32",
+   "length": 1310720,
+   "shape": [
+    512,
+    640
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.down_proj.biases": {
+   "dtype": "BF16",
+   "length": 102400,
+   "shape": [
+    2560,
+    20
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.down_proj.scales": {
+   "dtype": "BF16",
+   "length": 102400,
+   "shape": [
+    2560,
+    20
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.down_proj.weight": {
+   "dtype": "U32",
+   "length": 819200,
+   "shape": [
+    2560,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.gate_proj.biases": {
+   "dtype": "BF16",
+   "length": 102400,
+   "shape": [
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.gate_proj.scales": {
+   "dtype": "BF16",
+   "length": 102400,
+   "shape": [
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.gate_proj.weight": {
+   "dtype": "U32",
+   "length": 819200,
+   "shape": [
+    640,
+    320
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.up_proj.biases": {
+   "dtype": "BF16",
+   "length": 102400,
+   "shape": [
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.up_proj.scales": {
+   "dtype": "BF16",
+   "length": 102400,
+   "shape": [
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert.up_proj.weight": {
+   "dtype": "U32",
+   "length": 819200,
+   "shape": [
+    640,
+    320
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert_gate.biases": {
+   "dtype": "BF16",
+   "length": 80,
+   "shape": [
+    1,
+    40
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert_gate.scales": {
+   "dtype": "BF16",
+   "length": 80,
+   "shape": [
+    1,
+    40
+   ]
+  },
+  "language_model.model.layers.0.mlp.shared_expert_gate.weight": {
+   "dtype": "U32",
+   "length": 2560,
+   "shape": [
+    1,
+    640
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.down_proj.biases": {
+   "dtype": "BF16",
+   "length": 52428800,
+   "shape": [
+    512,
+    2560,
+    20
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.down_proj.scales": {
+   "dtype": "BF16",
+   "length": 52428800,
+   "shape": [
+    512,
+    2560,
+    20
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.down_proj.weight": {
+   "dtype": "U32",
+   "length": 419430400,
+   "shape": [
+    512,
+    2560,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.gate_proj.biases": {
+   "dtype": "BF16",
+   "length": 52428800,
+   "shape": [
+    512,
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.gate_proj.scales": {
+   "dtype": "BF16",
+   "length": 52428800,
+   "shape": [
+    512,
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight": {
+   "dtype": "U32",
+   "length": 419430400,
+   "shape": [
+    512,
+    640,
+    320
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.up_proj.biases": {
+   "dtype": "BF16",
+   "length": 52428800,
+   "shape": [
+    512,
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.up_proj.scales": {
+   "dtype": "BF16",
+   "length": 52428800,
+   "shape": [
+    512,
+    640,
+    80
+   ]
+  },
+  "language_model.model.layers.0.mlp.switch_mlp.up_proj.weight": {
+   "dtype": "U32",
+   "length": 419430400,
+   "shape": [
+    512,
+    640,
+    320
+   ]
+  }
+ }
+}

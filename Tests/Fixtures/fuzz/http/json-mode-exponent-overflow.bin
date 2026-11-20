@@ -1,0 +1,6 @@
+POST /v1/chat/completions HTTP/1.1
+Host: 127.0.0.1
+Content-Type: application/json
+Content-Length: 745
+
+{"messages":[{"role":"user","content":"x"}],"reasoning_effort":"high","response_format":{"type":"json_object"},"tools":[{"function":{"parameters":{"required":["city"],"properties":{"opts":{"properties":{"unit":{"enum":["c","f"]}},"type":"object"},"days":{"type":"integer"},"city":{"type":"string","description":"City"}},"type":"object"},"name":"weather","description":"Weather <b>now</b>"},"type":"function"}],"tools":"origami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami helporigami help"}

@@ -1,0 +1,73 @@
+{
+  "process_ceiling_bytes": 16000000000,
+  "transient_margin_bytes": 1000000000,
+  "context_limit": 8192,
+  "storage": {
+    "integrity": "sampled"
+  },
+  "prefill": {
+    "read_scope": 8192,
+    "compute_tile": 256
+  },
+  "quotas": {
+    "snapshot_bytes": 8589934592,
+    "spill_bytes": 68719476736
+  },
+  "fast": {
+    "enabled": false
+  },
+  "execution": {
+    "expert_mode": "slabPackedPreferred",
+    "expert_cache_slots": 2936,
+    "expert_slots_per_slab": 8,
+    "expert_window": 16,
+    "io_queue_depth": 4,
+    "simd_matrix": true,
+    "pinned_unary": true,
+    "resident_tensor_bytes": 3000000000,
+    "dense_resident_bytes": 450000000,
+    "pinned_rms": true,
+    "pinned_reductions": true,
+    "batched_selector": true,
+    "pinned_attention": true,
+    "fused_experts": true,
+    "grouped_expert_prefill": true,
+    "prefill_expert_cache_slots": 1024,
+    "pinned_dense": true,
+    "expert_command_batch": 8,
+    "gpu_keepalive": true,
+    "batched_pinned_attention": true,
+    "grouped_expert_tiled": true,
+    "batched_rope": true,
+    "pinned_rope": true,
+    "pinned_indexer": true,
+    "quantized_tiled": true,
+    "fused_hc_epilogue": true,
+    "fused_hc_min_rows": 8,
+    "fused_residual_injection": true,
+    "fused_residual_min_rows": 8,
+    "fused_gdn_preparation": true,
+    "fused_gdn_min_rows": 8,
+    "quantized_tiled_bm32": true,
+    "quantized_bm32_min_rows": 256,
+    "grouped_expert_bm32": true,
+    "grouped_expert_bm32_min_rows": 128,
+    "expert_scratch_reuse": true,
+    "expert_prefill_source_policy": "earliestCompletion",
+    "expert_decode_source_policy": "earliestCompletion",
+    "gdn_resident_state": true,
+    "qsa_decode_reuse": true,
+    "fused_hc_decode": true,
+    "fused_hc_prefill": true,
+    "moe_device_prefill": true,
+    "gdn_input_composition": true,
+    "gdn_buffer_region": true,
+    "gathered_expert_decode": true,
+    "moe_shared_read_overlap": true,
+    "resident_small_tensors": true,
+    "gdn_device_block": true
+  },
+  "prefix_cache": {
+    "memory_bytes": 500000000
+  }
+}

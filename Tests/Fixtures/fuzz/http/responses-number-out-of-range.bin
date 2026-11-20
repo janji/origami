@@ -1,0 +1,6 @@
+POST /v1/responses HTTP/1.1
+Host: 127.0.0.1
+Content-Type: application/json
+Content-Length: 41
+
+{"input":"Hi","max_output_tokens":-1e400}
