@@ -247,6 +247,6 @@ enum ExpertVariant {
         guard let gguf = model.ggufExperts else { return nil }
         return "low-bit experts from \(gguf.files.map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: ", ")) ("
             + "\(gguf.typeSummary); \(String(format: "%.2f", gguf.bitsPerWeight)) bits per weight): replies differ from the exact model; "
-            + "no hot copy or MTP in this mode"
+            + "no MTP in this mode"
     }
 }

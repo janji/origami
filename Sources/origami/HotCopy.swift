@@ -88,7 +88,10 @@ enum HotCopy {
             guard let folder = Stores.plan(model: model, settings: settings, found: found).hotCopyFolder else {
                 return .none(
                     state: "not_possible",
-                    detail: "The experts are read from a full copy on the model's own drive; no hot copy.")
+                    detail: model.ggufExperts == nil
+                        ? "The experts are read from a full copy on the model's own drive; no hot copy."
+                        : "The experts file is on this drive already: a copy here would not be faster. Set hot_copy_dir to another drive."
+                )
             }
             let legacy = Stores.legacyMirror(model: model, settings: settings, found: found).flatMap { item in
                 item.folder.standardizedFileURL == folder.deletingLastPathComponent().standardizedFileURL ? item.mirror : nil
@@ -96,7 +99,9 @@ enum HotCopy {
             let volume = Stores.volume(folder)
             let held = heldHere(folder) + (legacy.map { StoreBuilder.mirrorBytes(records: $0.records.count, model) } ?? 0)
             let keep = HotCopyKeeper.keepFree
-            let record = UInt64((model.expertRecordBytes + 16383) / 16384 * 16384)
+            // A record in the copy, padded to 16 KiB (GGUF experts: the average, a layer's records have its own size).
+            let whole = model.hotCopyWholeBytes
+            let record = whole / UInt64(ModelContract.layers * (model.ggufExperts?.experts ?? ModelContract.experts))
             // What idle models' copies on this drive may give counts as room (`IdleHotCopy`, taken as the copy grows).
             let spare = DiskBudget.shared.spare(on: folder, for: loadedModel)
             let room = volume.free + held + spare > keep ? volume.free + held + spare - keep : 0
@@ -111,7 +116,6 @@ enum HotCopy {
                     detail: "\(shown(volume))'s drive has \(OrigamiPlan.gigabytes(volume.free)) free; "
                         + "the copy needs \(OrigamiPlan.gigabytes(512 * record)) and keeps \(OrigamiPlan.gigabytes(keep)) free.")
             }
-            let whole = UInt64(ModelContract.layers * ModelContract.experts) * record
             return .folder(
                 folder, drive: volume.name, budget: budget, free: volume.free + held - heldHere(folder),
                 auto: settings.hotCopy == nil ? HotCopyKeeper.Auto(room: room, whole: whole) : nil)
@@ -122,11 +126,10 @@ enum HotCopy {
     /// (no request runs yet), then each keeper builds, grows and attaches its copy between replies from the routing
     /// counts (`NativeServingBackend.hotCopyCounts`), ranked as `RoutingProfile.ranking` and split over the places fastest
     /// drive first (`HotCopyPlaces`). Records are read for a build as `origami setup` read its mirror's: from a store with
-    /// the pack, every read digest-checked. Nil for experts read from a GGUF.
+    /// the pack, every read digest-checked; GGUF experts from the GGUF, each record its layer's own size.
     static func qwenKeeper(
         _ settings: Settings, model: ModelSource, pack: URL?, backend: NativeServingBackend, event: @escaping @Sendable (String) -> Void
     ) throws -> HotCopyPlaces? {
-        guard model.ggufExperts == nil else { return nil }
         let source = try PackStore(model: model, pack: pack, integrity: .sha256)
         let identity = Stores.hotCopyIdentity(model)
         let places = qwenPlaces(settings, model: model)
@@ -589,7 +592,7 @@ enum HotCopy {
                         ), counted.appendingPathComponent("uses.json")
                     )
                 }
-            } else if let model = try? Commands.model(one), model.ggufExperts == nil {
+            } else if let model = try? Commands.model(one) {
                 let found = Stores.scan(model: model, settings: one)
                 let file = one.routingFile(model)
                 copy = (

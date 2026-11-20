@@ -4,6 +4,18 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.2 (2026-11-20)
+
+**Replies:** unchanged.
+
+- **Qwen with GGUF experts gets a hot copy**: a low-bit variant (`origami model add <experts.gguf> --base <model>`) and
+  a converted low-bit GGUF had none. It is built and kept while serving like the 4-bit model's, in its own folder of
+  `hot_copy_dir` (else the data folder's store), with the same settings (`hot_copy`, `hot_copy_more`, `hot_copy_keep`)
+  and the same dashboard control. A record in the copy is its layer's own size, so a file that mixes types per layer
+  takes no padding there. It is built only on another drive than the GGUF's. Packs, further copies and MTP still do
+  not apply. On a real IQ3_S experts file the reply was the same with and without the copy; its speed is not measured
+  yet. New check: `gguf_experts_hot_copy_matches_gguf`.
+
 ## 3.1.1 (2026-11-20)
 
 **Replies:** unchanged.

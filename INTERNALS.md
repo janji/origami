@@ -419,10 +419,17 @@ output at its rank's spans, every ggml threadgroup of the matrix in steps of the
 all on the tile8 kernels' indirect grids (20 or 80 by the record count), so each record computes the joined group's
 bits. The record count must come from the indirect grid, as the tile8 kernels take it: read inside the kernels from the
 grid word, some resident ranks came out wrong in layers whose late group was empty (the host signals before the GPU
-reaches the group), and replies changed from run to run. What it turns off: packs, the hot copy and expert copies (`origami setup` builds none;
+reaches the group), and replies changed from run to run. What it turns off: packs and expert copies (`origami setup` builds none;
 the stores of an MLX build of the same model are not used), the reference CPU expert path and MTP speculation (the head needs 4-bit group-64 experts; off with a note).
+The hot copy applies (`HotCopy.qwenKeeper`, the 4-bit model's keeper, places and counts): its folder is `hot` in this
+model's folder of `hot_copy_dir`, else of the data folder's store, and `Stores.plan` gives none on the GGUF's own drive
+(three reads there against one here at the same speed). A record in the copy is its layer's own bytes
+(`ModelSource.hotCopyRecordBytes`: header and the three parts, without the padding a cache slot adds up to the largest
+layer's record), read for a build from the GGUF (`PackStore.readHotCopyRecord`); `PackStore.readInternalExpert` reads
+it into the slot and zeroes the padding, the bytes `readGGUFExpert` leaves. The automatic size starts at 6,536 records
+of the average size. Split reads stay off (a GGUF record is read whole).
 Checks: `gguf_experts_match_reference`, `gguf_expert_manifest_bounds`, `converter_gguf`,
-`gguf_queued_decode_matches_joined`.
+`gguf_queued_decode_matches_joined`, `gguf_experts_hot_copy_matches_gguf`.
 
 **Low-bit experts on an exact model** (`origami model add <experts.gguf> --base <model>`, `ExpertVariant`). The same
 scheme without a conversion: the experts from a GGUF's transformer part (`GGUFSource(partial:)`: the PLE part need not

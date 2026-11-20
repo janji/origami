@@ -144,9 +144,10 @@ enum Commands {
             promptCache: settings.promptCacheRoot
         ).allResident
         if model.ggufExperts != nil {
-            print(
-                "Stores  not used: this model's experts are read from its GGUF as they are; packs and the hot copy are for MLX experts"
-            )
+            print("Stores  no packs: this model's experts are read from its GGUF as they are; packs are for MLX experts")
+            if Stores.plan(model: model, settings: settings, found: Stores.scan(model: model, settings: settings)).hotCopyFolder != nil {
+                print("Hot copy built while serving, after the first reply (see the dashboard's Health).")
+            }
         } else if resident && !switches.contains("full-pack") {
             print("Stores  not needed: this Mac keeps all \(OrigamiPlan.maximumSlots) experts in memory once they are read")
         } else {
@@ -598,7 +599,10 @@ enum Commands {
         // The Experts card: a drive or size saved (also from a front that forwarded it) and applied at once.
         http.hotCopy = { body in
             guard let keeper = source.keeper else { throw ServingFailure("This model has no hot copy", status: 404) }
-            _ = try HotCopy.save(body, settings: (try? Settings.load(flags: flags)) ?? settings, model: nil, qwen: true)
+            // GGUF experts: their file's drive is refused, as a family model's is (no copy is built there).
+            _ = try HotCopy.save(
+                body, settings: (try? Settings.load(flags: flags)) ?? settings,
+                model: model.ggufExperts == nil ? nil : model.expertsLocation, qwen: true)
             var fresh = (try? Settings.load(flags: flags)) ?? settings
             // A place added, removed or moved takes a restart (one keeper per place); a size changes at once.
             let restart = HotCopy.restartNeeded(fresh, started: settings)
@@ -1458,10 +1462,9 @@ enum Commands {
             report["hot_copy"] = ["path": folder.path, "records": copy?.keys.count ?? 0, "bytes": copy?.bytes ?? 0]
             // The usage curve from the saved routing counts, ranked as the server's keeper ranks them.
             if let counts = RoutingProfile.load(settings.routingFile(model))?.hotCopyCounts, !counts.uses.isEmpty {
-                let record = UInt64((model.expertRecordBytes + 16383) / 16384 * 16384)
                 let curve = HotCopyCurve(
                     uses: counts.uses, order: RoutingProfile.hotCopyChoice(counts, budget: .max, record: model.expertRecordBytes),
-                    size: { _ in record })
+                    size: { UInt64(((model.hotCopyRecordBytes($0) ?? 0) + 16383) / 16384 * 16384) })
                 let sizes = Set([UInt64(copy?.bytes ?? 0), 20_000_000_000, 40_000_000_000, 80_000_000_000]).filter { $0 > 0 }.sorted()
                 let shares = sizes.map { ["bytes": $0, "share": curve.coverage($0)] as [String: Any] }
                 lines.append(
@@ -2640,9 +2643,7 @@ enum Commands {
             [Stores.plan(model: model, settings: settings, found: found).hotCopyFolder].compactMap { $0 }
             + found.filter { $0.further > 0 }.map { $0.folder.appendingPathComponent(PackStore.furtherCopyFolder, isDirectory: true) }
         for folder in copies {
-            hotCopy(folder, identity: Stores.hotCopyIdentity(model)) {
-                $0 < ModelContract.layers * ModelContract.experts ? PackStore.expertBytes : nil
-            }
+            hotCopy(folder, identity: Stores.hotCopyIdentity(model)) { model.hotCopyRecordBytes($0) }
         }
         if failures > 0 { throw CLIError("verification found \(failures) problem(s)") }
     }

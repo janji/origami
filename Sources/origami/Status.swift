@@ -200,7 +200,7 @@ final class StatusSource: @unchecked Sendable {
             ],
         ]
         // The hot copy (built while serving, as `HotCopy.qwenPlace` sizes it) and the drive of the context file and saves.
-        let recordBytes = UInt64((model.expertRecordBytes + 16383) / 16384 * 16384)
+        let recordBytes = model.hotCopyWholeBytes / UInt64(ModelContract.layers * (model.ggufExperts?.experts ?? ModelContract.experts))
         let hotCopy = changed.hotCopy == 0 ? 0 : changed.hotCopy.map { Int($0 / recordBytes) } ?? StoreBuilder.maximumMirrorRecords
         let hotNow = keeper?.keepers.reduce(0) { $0 + $1.records } ?? 0
         var apply: [String] = []
@@ -415,13 +415,15 @@ final class StatusSource: @unchecked Sendable {
         let more = settings.hotCopyMore.map(\.folder)
         let paths = [first] + more.map { StoreHeader.modelFolder(store: $0, model: model).appendingPathComponent("hot", isDirectory: true) }
         return HotCopy.rows(
-            keeper, settings: settings, bases: [first] + more, paths: paths, reads: nil, hotShare: nil, depth: 4,
+            keeper, settings: settings, bases: [first] + more, paths: paths, reads: model.ggufExperts == nil ? nil : model.expertsLocation,
+            hotShare: nil, depth: 4,
             tokens: loadedRuntime?.backend.routingTokens ?? 0
         ).map {
             var row = $0
             // A copy helps even on the drive all experts are read from (one read each instead of nine): no drive is refused.
+            // GGUF experts (three reads each) get one only on another drive (`Stores.plan`).
             row["meaning"] =
-                "Hot copy: the experts replies use most, one read each instead of nine, best on a drive other than the one all experts are read from. Replies are unchanged."
+                "Hot copy: the experts replies use most, one read each instead of \(model.ggufExperts == nil ? "nine" : "three"), best on a drive other than the one all experts are read from. Replies are unchanged."
             return row
         }
     }
@@ -470,14 +472,11 @@ final class StatusSource: @unchecked Sendable {
             "split": ["reads": 0, "memory": 0, "hot_copy": NSNull(), "model_drive": 0], "sources": sources,
             "copy_to": Self.copyDrives(settings: settings, model: model, storage: storage),
             "unused_settings": Self.retiredSettings(settings),
-            "unused_drives": model.ggufExperts != nil
-                ? []
-                : HotCopy.unusedDrives(
-                    settings, reads: storage.packFolder == nil ? model.directory : nil,
-                    used: [model.directory, Stores.hotCopyFolder(model: model, settings: settings, found: found) ?? settings.homeStore]
-                        + settings.hotCopyMore.map(\.folder), depth: 4),
+            "unused_drives": HotCopy.unusedDrives(
+                settings, reads: storage.packFolder == nil ? model.expertsLocation : nil,
+                used: [model.expertsLocation, Stores.hotCopyFolder(model: model, settings: settings, found: found) ?? settings.homeStore]
+                    + settings.hotCopyMore.map(\.folder), depth: 4),
         ]
-        if model.ggufExperts != nil { from["no_hot_copy"] = "This model reads all its experts from one file; it has no hot copy yet." }
         report["experts_from"] = from
         guard let runtime else { return report }
         let memory = runtime.backend.memorySnapshot

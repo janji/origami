@@ -84,6 +84,21 @@ public struct ModelSource: Sendable {
     public let ggufExperts: GGUFExperts?
     /// Bytes of one expert record as this checkpoint stores it (the GGUF layout's slot for `gguf-experts`).
     public var expertRecordBytes: Int { ggufExperts?.recordBytes ?? quantization.expertRecordBytes }
+    /// What the routed experts are read from: the GGUF holding them, else the checkpoint's folder.
+    public var expertsLocation: URL { ggufExperts?.files.first.map { URL(fileURLWithPath: $0.path) } ?? directory }
+    /// Expert record `key` (layer * 512 + expert) as a hot copy holds it: the record, for GGUF experts without the cache
+    /// slot's padding (its layer's own bytes; a slot is the largest layer's). Nil for a key the model does not have.
+    package func hotCopyRecordBytes(_ key: Int) -> Int? {
+        guard (0..<(ModelContract.layers * ModelContract.experts)).contains(key) else { return nil }
+        guard let gguf = ggufExperts else { return quantization.expertRecordBytes }
+        return key % ModelContract.experts < gguf.experts ? gguf.layers[key / ModelContract.experts].bytes : nil
+    }
+    /// A hot copy of every routed expert: each record padded to 16 KiB, as a copy stores it.
+    package var hotCopyWholeBytes: UInt64 {
+        (0..<(ModelContract.layers * ModelContract.experts)).reduce(0) {
+            $0 + UInt64(((hotCopyRecordBytes($1) ?? 0) + 16383) / 16384 * 16384)
+        }
+    }
     /// The checkpoint's global affine format and the modules the config gives another one (canonical names).
     public let globalFormat: AffineFormat
     public let moduleFormats: [String: AffineFormat]
@@ -267,7 +282,7 @@ public struct ModelSource: Sendable {
     /// Check fixture: explicit spans over small files, without config or geometry checks.
     package init(
         fixture directory: URL, spans: [String: Any], fingerprint: String = String(repeating: "0", count: 64),
-        formats: [String: AffineFormat] = [:], zeroCentredNorms: Bool = false
+        formats: [String: AffineFormat] = [:], zeroCentredNorms: Bool = false, gguf: GGUFExperts? = nil
     ) throws {
         let tensors = try JSONDecoder().decode([String: TensorSpan].self, from: JSONSerialization.data(withJSONObject: spans))
         var sizes: [String: UInt64] = [:]
@@ -282,8 +297,8 @@ public struct ModelSource: Sendable {
         shardSizes = sizes
         shardModified = modified
         self.fingerprint = fingerprint
-        quantization = .affine4Group64
-        ggufExperts = nil
+        quantization = gguf == nil ? .affine4Group64 : .ggufExperts
+        ggufExperts = gguf
         globalFormat = AffineFormat(bits: 4, group: 64)
         moduleFormats = formats
         self.zeroCentredNorms = zeroCentredNorms

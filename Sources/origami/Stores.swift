@@ -164,8 +164,12 @@ enum Stores {
     /// Chooses the pack and its copies to serve from, and the hot copy's folder. A pack on another drive than the model
     /// wins (two drives in parallel); the hot copy belongs in `hot_copy_dir`, else on the model's drive.
     static func plan(model: ModelSource, settings: Settings, found: [Found]) -> OrigamiStorage {
-        // GGUF experts are read from the GGUF alone: stores hold MLX records.
-        if model.ggufExperts != nil { return OrigamiStorage() }
+        // GGUF experts: packs and further copies hold MLX records; the hot copy holds the GGUF's own, and pays only off
+        // the GGUF's drive (three reads there against one here, at the same speed).
+        if model.ggufExperts != nil {
+            let hot = settings.hotCopy == 0 ? nil : hotCopyFolder(model: model, settings: settings, found: found)
+            return OrigamiStorage(hotCopyFolder: hot.flatMap { volume($0).disk == volume(model.expertsLocation).disk ? nil : $0 })
+        }
         let modelDisk = volume(model.directory).disk
         // With copies on several drives, read the one off the model's drive that measured fastest.
         let packs = found.filter { $0.pack != nil }
@@ -250,11 +254,13 @@ enum Stores {
         found.first { mirrorHome($0, settings: settings, modelDisk: modelDisk) && $0.volume.mounted } ?? found.last
     }
     /// Qwen's hot copy folder: `hot` in this model's folder of `hot_copy_dir` (connected or not), else of the store
-    /// `mirrorTarget` picks. Its own folder: a pack's `experts.bin` beside it is never a hot copy's payload.
+    /// `mirrorTarget` picks (GGUF experts: the data folder's store, as the family engines' copy goes to the data
+    /// folder). Its own folder: a pack's `experts.bin` beside it is never a hot copy's payload.
     static func hotCopyFolder(model: ModelSource, settings: Settings, found: [Found]) -> URL? {
         guard
             let store = settings.hotCopyDir
-                ?? mirrorTarget(settings: settings, found: found, modelDisk: volume(model.directory).disk)?.store
+                ?? (model.ggufExperts != nil
+                    ? settings.homeStore : mirrorTarget(settings: settings, found: found, modelDisk: volume(model.directory).disk)?.store)
         else { return nil }
         return StoreHeader.modelFolder(store: store, model: model).appendingPathComponent("hot", isDirectory: true)
     }

@@ -33,8 +33,9 @@ public final class PackStore: @unchecked Sendable {
         public let packedAvailable: Bool
         public let degradedReason: String?
         public let packedExpertBytes, originalExpertBytes, packedPLEBytes, originalPLEBytes: UInt64
-        /// Expert records read from the hot copy.
+        /// Expert records read from the hot copy, and their bytes.
         package var hotCopyReads: UInt64 = 0
+        package var hotCopyBytes: UInt64 = 0
         /// Original nine-span expert records read with concurrent spans (path proof); nil when disabled.
         public var originalConcurrentRecords: UInt64? = nil
         /// Every expert copy the packed reads use, the pack first; nil without a pack folder.
@@ -100,7 +101,7 @@ public final class PackStore: @unchecked Sendable {
     /// attached when it starts and keeps it to its end.
     private let hotLock = NSLock()
     private var hotCopies: HotCopySet?
-    private var hotReads: UInt64 = 0
+    private var hotReads: UInt64 = 0, hotBytes: UInt64 = 0
     private var hotMetadata: (MemoryLedger, MemoryLedger.Reservation)?
     /// Bytes charged for a hot copy's index (at most 48 x 512 records), held while one may be attached.
     package static let hotCopyMetadataBytes: UInt64 = 8 * 1024 * 1024
@@ -124,12 +125,20 @@ public final class PackStore: @unchecked Sendable {
     }
     /// The record from a hot copy holding it, the one expected to finish first (`HotCopySet`; checked on its first
     /// read), else from the model's spans: the same bytes either way. A copy whose drive is gone gives way to another
-    /// copy, then to the spans.
+    /// copy, then to the spans. A copy holds a GGUF record without the slot's padding (`ModelSource.hotCopyRecordBytes`),
+    /// which is zero as `GGUFExperts.prepare` leaves it.
     package func readInternalExpert(_ key: ExpertKey, into buffer: UnsafeMutableRawBufferPointer) throws {
         guard buffer.count == Self.expertBytes else { throw EngineError("Hot copy record buffer differs") }
         let index = key.layer * ModelContract.experts + key.expert
-        if let copies = hotLock.withLock({ hotCopies }), copies.holds(index), (try? copies.read(index, into: buffer)) != nil {
-            hotLock.withLock { hotReads &+= 1 }
+        let held = model.ggufExperts == nil ? buffer.count : model.hotCopyRecordBytes(index) ?? 0
+        if (1...buffer.count).contains(held), let copies = hotLock.withLock({ hotCopies }), copies.holds(index),
+            (try? copies.read(index, into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<held]))) != nil
+        {
+            memset(buffer.baseAddress! + held, 0, buffer.count - held)
+            hotLock.withLock {
+                hotReads &+= 1
+                hotBytes &+= UInt64(held)
+            }
             return
         }
         try readExpert(layer: key.layer, expert: key.expert, into: buffer, source: .original)
@@ -146,7 +155,7 @@ public final class PackStore: @unchecked Sendable {
         self.log = log
         drive = ModelDrive(log: log)
         packFolder = model.ggufExperts == nil ? pack : nil
-        // GGUF experts are read from the GGUF alone: packs and copies hold MLX records.
+        // GGUF experts are read from the GGUF and its hot copy: packs and further copies hold MLX records.
         for folder in model.ggufExperts == nil ? (pack.map { [$0] } ?? []) + copies : [] {
             let copy = Copy(folder: folder, primary: folder == pack)
             do { try open(copy) } catch {
@@ -596,7 +605,10 @@ public final class PackStore: @unchecked Sendable {
 
     /// A GGUF expert record: its header, then gate, up and down, three spans of the GGUF read into their places.
     private func readGGUFExpert(_ gguf: GGUFExperts, layer: Int, expert: Int, into buffer: UnsafeMutableRawBufferPointer) throws {
-        guard expert < gguf.experts, buffer.count == gguf.recordBytes else {
+        // A slot, or the layer's own bytes (a hot copy's record).
+        guard expert < gguf.experts, gguf.layers.indices.contains(layer),
+            (gguf.layers[layer].bytes...gguf.recordBytes).contains(buffer.count)
+        else {
             throw EngineError("Expert \(expert) of layer \(layer) is not in this model's GGUF (\(gguf.experts) experts)")
         }
         gguf.prepare(buffer, layer: layer, expert: expert)
@@ -687,7 +699,7 @@ public final class PackStore: @unchecked Sendable {
             packedAvailable: available, degradedReason: copies.first { $0.primary }?.problem,
             packedExpertBytes: packedExpertBytes, originalExpertBytes: originalExpertBytes,
             packedPLEBytes: packedPLEBytes, originalPLEBytes: originalPLEBytes)
-        value.hotCopyReads = hotLock.withLock { hotReads }
+        (value.hotCopyReads, value.hotCopyBytes) = hotLock.withLock { (hotReads, hotBytes) }
         value.originalConcurrentRecords = spanPool == nil ? nil : originalConcurrentRecords
         if !copies.isEmpty {
             value.copies = copies.map {
@@ -712,12 +724,20 @@ public final class PackStore: @unchecked Sendable {
 
 /// Qwen's hot copy holds an expert's record in the layout this process runs, read as `origami setup` read its offline
 /// mirror's: from a store opened with the pack and `.sha256` (a pack record failing its digest is read from the spans),
-/// else from the checkpoint's spans. A key is layer * 512 + expert.
+/// else from the checkpoint's spans. A key is layer * 512 + expert. A GGUF expert record is its layer's own bytes
+/// (`ModelSource.hotCopyRecordBytes`), read from the GGUF: a copy of a mixed-type GGUF holds and reads no slot padding.
 extension PackStore: HotCopySource {
     package func hotCopyRecordBytes(_ key: Int) -> Int? {
-        (0..<(ModelContract.layers * ModelContract.experts)).contains(key) ? Self.expertBytes : nil
+        model.ggufExperts == nil
+            ? ((0..<(ModelContract.layers * ModelContract.experts)).contains(key) ? Self.expertBytes : nil) : model.hotCopyRecordBytes(key)
     }
     package func readHotCopyRecord(_ key: Int, into: UnsafeMutableRawPointer) throws {
+        if let gguf = model.ggufExperts {
+            guard let bytes = model.hotCopyRecordBytes(key) else { throw EngineError("Expert record \(key) is not in this model's GGUF") }
+            return try readGGUFExpert(
+                gguf, layer: key / ModelContract.experts, expert: key % ModelContract.experts,
+                into: UnsafeMutableRawBufferPointer(start: into, count: bytes))
+        }
         try readExpert(
             layer: key / ModelContract.experts, expert: key % ModelContract.experts,
             into: UnsafeMutableRawBufferPointer(start: into, count: Self.expertBytes))

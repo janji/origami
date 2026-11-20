@@ -10,7 +10,7 @@ package struct RequestPhaseCounters {
         var values: [String: Double] = [
             "original_expert_bytes": Double(source.originalExpertBytes),
             "packed_expert_bytes": Double(source.packedExpertBytes),
-            "hot_copy_expert_bytes": Double(source.hotCopyReads * UInt64(PackStore.expertBytes)),
+            "hot_copy_expert_bytes": Double(source.hotCopyBytes),
             "original_lookup_bytes": Double(source.originalPLEBytes),
             "packed_lookup_bytes": Double(source.packedPLEBytes),
         ]

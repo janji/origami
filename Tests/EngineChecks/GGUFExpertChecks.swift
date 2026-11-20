@@ -203,14 +203,12 @@ func ggufExpertsMatchReference() throws {
     try ggufRequire(ledger.snapshot().reserved == 0, "GGUF expert fixture leaked resources")
 }
 
-/// `gguf-experts.json` is untrusted input: a manifest of real banks (in a sparse file) gives the layout its records are
-/// read with (16-byte aligned parts after the header, the slot the largest layer's record), and a manifest with another
-/// format, a layer missing, a type without a kernel, a shape off the architecture, a bank past its file, a relative path or
-/// a file of another size is refused with a coded error.
-func ggufExpertManifestBounds() throws {
-    let root = CheckFixtures.scratch.appendingPathComponent("gguf-manifest-\(UUID().uuidString)", isDirectory: true)
+/// `ggufCheckTypes`' banks, ten experts per layer, one after another in a sparse 1 GiB `experts.gguf` in `root`: its
+/// path, size and the manifest's layers.
+private func ggufCheckFile(_ root: URL) throws -> (
+    path: String, size: UInt64, layers: [[(path: String, offset: Int, stride: Int, type: Int, rows: Int, columns: Int)]]
+) {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
     let path = root.appendingPathComponent("experts.gguf").path
     let size: UInt64 = 1 << 30
     FileManager.default.createFile(atPath: path, contents: nil)
@@ -235,6 +233,17 @@ func ggufExpertManifestBounds() throws {
         layers.append(list)
     }
     try ggufRequire(UInt64(cursor) <= size, "the fixture's banks do not fit its file")
+    return (path, size, layers)
+}
+
+/// `gguf-experts.json` is untrusted input: a manifest of real banks (in a sparse file) gives the layout its records are
+/// read with (16-byte aligned parts after the header, the slot the largest layer's record), and a manifest with another
+/// format, a layer missing, a type without a kernel, a shape off the architecture, a bank past its file, a relative path or
+/// a file of another size is refused with a coded error.
+func ggufExpertManifestBounds() throws {
+    let root = CheckFixtures.scratch.appendingPathComponent("gguf-manifest-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (path, size, layers) = try ggufCheckFile(root)
     let valid = try GGUFExperts(manifest: GGUFExperts.manifest(experts: 10, files: [(path, size)], layers: layers))
     let parts = valid.layers[0].parts
     try ggufRequire(
@@ -273,6 +282,57 @@ func ggufExpertManifestBounds() throws {
     try refused("a file of another size", edited { $0["files"] = [["path": path, "size": Int(size) + 1]] }, code: "model_incomplete")
     try refused("a size that is a boolean", edited { part(&$0, layer: 1, "gate", "rows", true) })
     try refused("no JSON", Data("{".utf8))
+}
+
+/// The hot copy of GGUF experts (`HotCopy.qwenKeeper`, a low-bit variant's): a record in the copy is its layer's own
+/// bytes, not the cache slot's (the largest layer's), an expert the pruned GGUF lacks has none, and
+/// `PackStore.readInternalExpert` fills a slot with the same bytes from the copy as from the GGUF (the slot's padding
+/// zeroed over what it held), counting the copy's reads and bytes; a key the copy lacks is read from the GGUF.
+func ggufExpertsHotCopyMatchesGGUF() throws {
+    let root = CheckFixtures.scratch.appendingPathComponent("gguf-hot-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (path, size, layers) = try ggufCheckFile(root)
+    // Seeded bytes over layers 0 (mixed types, the largest record) and 1 (Q2_0, a smaller one); the rest reads as zeros.
+    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    try handle.write(contentsOf: Data((0..<layers[2][0].offset).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9 &+ 7) }))
+    try handle.close()
+    let layout = try GGUFExperts(manifest: GGUFExperts.manifest(experts: 10, files: [(path, size)], layers: layers))
+    ModelLayout.use(.ggufExperts, gguf: layout)
+    defer { ModelLayout.use(.affine4Group64) }
+    let model = try ModelSource(fixture: root, spans: [:], gguf: layout)
+    let keys = [1, 2, ModelContract.experts + 4]
+    let small = layout.layers[1].bytes
+    try ggufRequire(
+        small < layout.recordBytes && model.hotCopyRecordBytes(keys[2]) == small && model.hotCopyRecordBytes(1) == layout.layers[0].bytes
+            && model.hotCopyRecordBytes(10) == nil && model.expertsLocation.path == path,
+        "a copy's record is not its layer's own bytes")
+    func read(_ store: PackStore, _ key: Int, original: Bool = false) throws -> [UInt8] {
+        var slot = [UInt8](repeating: 0xff, count: PackStore.expertBytes)
+        try slot.withUnsafeMutableBytes {
+            original
+                ? try store.readExpert(layer: key / ModelContract.experts, expert: key % ModelContract.experts, into: $0, source: .original)
+                : try store.readInternalExpert(ExpertKey(layer: key / ModelContract.experts, expert: key % ModelContract.experts), into: $0)
+        }
+        return slot
+    }
+    let source = try PackStore(model: model)
+    let copy = try HotCopy.write(
+        source: source, keys: keys, folder: root.appendingPathComponent("hot"), identity: PackStore.hotCopyIdentity(model))
+    try ggufRequire(
+        copy.slots.map(\.bytes).sorted() == keys.map { UInt64((model.hotCopyRecordBytes($0)! + 16383) / 16384 * 16384) }.sorted(),
+        "the copy's slots are not its records' sizes")
+    let serving = try PackStore(model: model)
+    let expected = try (keys + [3]).map { try read(serving, $0, original: true) }
+    try ggufRequire(Set(expected).count == 4 && expected[2][small...].allSatisfy { $0 == 0 }, "the fixture's records do not differ")
+    serving.attachHotCopy(HotCopy.open(folder: copy.folder, identity: PackStore.hotCopyIdentity(model), source: serving))
+    for (index, key) in keys.enumerated() {
+        try ggufRequire(try read(serving, key) == expected[index], "record \(key) from the copy differs from the GGUF's")
+    }
+    let status = serving.status()
+    try ggufRequire(
+        status.hotCopyReads == 3 && status.hotCopyBytes == UInt64(2 * layout.layers[0].bytes + small),
+        "copy reads \(status.hotCopyReads), bytes \(status.hotCopyBytes)")
+    try ggufRequire(try read(serving, 3) == expected[3] && serving.status().hotCopyReads == 3, "a key the copy lacks")
 }
 
 /// Queued decode of GGUF experts (`GGUFExpertKernels.encodeDeferredGroup`): a group queued before its records are known,

@@ -157,16 +157,17 @@ public struct GGUFExperts: Sendable, Equatable {
         return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
     }
 
-    /// Writes record `expert` of `layer`'s header into one slot and zeroes the slot's padding.
+    /// Writes record `expert` of `layer`'s header into `slot` and zeroes its padding. `slot` is one cache slot, or the
+    /// layer's own bytes (a record as a hot copy holds it: the same bytes without the slot's padding after them).
     package func prepare(_ slot: UnsafeMutableRawBufferPointer, layer: Int, expert: Int) {
-        precondition(slot.count == recordBytes && (0..<layers.count).contains(layer))
+        precondition((0..<layers.count).contains(layer) && (layers[layer].bytes...recordBytes).contains(slot.count))
         memset(slot.baseAddress!, 0, Self.headerBytes)
         for (i, value) in [Self.magic, UInt32(layer), UInt32(expert)].enumerated() {
             slot.storeBytes(of: value.littleEndian, toByteOffset: i * 4, as: UInt32.self)
         }
         var cursor = Self.headerBytes
         for part in layers[layer].parts + [
-            Part(path: "", offset: 0, stride: 0, type: 0, bytes: 0, outputs: 0, width: 0, record: recordBytes)
+            Part(path: "", offset: 0, stride: 0, type: 0, bytes: 0, outputs: 0, width: 0, record: slot.count)
         ] {
             if part.record > cursor { memset(slot.baseAddress! + cursor, 0, part.record - cursor) }
             cursor = part.record + part.bytes

@@ -76,7 +76,8 @@ What to expect:
 - Replies differ from the MLX 4-bit build (other weights, other arithmetic).
 - More experts fit in memory: the IQ3_XXS build's take 2.33 MB each in the cache against 2.76 MB; the Coder's take
   2.66 MB, but it has half as many (33 GB in all).
-- Packs, the hot copy and MTP do not apply (`origami setup` says so).
+- Packs and MTP do not apply (`origami setup` says so). The hot copy does, on another drive than the GGUF's: it is
+  built while serving, as for the 4-bit model ([settings](settings.md)).
 - Measured on eight short benchmark replies at 8K, with the GGUF on an external drive: the IQ3_XXS build decoded at
   7.8 tok/s against 5.8 for 4-bit at the same 18 GB memory limit, with every scored answer right and 89% of 4-bit's
   next tokens. The Coder also got every scored answer right (8.6 tok/s at the default memory; 77% of 4-bit's next
@@ -101,7 +102,8 @@ origami serve --model flash-q2
   shared-expert gate of five layers equal value for value, and expert types and shapes Origami's kernels run. It
   refuses a mismatch and says what differs.
 - It changes replies: `origami status`, `doctor`, the dashboard, the server log and the request log say the model uses
-  low-bit experts and from which file. The hot copy, packs and MTP do not apply. The base model and
+  low-bit experts and from which file. Packs and MTP do not apply; the variant gets its own hot copy (the `hot_copy`
+  settings, on another drive than the experts file's), built while serving. The base model and
   the default stay exact.
 - `origami model remove flash-q2` removes only the variant's small generated folder (in the data folder); the base
   model and the GGUF stay.

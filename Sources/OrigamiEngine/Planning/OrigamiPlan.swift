@@ -202,7 +202,7 @@ public struct OrigamiPlan: Sendable {
         if ModelLayout.ggufExperts != nil {
             notes.append(
                 "experts: read from the GGUF in its own encodings (\(ModelLayout.ggufExperts!.typeSummary)); "
-                    + "decode runs without packs, the hot copy and MTP")
+                    + "decode runs without packs and MTP")
         }
         if ModelLayout.group == 32 {
             // Group 32 stores twice the scales and biases: 0.625 instead of 0.5625 bytes per 4-bit weight.

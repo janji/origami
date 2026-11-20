@@ -862,6 +862,7 @@ let tests: [(String, () throws -> Void)] =
         ("converter_gguf", converterGGUF),
         ("gguf_experts_match_reference", ggufExpertsMatchReference),
         ("gguf_expert_manifest_bounds", ggufExpertManifestBounds),
+        ("gguf_experts_hot_copy_matches_gguf", ggufExpertsHotCopyMatchesGGUF),
         ("gguf_experts_variant_pairing", ggufExpertsVariantPairing),
         ("gguf_queued_decode_matches_joined", ggufQueuedDecodeMatchesJoined),
         ("gguf_pruned_router_never_selects_padding", GGUFExpertSelfChecks.prunedRouting),
