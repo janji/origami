@@ -1,23 +1,6 @@
 # Origami
 
-```text
-                        +
-                        #*
-        #                *++                      :
-      *@##*              **++                   =-              +
-            *+            @#+++               -=:            *=
-             *#=          #@#+#+            ==::          ++=
-               #*+=       #@@#+#+         --=::        +*--
-                ***++      *@@*+#%+     ===:::      **+==
-                  ###===   #@@@#+%%+   -*=:++:   *++===
-                   *#*+=#=  *@@@#+#%++*#=:++: +*+*=#=
-                     *@*==#+*@@@@*+%%%+-+++*@%+==*=
-                      *#@*==#####*++++++*%%**=#*=
-                        *#**@@@@@@#=######+====
-                          ==******-:+==++=::
-                              --**=:==::
-                                   :
-```
+<p align="center"><img src="docs/images/crane.png" width="600" alt="Origami's paper crane, drawn in characters as on its dashboard"></p>
 
 Origami runs mixture-of-experts language models that are much larger than your Mac's memory, on Apple Silicon.
 The idea: in these models each token uses only a few "experts" out of hundreds. Origami keeps the always-used
