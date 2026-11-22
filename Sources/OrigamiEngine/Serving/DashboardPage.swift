@@ -82,7 +82,7 @@ public enum DashboardPage {
             <div class="notice-box"><h2 id="notice-title"></h2><p id="notice-text"></p>
               <ol class="steps" id="notice-steps" hidden>
                 <li>On this Mac, open System Settings › Privacy &amp; Security › Files &amp; Folders.</li>
-                <li>Under origami, turn on Removable Volumes. If macOS shows a prompt about origami instead, click Allow. After replacing or rebuilding origami, turn it on again.</li>
+                <li>Under origami (or under the program that starts it, when the message above names one), turn on Removable Volumes. If macOS shows a prompt instead, click Allow. A new origami binary started on its own needs this again; one started by a fixed launcher does not.</li>
                 <li>Come back here and choose Check again.</li>
               </ol>
               <div class="notice-actions"><a class="button" id="notice-settings" href="x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders" hidden>Open Privacy settings</a>
@@ -99,6 +99,7 @@ public enum DashboardPage {
           </div></section>
         <div id="view-run">
           <p class="loadline wrap" role="status">Loading the model. Requests wait until it is ready.</p>
+          <section class="notice slowed wrap" id="slowed" hidden role="status" aria-labelledby="slowed-title"><div class="notice-box"><h2 id="slowed-title">Slowed by</h2><ul id="slowed-list"></ul></div></section>
           <section class="now wrap running-only" id="now" aria-label="Speed">
             <div class="gauge" aria-live="polite">
               <p class="big" id="speed-line"><span id="speed">–</span><small>tok/s</small></p>

@@ -83,15 +83,17 @@ extension FamilySetup {
     /// storage map and `origami cache` can list another model's or build's saved prompts on their own.
     static let epochMarker = "origami-epoch.json"
     /// This executable's build as the markers name it: the first 16 hex digits of its SHA-256 (read once, when first asked).
-    static let build = String(((try? OrigamiRuntime.executableDigest()) ?? "unknown").prefix(16))
-    /// Writes the marker into the epoch folder `folder` unless it has one (a folder made by an earlier start gets it now).
+    static let build = String(PromptCanary.executable.prefix(16))
+    /// Writes the marker into the epoch folder `folder` unless it has one (a folder made by an earlier start gets it now);
+    /// the canary's fields (`PromptCanary`, written there first) are kept.
     static func markEpoch(_ folder: URL, model: String, key: String, context: Int) {
         let file = folder.appendingPathComponent(epochMarker)
-        guard FileManager.default.fileExists(atPath: folder.path), !FileManager.default.fileExists(atPath: file.path) else { return }
-        let marker: [String: Any] = [
+        let fields = (try? Data(contentsOf: file)).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        guard FileManager.default.fileExists(atPath: folder.path), fields?["model"] == nil else { return }
+        let marker: [String: Any] = (fields ?? [:]).merging([
             "model": model, "family_key": key, "context": context, "version": version, "build": build,
             "created": ISO8601DateFormatter().string(from: Date()),
-        ]
+        ]) { $1 }
         try? JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys]).write(to: file, options: .atomic)
     }
     /// The marker of the family epoch folder `folder`, nil when it has none.

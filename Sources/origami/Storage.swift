@@ -49,7 +49,10 @@ enum Storage {
 
     // MARK: the map
 
-    static func items(_ settings: Settings, found: Found) -> [Item] {
+    static func items(_ settings: Settings, found: Found) -> [Item] { map(settings, found: found).items }
+
+    /// The map's items, and the saved prompts per build (`SavedPrompts`), judged by the same registered and configured models.
+    static func map(_ settings: Settings, found: Found) -> (items: [Item], prompts: [SavedPrompts.Build]) {
         // A registry that cannot be read (a file being replaced by hand) would make every pack an orphan: nothing goes then.
         let entries = try? ModelRegistry.entries(settings)
         var items: [Item] = []
@@ -394,18 +397,17 @@ enum Storage {
         if reachable(settings.modelsDir.path), manager.fileExists(atPath: Models.ggufSupportFolder(settings).path) {
             items.append(Item(path: Models.ggufSupportFolder(settings).path, role: "support", note: "kept for GGUF conversions"))
         }
+        var builds: [SavedPrompts.Build] = []
         if reachable(settings.promptCacheRoot.path) {
-            // A Qwen `<fingerprint12>-<context>` folder no registered or configured model has: unreachable by any build.
+            // A Qwen `<fingerprint12>-<context>` folder no registered or configured model has, or a family epoch of a GGUF
+            // no model has: a model file no model uses.
             let known =
                 fingerprintsKnown && entries != nil
                 && entries!.allSatisfy { $0["family"] != nil || ($0["manifest"] as? [String: Any])?["fingerprint"] != nil }
-            // A family epoch whose marker names another build, or a GGUF no model has (`FamilySetup.epochMarker`).
-            let current = { (marker: [String: Any]) in
-                marker["build"] as? String == FamilySetup.build && (!keysKnown || keys[marker["family_key"] as? String ?? ""] != nil)
-            }
-            for item in prompts(
-                settings.promptCacheRoot.path, unused: false, unreachable: { known && fingerprints[String($0)] == nil }, current: current)
-            {
+            builds = SavedPrompts.builds(
+                settings.promptCacheRoot,
+                owners: .init(qwen: fingerprints, family: keys, qwenKnown: known, familyKnown: keysKnown && entries != nil))
+            for item in prompts(settings.promptCacheRoot.path, unused: false, builds: builds) {
                 let id = PromptCache.modelFolder((item.path as NSString).lastPathComponent).map(String.init)
                 items.append(item.unused ? earlier(item, id.flatMap { earlierModels[$0] }) : item)
             }
@@ -485,45 +487,27 @@ enum Storage {
             if item.role == "hot copy", items[index].move == nil, item.model != nil, item.model != "?" { items[index].move = "hot" }
         }
         var seen = Set<String>()
-        return items.filter { seen.insert($0.readable ? resolved($0.path) : $0.path).inserted }
+        return (items.filter { seen.insert($0.readable ? resolved($0.path) : $0.path).inserted }, builds)
     }
 
     /// The saved prompts and long contexts Origami keeps in `folder` (Qwen's `<fingerprint12>-<context>`, the family
-    /// engines' `<epoch16>` and `family-context`), as one item; anything else there is the user's. A Qwen folder of a
-    /// fingerprint no model has (`unreachable`), and a family epoch whose marker is not `current`, is an item of its own,
-    /// unused, unless a running server holds it; a family epoch without a marker stays in the shared item.
-    private static func prompts(
-        _ folder: String, unused: Bool, unreachable: (Substring) -> Bool = { _ in false }, current: ([String: Any]) -> Bool = { _ in true }
-    ) -> [Item] {
+    /// engines' `<epoch16>` and `family-context`), as one item; anything else there is the user's. A folder whose every
+    /// build is unusable (`SavedPrompts`: another build's, a model file no model uses) is an unused item of its own.
+    private static func prompts(_ folder: String, unused: Bool, builds: [SavedPrompts.Build] = []) -> [Item] {
         var names = children(folder).filter {
             $0 == "family-context" || $0.range(of: "^([0-9a-f]{12}-[0-9]+|[0-9a-f]{16})$", options: .regularExpression) != nil
         }
-        let stale =
-            unused
-            ? []
-            : names.filter {
-                PromptCache.modelFolder($0).map(unreachable) == true && !PromptCache.inUse(URL(fileURLWithPath: folder + "/" + $0))
-            }
-        let marked: [(String, [String: Any])] =
-            unused
-            ? []
-            : names.compactMap { name in
-                FamilySetup.epoch(URL(fileURLWithPath: folder + "/" + name)).map { (name, $0) }
-            }.filter { !current($0.1) && !PromptCache.inUse(URL(fileURLWithPath: folder + "/" + $0.0)) }
-        names.removeAll { name in stale.contains(name) || marked.contains { $0.0 == name } }
-        let old =
-            stale.sorted().map {
-                Item(
-                    path: folder + "/" + $0, role: "prompts",
-                    note: "saved prompts from an earlier Origami version or another model file; safe to delete", unused: true)
-            }
-            + marked.sorted { $0.0 < $1.0 }.map { name, marker in
-                Item(
-                    path: folder + "/" + name, role: "prompts",
-                    note:
-                        "saved prompts of \(marker["model"] as? String ?? "another model") from version \(marker["version"] as? String ?? "?"); safe to delete",
-                    unused: true)
-            }
+        let groups = Dictionary(grouping: builds.filter { $0.group.lastPathComponent != "family-context" }) { $0.group.lastPathComponent }
+        let stale = groups.filter { _, builds in
+            builds.allSatisfy { if case .unusable = $0.state { true } else { false } }
+        }
+        names.removeAll { stale[$0] != nil }
+        let old = stale.keys.sorted().map { name in
+            let reasons = Set(stale[name]!.compactMap { if case .unusable(let reason) = $0.state { reason } else { nil } }).sorted()
+            return Item(
+                path: folder + "/" + name, role: "prompts",
+                note: "saved prompts no build can read (\(reasons.joined(separator: "; "))); safe to delete", unused: true)
+        }
         guard !names.isEmpty else { return old }
         return old + [
             Item(
@@ -541,7 +525,7 @@ enum Storage {
     /// `GET v1/storage`: the drives holding Origami's items and the folders it writes to, each with its size, free space
     /// and the bytes Origami's items take there by role, and its items.
     static func report(_ settings: Settings, running: String?, found: Found, sources: [[String: Any]]? = nil) -> [String: Any] {
-        let items = items(settings, found: found)
+        let (items, prompts) = map(settings, found: found)
         let mounted = volumes()
         noteVolumes(settings, volumes: mounted)
         let folders = settings.storeFolders.map(\.path) + [settings.dataDir.path, settings.promptCacheRoot.path]
@@ -606,6 +590,8 @@ enum Storage {
             "relinks": relinks(settings, volumes: mounted).map { ["setting": $0.setting, "from": $0.from, "to": $0.to, "how": $0.how] },
             "stores": settings.stores.map(\.path), "hot_copy_dir": settings.hotCopyDir?.path ?? NSNull(),
             "context_dir": settings.promptCacheRoot.path,
+            // Each build's saved prompts, in use, usable by this build or unusable (`SavedPrompts`), as `origami cache` lists them.
+            "saved_prompts": prompts.map(\.json),
         ]
     }
 

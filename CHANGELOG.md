@@ -4,6 +4,41 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.5 (2026-11-22)
+
+**Replies:** unchanged.
+
+Three upgrades in three days showed what an upgrade cost: each emptied the saved prompts, so the next turn of a
+50,000-token conversation was read again in nine minutes, on a model that had started with its smallest cache because
+other apps held the memory, and nothing on the page said either.
+
+- **Saved prompts survive upgrades.** They were keyed on the executable's hash. They are now keyed on a digest of the
+  sources that can change the bits of a saved state (kernels, the forward passes, weight decoding, the state's format),
+  so an upgrade of the dashboard, the command line, storage or memory code keeps reading the same folder. Trust is
+  checked, not assumed: each folder keeps a canary (the logits of a short fixed probe on the real model), and a build
+  that is new to the folder, or the same build after a macOS update, must reproduce it bit for bit before it restores
+  anything; one that does not says so in the log and saves in a folder of its own. The probe runs at a load only when
+  there are saved prompts to protect ("checking this build against the saved prompts' canary" on the loading line);
+  a new folder gets its canary when the server has been idle for two minutes, and a request stops it. The first start
+  of this version still begins empty, once: earlier folders have no canary to check against.
+- **Slowed by.** The dashboard's Now tab, `origami status` and `slowed_by` in `/v1/status` and `/health` say what slows
+  Origami down now and what to do about it: memory under its target (how much, why, and the three apps that hold the
+  most), the model's drive reading slowly, the hot copy missing, building or short, saved prompts paused or a prompt
+  read again (and why), heat and Low Power Mode, a drive gone or not allowed, a job running, requests waiting. It
+  shows while a prompt is being read, too. The last request's "Slow because" line names prompts saved by another
+  Origami build.
+- **Old saved prompts are shown and removed from the dashboard.** The Models view lists, per model, the saved prompts
+  in use and those no build can read any more (another arithmetic, a model file no model uses, a context left on
+  disk) with size and age; the storage total says so above 1 GB; **Remove unusable…** deletes them with a model
+  loaded, and pinned or named conversations go only when ticked. `origami cache` marks each folder in use, usable by
+  this build or unusable with the reason; `origami cache prune` runs while a server is up and never touches a folder
+  a server holds (`--all` still needs `origami stop`).
+- **The permission messages name the program macOS asks about.** macOS stores the Removable Volumes permission for
+  the program that started the process tree: `origami` itself as a launchd job, a launcher that starts it, or the
+  terminal app. The messages now name that program. A small fixed launcher as the service's program keeps the
+  permission across upgrades (docs/integration.md).
+- The check script's crashing model stub ends with SIGUSR1 instead of SIGSEGV: no macOS crash dialog at each run.
+
 ## 3.1.4 (2026-11-22)
 
 **Replies:** unchanged.

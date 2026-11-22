@@ -15,8 +15,8 @@ enum Folders {
     /// What macOS says when an app reads a drive or folder it has not allowed (the front's own words for a drive).
     static func permission(_ path: String) -> String {
         path.hasPrefix("/Volumes/")
-            ? "macOS has not let Origami read \(Stores.driveName(path)) yet: allow Removable Volumes for origami in System Settings > Privacy & Security > Files & Folders"
-            : "macOS has not let Origami read \((path as NSString).lastPathComponent) yet: allow it for origami in System Settings > Privacy & Security > Files & Folders"
+            ? "macOS has not let Origami read \(Stores.driveName(path)) yet: allow Removable Volumes for \(PermissionSubject.name) in System Settings > Privacy & Security > Files & Folders"
+            : "macOS has not let Origami read \((path as NSString).lastPathComponent) yet: allow it for \(PermissionSubject.name) in System Settings > Privacy & Security > Files & Folders"
     }
 
     /// The path with symlinks and `..` resolved, or nil when nothing is there.

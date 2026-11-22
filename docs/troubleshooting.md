@@ -15,6 +15,16 @@
 The server's log goes to the terminal or launcher that runs `origami serve`; the last 50 lines are also in
 `/v1/status` (`events`).
 
+## Why is it slow?
+
+Look at the top of the dashboard's Now tab: while something slows Origami down, a **Slowed by** notice says what, one
+line each, the costliest first, and what to do (or that it recovers by itself, and when). `origami status` prints the
+same as "Slowed by" lines, and apps read it as `slowed_by` in `/v1/status` and `/health`. It covers memory below its
+target (with the apps that hold the most), a drive that reads slowly or is gone or not allowed, the hot copy (building,
+no room, failed), heat and Low Power Mode, conversation saves paused, a prompt read again, a job or waiting requests,
+and, last, settings this Mac measured could be better. Under the last request's bar, **Slow because** says the same
+for that request alone.
+
 ## Common problems
 
 | Symptom | What to do |
@@ -27,11 +37,14 @@ The server's log goes to the terminal or launcher that runs `origami serve`; the
 | "A context longer than this Mac keeps in memory goes to a file, which needs … free" | The key/value file and saved prompts live in `context_dir` (default: the data folder). Free about 37 GB there (a long conversation uses more while the server runs, 52 GB in a full-context test), or move `context_dir` or `data_dir` to a bigger drive. |
 | "macOS interrupted Origami's GPU work (the display or another app needed it); please retry your request" | macOS stopped Origami's GPU work three times in one request, usually while Screen Sharing, a video or a busy browser used the GPU. Origami already retried twice from its last saved state. Retry the request (Pi and the OpenAI SDKs do so on this 503). Fewer GPU-heavy apps during long prompts help. |
 | Replies stop mid-sentence | `max_tokens` was reached. With thinking on, Origami keeps room for the answer by closing the think block. |
-| After an update, the first follow-up is slow once | Saved state belongs to one engine build, so the first long prompt is read again. |
+| After an update, the first follow-up is slow once | The update changed the engine's arithmetic (or was the first to a version that keeps saved prompts), so its saved prompts cannot be used and the first long prompt is read again. The request's `prompt_restore` reason says so (`saved_by_other_build`). An update with the same arithmetic keeps them: its first start says "saved prompts: this build was checked against the folder's canary in N s". |
+| "saved prompts: … have no canary yet …, so this build cannot check them and saves its own" | The build that saved them had not yet been idle for two minutes after its first save, when it writes the canary. The new build starts its own saves; nothing is lost but those prompts' reuse. |
+| "saved prompts: WARNING: this build computes different bits …" | The new build's probe gave other bits than the build that saved the prompts, though their sources match (another compiler or macOS can do this). Nothing is restored from that folder; this build saves in its own. Report it with both builds' versions. |
 | "Conversation saves are paused: N GB free, and a save keeps 10.0 GB free plus its image" | The drive with `context_dir` is nearly full, so replies are not saved and the next long prompt may be read again from the start. Free disk space there, or lower `context` (smaller images). Saves resume by themselves; the server log says when. |
 | "Copy on … not built: it needs … plus 10.0 GB kept free, and … has … free" | Not enough room on that drive for a further copy. The message says how much copies from an earlier Origami version hold there; delete them in the dashboard's **Models** tab, free other space, or choose another drive. The model is not reloaded. |
 | The dashboard says the hot copy is not possible: "… has … free; the copy needs … and keeps 20 GB free" | Not enough room for the hot copy on that drive. Free space there or choose another drive on the card; it is built while the model serves. |
-| Saved prompts of an earlier build of a model are gone | Saved prompts belong to one build of the engine and model. A folder of the same model's older builds, unused for 14 days, is removed, and one may be when a save is short of disk; never one holding a pinned or named conversation. Another model's saved prompts are never removed this way: `origami cache prune` removes them (Qwen, GLM and DeepSeek folders, and a GLM or DeepSeek context left on disk), listing each with its size first. |
+| Saved prompts of an earlier build of a model are gone | Saved prompts are kept by builds that compute the same bits. A folder of the same model this build cannot read, unused for 14 days, is removed, and one may be when a save is short of disk; never one holding a pinned or named conversation. Another model's saved prompts are never removed this way: `origami cache prune` removes them (Qwen, GLM and DeepSeek folders, and a GLM or DeepSeek context left on disk), listing each with its size first. |
+| Old saved prompts take space (after upgrades, a model replaced) | Saved prompts no build can read any more stay on disk: older builds' folders, those of a model file no model uses, a GLM or DeepSeek context left on disk. The dashboard's **Models** view lists them under **Drives and files**, Saved prompts, per model with their size and age (the storage total says so above 1 GB); **Remove unusable…** lists what goes with sizes and removes them, also while a model is loaded. `origami cache` marks each folder "in use", "usable by this build" or "unusable: <reason>", and `origami cache prune` removes the unusable ones the same way. A folder a running server holds (its `.lock`) is never removed; one with pinned or named conversations goes only when ticked (`--yes`). `origami cache prune --all` also removes this build's, with the model stopped (`origami stop`). |
 | The dashboard says "The model will reload after the current reply" | A reload (new settings or a new hot copy) waits for the reply being written; the model keeps serving until then. |
 | "too little memory" | Close large apps, lower `context` to 8k, or set `memory_limit`. |
 | "the model does not fit in the memory limit" | The limit leaves too little for the model to start (GLM needs about 21 GB). Raise it up to the maximum the message names for this Mac, or unset it and let `origami tune --memory` measure one. |
@@ -43,7 +56,7 @@ The server's log goes to the terminal or launcher that runs `origami serve`; the
 | "… is shorter than its header says: the download is incomplete" | A GGUF was cut short (an interrupted download). Download it again. |
 | A move stopped part way (a crash, a sleep, a closed browser) | `origami move list` shows it; with the server quit, `origami move recover` finishes it (the copy was checked) or puts the original back, as the dashboard's **Recover…** does. A hot copy listed as "belongs to <model> before its move" waits for its model's files to be readable; `origami move recover` then carries it over. |
 | A `.partial` file or folder in the models folder | An unfinished conversion, listed with its size by `origami store list`. Run the same `origami model add` again (a Qwen conversion resumes), or delete it. |
-| `origami cache prune` keeps a build "it holds chat-1" | That build has pinned or named conversations; `origami cache prune --yes` removes it too. It runs with the server quit or stopped (`origami stop`). |
+| `origami cache prune` keeps a build "it holds chat-1" | That build has pinned or named conversations; `origami cache prune --yes` removes it too (on the dashboard: tick it in **Remove unusable…**). "a running server holds it": a server has that folder open; it can be removed once that server has stopped. |
 | An expert copy may be damaged | `origami verify`. A record that fails its checksum while serving is no longer read from that copy. GLM and DeepSeek check each hot-copy record on its first read and read a bad one from the model file instead; `/v1/status` counts them as `rejected_records`. The log has one line per rejected record and one when it is repaired. |
 | Apps get a 503 with `"code": "stopped"` | Origami was stopped with `origami stop` or the dashboard. Run `origami start` or press **Start**. |
 | A 503 "Request buffers are busy; retry in a moment" | Several large requests (images, long conversations) arrived at once. Retry; up to 64 requests can wait in the queue, but memory for request bodies is sized for 4 large ones (2 at 256K). An upload too slow to finish in time also gets it when another request needs its buffer. |
@@ -129,6 +142,14 @@ then the dashboard says it is learning). The 3.0 copy (`mirror.json` and
 `mirror.bin` in the hot copy's store) is not read any more; it is removed when the new one is first built, and until
 then the dashboard's **Models** tab lists it as an offline mirror of an earlier version. Further copies an earlier version made on other
 drives are still read as they are; new ones are written in the hot copy's format (`copy/` in the store's model folder).
+
+## After upgrading from 3.1
+
+Saved prompts are now kept across updates that do not change the engine's arithmetic. Those 3.1 saved were keyed on its
+build and cannot be checked, so the first start of this version begins without them, once; the log says an unusable
+older folder exists, and a request that would have used one says why in its `prompt_restore` (`saved_by_other_build`).
+They go after 14 days unused, or sooner when a save is short of disk; pinned or named ones stay until `origami cache
+prune`.
 
 ## What Origami is not
 

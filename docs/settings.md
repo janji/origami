@@ -217,10 +217,13 @@ for a full context (shorter prompts take less). So three take up to 2.9, 10.4 an
 and 54.3 GB. Saves always leave 10 GB of the drive free, dropping the oldest entries first. `origami doctor` shows
 the figure for your context.
 
-Saved prompts belong to one engine build: after an update, the first long prompt is read again.
+Saved prompts are kept across an update when the new build computes the same bits: their folder is keyed on the
+engine's arithmetic, not on its build, and a new build checks a short fixed probe against the folder's before it reads
+a save (the log says how long it took, or that the bits differ and it starts its own folder). An update that changes the
+arithmetic, and the first update to a version that keeps them, start empty once.
 `origami cache` lists saved prompts per build and `origami cache prune` removes other builds' ones. A start removes
-saved prompts of another build of the same model and context once unused for 14 days, and a save short of disk removes
-them first; another model's saved prompts, and a folder holding a kept session or a saved system prompt, are never removed
+saved prompts this build cannot read (another arithmetic, a canary that differed, or an earlier version that keyed them on its build) of the same
+model and context once unused for 14 days, and a save short of disk removes them first; another model's saved prompts, and a folder holding a kept session or a saved system prompt, are never removed
 automatically (a model file no model has any more: an earlier Origami version's identity, a replaced or rewritten model
 file, goes with `origami cache prune`); the storage map and `origami cache` list those as
 their own items, safe to delete. GLM's and DeepSeek's saved prompts are listed by the model, context and version each

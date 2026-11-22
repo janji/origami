@@ -118,6 +118,8 @@ public final class PrefixReuseController: @unchecked Sendable {
             statistics.frontierSaveFailures &+= 1
             record(.frontierSaveSkipped, detail: stage + ": " + String(describing: error))
             Self.report("conversation frontier save skipped (\(stage))", error)
+            // A file-system failure (errno), unlike a skip for room, means every later save fails too: the status says so.
+            if String(describing: error).contains("errno=") { promptCache?.saveFailed("\(stage): \(error)") }
             return nil
         }
     }

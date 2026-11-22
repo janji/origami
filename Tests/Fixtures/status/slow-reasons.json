@@ -8,6 +8,14 @@
     "verdict": "slow because: 6,100 prompt tokens were read again — the saved copy was skipped for disk space"
   },
   {
+    "rule": "a prompt read again, saved by another Origami build",
+    "request": { "seconds": 60, "ttft_s": 50, "prompt_tokens": 50392, "cached_tokens": 0, "completion_tokens": 100,
+      "stage_seconds": { "prefill_and_save": 49, "generation": 10 },
+      "prompt_restore": { "wanted": 50392, "restored": 0, "reason": "saved_by_other_build" } },
+    "status": {},
+    "verdict": "slow because: 50,392 prompt tokens were read again — it was saved by another Origami build"
+  },
+  {
     "rule": "a prompt read again, it differed from the saved one",
     "request": { "seconds": 20, "ttft_s": 15, "prompt_tokens": 5000, "cached_tokens": 500, "completion_tokens": 40,
       "stage_seconds": { "prefill_and_capture": 14, "generation": 5 },

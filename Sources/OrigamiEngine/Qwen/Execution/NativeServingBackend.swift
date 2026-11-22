@@ -57,6 +57,24 @@ public final class NativeServingBackend: ServingBackend, @unchecked Sendable {
         }
     }
 
+    /// The saved prompts' canary (`PromptCanary.qwenProbe`): the fixed tokens read cold as a teacher-forced exact request
+    /// does (isolated: no saved prompt read or written), the bits of every step's logits. While loading, or (`yielding`)
+    /// as idle work that a request arriving stops at its next scope or token (`IOOperationCancelled`).
+    package func canary(yielding: Bool = false) throws -> String {
+        var logits: [[Float]] = []
+        let run = { [self] in
+            let probe = PromptCanary.qwenProbe(vocabulary: ModelContract.geometry["vocab_size"]!)
+            if yielding { driver.executor.shouldContinue = { [gate] in !gate.waiting } }
+            defer { driver.executor.shouldContinue = { true } }
+            _ = try driver.generate(
+                prompt: probe.prompt, maximumOutput: probe.decode.count, computeTile: computeTile,
+                readScope: tunesPrefillScope ? min(readScope, prefillReadScope) : readScope, quality: .exact, persist: false,
+                teacherTokens: probe.decode, gpuKeepAlive: false, isolatedPrefill: true, onLogits: { logits.append($0) })
+        }
+        guard try gate.whileIdle({ admission.isIdle }, run) else { throw IOOperationCancelled() }
+        return PromptCanary.digest(logits: logits)
+    }
+
     /// Loading time is kept separate from first-request work and remains visible.
     public var readinessPreparation: [String: Any] {
         lock.lock()

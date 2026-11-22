@@ -9,6 +9,7 @@ public final class DeferredBackend: ServingBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var inner: NativeServingBackend?
     private var failure: String?
+    private var loadStage: String?
     private let version: String, context: Int
     public init(version: String, context: Int) {
         self.version = version
@@ -19,6 +20,11 @@ public final class DeferredBackend: ServingBackend, @unchecked Sendable {
         lock.lock()
         inner = backend
         lock.unlock()
+    }
+    /// What the load is doing now when it may take long (the saved prompts' canary), for `/health`'s `note`.
+    public var stage: String? {
+        get { lock.withLock { loadStage } }
+        set { lock.withLock { loadStage = newValue } }
     }
     public func failed(_ reason: String) {
         lock.lock()
@@ -39,6 +45,7 @@ public final class DeferredBackend: ServingBackend, @unchecked Sendable {
         if let inner { return inner.status() }
         var status = ServingStatus(version: version, contextTier: context, ready: false)
         status.failure = failure
+        status.degraded = stage  // shown as `note` while loading
         return status
     }
     public func prepare(_ request: ServingRequest, cancellation: GenerationControl) throws -> any PreparedGeneration {
@@ -74,7 +81,7 @@ public enum OrigamiRuntime {
         mtpWeights: URL? = nil, promptCacheEntries: Int = PromptCache.defaultEntries, gpuKeepAlive: Bool? = nil,
         qwenPrefillScope: Int? = nil,
         memoryHistory: MemoryHistory? = nil, learnsMemory: Bool = false,
-        log: @escaping @Sendable (String) -> Void
+        stage: @escaping @Sendable (String?) -> Void = { _ in }, log: @escaping @Sendable (String) -> Void
     ) async throws -> Loaded {
         let initialSwapouts = swapoutBytes()
         ModelLayout.use(model, serving: true)
@@ -109,30 +116,27 @@ public enum OrigamiRuntime {
         let ledger = try runtime.makeLedger()
         let tokenizer = try await TokenizerStack(modelDirectory: model.directory)
 
-        // Everything a saved state depends on: engine build, weights, tokenizer, template and settings.
+        // Everything a saved state depends on: the engine's arithmetic (not its build: builds that compute the same bits
+        // share saved prompts, `PromptCanary`), weights, tokenizer, template and settings.
         let config = try Data(contentsOf: model.directory.appendingPathComponent("config.json"))
         let template = (try? Data(contentsOf: model.directory.appendingPathComponent("chat_template.jinja"))) ?? Data()
-        let epoch = hex(
-            SHA256.hash(
-                data: Data(
-                    (try executableDigest() + model.fingerprint + tokenizer.identity
-                        + "\(runtime.contextLimit)" + String(describing: runtime.experts.mode) + overridesText
-                        + "|prefill-scope:\(prefillScope)").utf8)))
+        let epoch = PromptCanary.epoch(
+            model.fingerprint + tokenizer.identity + "\(runtime.contextLimit)" + String(describing: runtime.experts.mode) + overridesText
+                + "|prefill-scope:\(prefillScope)")
         let identity = try CheckpointIdentity(
             modelSHA256: model.fingerprint, tokenizerSHA256: tokenizer.identity,
             templateSHA256: hex(SHA256.hash(data: template)), quantizationSHA256: hex(SHA256.hash(data: config)),
             arithmeticEpoch: "origami-" + epoch)
         let geometry = try ConversationGeometry(context: runtime.contextLimit, fileBacked: runtime.fileBackedContext)
-        // One folder per epoch: a rollback or another build finds its own entries still there.
+        // One folder per epoch, shared by the builds whose canary matches (checked below, before any request).
         let promptCache = try PromptCache(
             root: promptCacheRoot.appendingPathComponent(String(epoch.prefix(16)), isDirectory: true), epoch: epoch,
             // Plus four system snapshots. No aggregate quota: PromptCache.makeRoom keeps 10 GB free on the drive.
             entries: PromptCache.regularEntries(context: runtime.contextLimit, entries: promptCacheEntries),
             entryBytes: runtime.prefixDiskBytes, ledger: ledger, capacity: runtime.contextLimit,
             // A context kept in a file grows on the same drive: saves leave it room too.
-            minimumFreeBytes: 10_000_000_000 + (geometry.fileBacked ? ConversationGeometry.fileDiskBytes : 0))
-        if let off = promptCache.savesOff { log("prompt cache: off (\(off))") }
-        if let note = promptCache.savesNote { log("prompt cache: \(note)") }
+            minimumFreeBytes: 10_000_000_000 + (geometry.fileBacked ? ConversationGeometry.fileDiskBytes : 0),
+            build: PromptCanary.build)
         promptCache.log = log
         let prefix = try PrefixReuseController(
             identity: identity, ledger: ledger, memoryBytes: runtime.prefixMemoryBytes,
@@ -170,11 +174,6 @@ public enum OrigamiRuntime {
             readScope: runtime.readScope, prefillReadScope: prefillScope)
         backend.expectsPack = storage.packFolder != nil
         backend.servedContext = min(context, runtime.contextLimit)
-        if let routingFile {
-            executor.routingProfile = RoutingProfile.load(routingFile) ?? RoutingProfile()
-            // Only the server that owns the data folder writes its counts back.
-            backend.routingFile = promptCache.shared ? nil : routingFile
-        }
         if model.tensors.keys.contains(where: { $0.hasPrefix("vision_tower.") }) { backend.visionModel = model }
         backend.log = log
         let governor = MemoryGovernor(
@@ -189,6 +188,19 @@ public enum OrigamiRuntime {
                 String(
                     format: "startup preparation: %d fixed layers in %.3f s (%@)", layers, seconds,
                     readiness["reason"] as? String ?? "unknown"))
+        }
+        // A build the folder's canary does not list yet runs the probe now, before routing counts are kept and any request.
+        if promptCache.savesOff == PromptCache.checking { stage(PromptCache.checking) }
+        promptCache.settle { try backend.canary() }
+        stage(nil)
+        if let off = promptCache.savesOff { log("prompt cache: off (\(off))") }
+        if let note = promptCache.savesNote { log("prompt cache: \(note)") }
+        if let note = promptCache.unusableNote { log("saved prompts: \(note)") }
+        if let note = promptCache.canaryNote { log("saved prompts: \(note)") }
+        if let routingFile {
+            executor.routingProfile = RoutingProfile.load(routingFile) ?? RoutingProfile()
+            // Only the server that owns the data folder writes its counts back.
+            backend.routingFile = promptCache.shared ? nil : routingFile
         }
         let templateSHA = hex(SHA256.hash(data: template))
         let probe = tokenizer.templateCheck()
@@ -206,7 +218,7 @@ public enum OrigamiRuntime {
             ])
     }
 
-    /// The running binary's digest: a new build never reuses another build's saved states.
+    /// The running binary's digest: the builds a saved-prompt folder's canary lists (`PromptCanary`).
     package static func executableDigest() throws -> String {
         guard let url = Bundle.main.executableURL else { return "unknown-build" }
         let handle = try FileHandle(forReadingFrom: url)

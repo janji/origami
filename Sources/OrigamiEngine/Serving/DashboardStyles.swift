@@ -116,6 +116,13 @@ enum DashboardStyles {
         .steps li { padding: 2px 0; }
         .steps li::marker { color: var(--ink-2); }
         .notice-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+        /* Slowed by: one compact line per condition (what, then the fix), so the speed stays on the first screen */
+        .slowed { padding-bottom: 16px; }
+        .slowed .notice-box { padding: 10px 14px; }
+        .slowed h2 { font-size: 13px; }
+        .slowed ul { margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; max-width: 120ch; }
+        .slowed li { padding: 2px 0; color: var(--ink-2); overflow-wrap: anywhere; }
+        .slowed li b { color: var(--ink); font-weight: 600; }
 
         /* A job: adding, converting, tuning, moving, with its progress */
         .job { padding-bottom: 22px; }

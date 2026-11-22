@@ -108,7 +108,7 @@ code that runs the GLM-5.3-Flash and DeepSeek-V4.1-Flash GGUFs (section 4, Famil
 
 | Folder | What it is | Files | Main types |
 |---|---|---|---|
-| `Core` | Low-level pieces every part uses: bf16 rounding, exact file reads, the GPU-interruption retry and command-buffer limit, the `Host` and `Origin` rule, the GPU keep-alive | `BF16`, `CommandBudget`, `ExactFile`, `GPURetry`, `HostGuard`, `RequestGPUKeepAlive` | `BF16`, `CommandBudget`, `ExactFile`, `FileIdentity`, `EngineError`, `GPURetry`, `HostGuard`, `RequestGPUKeepAlive` |
+| `Core` | Low-level pieces every part uses: bf16 rounding, exact file reads, the GPU-interruption retry and command-buffer limit, the `Host` and `Origin` rule, the GPU keep-alive | `ArithmeticDigest`, `BF16`, `CommandBudget`, `ExactFile`, `GPURetry`, `HostGuard`, `RequestGPUKeepAlive` | `BF16`, `CommandBudget`, `ExactFile`, `FileIdentity`, `EngineError`, `GPURetry`, `HostGuard`, `RequestGPUKeepAlive` |
 | `Models` | What a model is: Qwen's architecture contract, checkpoint view and layout; the family geometry read from a GGUF; the tokenizer and chat template; model identity and compatibility | `LocalModelIdentity`, `ModelCompatibility`, `ModelContract`, `ModelFamily`, `ModelLayout`, `ModelSource`, `TokenizerStack`, `VerifiedContentReceipt` | `ModelContract`, `ModelSource`, `QuantizationScheme`, `AffineFormat`, `ModelLayout`, `ModelFamily`, `ModelGeometry`, `TokenizerStack`, `ReplyText`, `ModelCompatibility` |
 | `Formats` | Formats on disk and converters: packs and stores, GGUF parsing, dequantization and quantization, ggml-metal's matrix kernels (used by both engines), the checkpoint converters | `CheckpointConverter`, `GGMLMatrixKernels`, `GGUF`, `GGUFConversion`, `GGUFExperts`, `GGUFGrids`, `GGUFQuantize`, `PackStore`, `StoreBuilder`, `StoreFormat` | `CheckpointConverter`, `GGUFSource`, `GGUFQuant`, `GGUFQuantize`, `GGUFExperts`, `GGUFExpertKernels`, `GGMLMatrixKernels`, `PackStore`, `TensorSpan`, `StoreBuilder`, `StoreHeader` |
 | `Memory` | Memory accounting and its policies (the ledger and the governor serve both engines), phase budgets, Qwen's resident tensor caches | `ConversationPhaseBudget`, `MemoryAdmission`, `MemoryAllocationAdmission`, `MemoryBudgetPolicy`, `MemoryCacheRelief`, `MemoryGovernor`, `MemoryLedger`, `ResidentFloatTensorCache`, `ResidentTensorCache`, `WiredMemoryPolicy` | `MemoryLedger`, `MemoryGovernor`, `MemoryGovernorPolicy`, `MemoryBudgetMode`, `ConversationPhaseBudget`, `ResidentTensorCache`, `ResidentFloatTensorCache`, `WiredMemoryPolicy` |
@@ -121,9 +121,9 @@ code that runs the GLM-5.3-Flash and DeepSeek-V4.1-Flash GGUFs (section 4, Famil
 | `Family` | The family engine: the shared runner, its kernels and routing, the serving backend, saved-state files, tokenizer support, the GLM converter, and opt-in observers | `FamilyBackend`, `FamilyConverter`, `FamilyHostPhaseTiming`, `FamilyKernels`, `FamilyResidentPack`, `FamilyRouteTrace`, `FamilyRouting`, `FamilyRunner`, `FamilyScratchOwnership`, `FamilyStateFile`, `FamilySupport` | `FamilyRunner`, `FamilyModel`, `FamilyServingBackend`, `FamilyKernels`, `FamilyRouting`, `FamilyStateFile`, `FamilySupport`, `FamilyConverter` |
 | `Family/Models` | The forward passes and DeepSeek's Engram reads | `DeepSeekEngramRead`, `DeepSeekModel`, `GLMModel` | `GLMModel`, `DeepSeekModel`, `DeepSeekEngramHash` |
 | `Family/Streaming` | The family engine's resident weights and expert streaming: the expert pools, the hot copy's records (`FamilyHotCopySource`), slab wiring, the guess policy, and opt-in experiments | `FamilyEviction`, `FamilyHedges`, `FamilyHotCopySource`, `FamilyPoolState`, `FamilyPrefetchObservations`, `FamilyPrefetchPolicy`, `FamilySlabStorage`, `FamilyWeights` | `FamilyWeights`, `FamilyExperts`, `FamilySlabStorage`, `FamilyPrefetchPolicy` |
-| `Conversation` | Sequence state, the conversation and its frontiers, checkpoint images and the paged file, the prompt cache (shared by both engines) and prefix reuse | `CheckpointPages`, `ConversationFrontierIndex`, `ConversationFrontierStore`, `ConversationGeometry`, `ConversationScopeCapture`, `ModelCheckpoint`, `PagedCheckpointFormat`, `PagedCheckpointStore`, `PersistentCheckpointStore`, `PersistentConversation`, `PrefixReuseController`, `PromptCache`, `PromptEncodingCache`, `SequenceState`, `State` | `SequenceState`, `QSAState`, `GDNState`, `PersistentConversation`, `ConversationFrontierIndex`, `ConversationFrontierStore`, `ConversationGeometry`, `ModelCheckpoint`, `PagedCheckpointFormat`, `PromptCache`, `PrefixReuseController` |
+| `Conversation` | Sequence state, the conversation and its frontiers, checkpoint images and the paged file, the prompt cache (shared by both engines) and prefix reuse | `CheckpointPages`, `ConversationFrontierIndex`, `ConversationFrontierStore`, `ConversationGeometry`, `ConversationScopeCapture`, `ModelCheckpoint`, `PagedCheckpointFormat`, `PagedCheckpointStore`, `PersistentCheckpointStore`, `PersistentConversation`, `PrefixReuseController`, `PromptCache`, `PromptCanary`, `PromptEncodingCache`, `SequenceState`, `State` | `SequenceState`, `QSAState`, `GDNState`, `PersistentConversation`, `ConversationFrontierIndex`, `ConversationFrontierStore`, `ConversationGeometry`, `ModelCheckpoint`, `PagedCheckpointFormat`, `PromptCache`, `PrefixReuseController` |
 | `Serving` | The HTTP server and the engine-neutral parts of a request: parsing and wire formats, sampling, stop strings, tool-call parsing, the model scheduler, the dashboard page, request records; also `GenerationDriver`, Qwen's request loop on `SerialExecutor` (the family backend reuses some of its helpers) | `DashboardAssets`, `DashboardPage`, `DashboardScript`, `DashboardStyles`, `GeneratedTokenSequence`, `GenerationDriver`, `GenerationProgress`, `HTTPIngressPolicy`, `HTTPRequestLifecycle`, `JSONMode`, `LocalHTTPServer`, `ModelScheduler`, `RequestPhaseCounters`, `RequestRecords`, `Sampler`, `SamplingDefaults`, `ServingPrompt`, `ServingProtocol`, `ServingWires`, `StopSequenceFilter`, `ToolCallAnchor` | `LocalHTTPServer`, `BoundedHTTPRequestDecoder`, `ServingRequest`, `ServingStream`, `ToolCallSplitter`, `WireTranslation`, `WireWriter`, `GenerationDriver`, `ReferenceSampler`, `JSONConstraint`, `SamplingDefaults`, `ModelScheduler`, `DashboardPage`, `RequestRecorder` |
-| `Planning` | The start-up plan and runtime assembly: memory and context planning, the validated runtime configuration, the tuner's rules and request overrides, the learned memory budget | `OrigamiPlan`, `OrigamiRuntime`, `RuntimeConfiguration`, `SelfTuning` | `OrigamiPlan`, `OrigamiHost`, `OrigamiStorage`, `OrigamiMemory`, `OrigamiRuntime`, `DeferredBackend`, `RuntimeConfiguration`, `SelfTuning`, `TuneOverrides`, `MemoryHistory` |
+| `Planning` | The start-up plan and runtime assembly: memory and context planning, the validated runtime configuration, the tuner's rules and request overrides, the learned memory budget | `OrigamiPlan`, `OrigamiRuntime`, `ReleaseExecution`, `RuntimeConfiguration`, `SelfTuning` | `OrigamiPlan`, `OrigamiHost`, `OrigamiStorage`, `OrigamiMemory`, `OrigamiRuntime`, `DeferredBackend`, `RuntimeConfiguration`, `SelfTuning`, `TuneOverrides`, `MemoryHistory` |
 | `SelfChecks` | What the checks need inside the engine: where their fixtures are, and the skip error | `CheckFixtures` | `CheckFixtures`, `FixtureUnavailable` |
 
 The checks that need the engine's `package` internals are the `OrigamiEngineChecks` target (`CompactAttentionSelfChecks`
@@ -773,7 +773,7 @@ folder is found at its new name and its files re-stamped again), so a stop is fi
 | Family usage counts and data-folder hot copy | `<data_dir>/family/<key>/{uses,misses}.json`, `hot*/index.json` `identity` = key + representation | folder renamed, key replaced in the index |
 | Family hot copy in `hot_copy_dir`, packs in stores | `<folder>/family-<key>/hot*/index.json`, `pack-*/pack.json` `identity` | folder renamed, key replaced |
 | Family support files | `<data_dir>/support/<key>` | renamed (rewritten at each start anyway) |
-| Family saved prompts | `<context_dir>/<epoch16>`; `index.json` and `entry-*/state.json` carry the epoch, a hash over the build, the key, the pack, the tensor table, the context and `ORIGAMI_FAMILY_GROUPED_DECODE=0` | for the current settings: epoch replaced in both files, folder renamed. A state's own SHA-256 covers its tokens and bytes, not the epoch. Other settings' and builds' folders stay and age out as other builds' do |
+| Family saved prompts | `<context_dir>/<epoch16>`; `index.json` and `entry-*/state.json` carry the epoch, a hash over the arithmetic digest, the key, the pack, the tensor table, the context and `ORIGAMI_FAMILY_GROUPED_DECODE=0` | for the current settings: epoch replaced in both files, folder renamed. A state's own SHA-256 covers its tokens and bytes, not the epoch. Other settings' and builds' folders stay and age out as other builds' do |
 | Qwen packs, further copies, hot copy | `<store>/<name>-<fingerprint12>`, `StoreHeader.model_fingerprint`, `hot/index.json` `identity` `qwen <fingerprint> <layout>` | every store, the home store and `hot_copy_dir`: folder renamed, fingerprint replaced |
 | Qwen routing counts | `<data_dir>/routing-<fingerprint12>.json` | renamed |
 | Qwen calibration (before 3.1) | `calibration.json` keys `<fingerprint16>|<drive>|<drive>` (no longer read; `drive-speeds.json` is per drive) | key prefix replaced |
@@ -2931,7 +2931,7 @@ exit cleanly hold no live files and are removed at the next start.
 `ModelCheckpoint` is a conversation state image (not model weights):
 
 - **Identity** (`CheckpointIdentity`): the model fingerprint, the tokenizer identity, the chat template's and
-  `config.json`'s SHA-256, and an arithmetic epoch.
+  `config.json`'s SHA-256, and an arithmetic epoch (`origami-` and the prompt cache's epoch).
 - **Segments** (`CheckpointSegment`): every producing forward with its start, count, projection rows, query tile, key
   extent, phase and a dispatch hash. `PrefillReadSchedule.checkpointSegments` hashes the sorted-key JSON of each tile's
   shape into `dispatchSHA256`, so an equal prefix computed with a different schedule is not an exact match.
@@ -2985,8 +2985,10 @@ next save or the next start.
 ```
 <context_dir>/                                   default <data_dir>/prompt-cache; must be private to this user
   <fingerprint12>-<tier>/                        one folder per model and context tier
-    <epoch16>/                                   one per engine build and settings (see below)
+    <epoch16>/                                   one per engine arithmetic and settings (see below)
       .lock                                      flock held by the server that owns this folder
+      origami-epoch.json                         marker: model, family_key, context, version, build (the tool's);
+                                                 arithmetic, canary, builds[], refused? (PromptCanary's)
       index.json                                 {epoch, entries{slot: Entry}, read}   flushed, renamed over
       system-blocks.json                         token IDs of the last 8 system blocks
       entry-0 … entry-(R+3)/                     R regular slots + 4 system slots, 0700
@@ -3007,12 +3009,60 @@ and slot folders past the last slot are removed. An
 `turn` or none), an optional name and pin, a mark of the `read` counter at its last use, and a digest of its images.
 
 **Epoch.** The folder name is 16 hex digits of
-`SHA-256(executable digest, model fingerprint, tokenizer identity, context tier, expert mode, ORIGAMI_EXECUTION text, expert format)`.
-Each build keeps its own folder, so a rollback finds its entries. Other builds' folders of the same model and context
-are removed after 14 days unused or, first, when a save runs short of disk; a family folder without a marker (an older
-build's) only after the 14 days, another model's never, nor one holding a pinned or named entry. `origami cache` lists
-them and `origami cache prune` removes them. An index of
-another epoch is discarded at start.
+`SHA-256(arithmetic digest, model fingerprint, tokenizer identity, context tier, expert mode, ORIGAMI_EXECUTION text, prefill scope)`
+(GLM and DeepSeek: the arithmetic digest, the hot copy's identity, a resident pack's, the tensor table, the context and
+the decode path, `familyEpoch`). The arithmetic digest (`ArithmeticDigest.value`) is a SHA-256 over the sources that can
+change a saved state's or its logits' bits, so builds that change none of them share a folder; until 3.1.4 the
+executable's SHA-256 stood there and every upgrade started empty. `scripts/arithmetic-digest.py` writes it, and lists
+each covered and left-out path with why; `arithmetic_digest_current` fails, naming the command, when a covered file
+changed since. In: `CExactIO`, `Core` (bfloat16, exact reads, the state files), `Formats` (weight decoding, ggml matrix
+kernels, record layouts), `Models` (tensor locations, layout, geometry), `Conversation` (the state's format, capture and
+restore, the canary's probe), `Qwen` and `Family` (kernels and forward passes), `GenerationDriver` (Qwen's prompt read
+schedule and decode loop), `QualityDial` and `FastLateMissSkip` (which rows are exact), `RuntimeConfiguration` and
+`ReleaseExecution` (the execution switches that choose kernels). Out: the command-line tool, `Serving` otherwise,
+`Memory`, the rest of `Planning` (sizes), the shared `Streaming` read and copy code, and in the folders above the files
+that only wait for, retry or keep the GPU busy, read, cache, rank or count expert records, download, refuse or re-bind
+models, turn text into token ids (saves are keyed on the ids), profile or trace, and `PromptCache` itself. A format
+change cannot pass as compatible: the paged file's `version` (2) and `FamilyStateFile`'s layout live in covered files.
+
+**The canary** (`PromptCanary`, `PromptCache.settle`). The digest cannot see a compiler's or macOS's changes, so a folder
+is verified, not trusted: its marker (`origami-epoch.json`, beside the tool's model and build fields) holds the
+arithmetic digest, the SHA-256 of the bits of a fixed probe run on the real model from a
+cold state, and the builds that reproduced it: each the executable's SHA-256 and the macOS build
+(`PromptCanary.build`), so a macOS update (another Metal compiler and drivers) proves the canary again once. No probe
+runs at load unless it protects something: a new or empty folder (no saved entry) is this build's at once, its marker
+listing only it and no canary; the build writes the canary later, while idle (`PromptCache.canaryWhenIdle`, looked at
+by the server's own 200 ms loop): once something is saved there, after 120 s without a request, never while a request
+or the warm-up holds the engine, a hot copy is being built or memory is under pressure. That probe runs under the
+engine's lock as a request would, and a request arriving stops it at its next layer step or token (`ServingGate.waiting`
+through the engine's cancellation); it runs again at the next idle spell. A build that finds saves without a canary yet
+cannot check them: it saves in its own folder and says so once. Only a folder with saves and a canary that does not
+list the running build keeps the cache closed (no index read, nothing written or removed, saves off) until the runtime
+runs the probe, after the start-up preparation and before routing counts are kept, the warm-up or any request; the log,
+the load progress and `/health`'s `note` say "checking this build against the saved prompts' canary" meanwhile
+(`ORIGAMI_TEST_CANARY_AT_LOAD=1` runs it at every load, for the real-model check): Qwen reads 600 fixed token ids
+(three 256-token tiles, the last ragged) as a teacher-forced exact request does (isolated: no saved prompt read or
+written, no MTP), then 3 decode steps, hashing each step's logits (`NativeServingBackend.canary`); GLM and DeepSeek read 8
+fixed ids on a reset model (16 rows: the prompt's dense matrix kernels, above 8 rows; most experts still get fewer
+than 9 rows) and 2 decode tokens, hashing each step's logits and the final state's bytes, with the decode
+uses left out of the usage counts (`FamilyServingBackend.canary`). The ids are ordinary text tokens of every vocabulary
+(100 to 31,999), never through the template; both sizes are `PromptCanary.qwenSize` and `familySize`. Equal: the build
+is added and the folder opens ("saved prompts: this build was checked against the folder's canary in N s"). Different: one WARNING line,
+nothing of that folder is restored, written or removed, and the build saves in its own folder (`PromptCanary.ownFolder`:
+16 hex digits of SHA-256 of the folder's name and the executable's digest, its canary naming the folder it `refused`),
+which it goes to directly at its next start. The same executable on a listed folder runs no probe. A probe that throws
+leaves saves off for that run. Cost: Qwen's 600 rows reach nearly every routed expert (up to 68 GB at 4-bit, less what
+memory and the hot copy hold), like reading any 600-token prompt cold; GLM's and DeepSeek's 18 tokens read at most 144
+and 108 records a layer. Checks: `prompt_cache_canary_shared_by_builds`, `prompt_cache_canary_refused_and_older_folders`,
+`synthetic_family_canary` (the same bits at three expert budgets and run to run).
+
+Folders this build cannot read (`PromptCanary.whyUnreadable`: another arithmetic, a canary it did not reproduce,
+another build's own folder, or a marker without canary fields, a folder of 3.1.4 or earlier; a folder of the same
+arithmetic not checked against this build yet, with or without its canary, is not one: `notCheckedYet` words it) of the same model and context are removed after 14
+days unused or, first, when a save runs short of disk; a family folder without a marker (an older build's) only after
+the 14 days, another model's never, nor one holding a pinned or named entry. The start names them once ("saved prompts:
+N saved prompts of this model beside … cannot be used by this build (…)"). `origami cache` lists them and `origami
+cache prune` removes them. An index of another epoch is discarded at start.
 
 **The index on disk.** Every write is staged as `.index.json.staging`, flushed with `F_FULLFSYNC`, renamed over
 `index.json` and the folder flushed, one writer at a time, so a crash or power cut leaves the old index or the new
@@ -3089,7 +3139,9 @@ way. Checks: `hot_copy_share_*`, `hot_copy_keeper_backlog_counter`.
 **The restore account.** For every request, `prompt_restore` in its row says the prompt tokens a save could have given
 (`wanted`: the longest prefix of the request a save tried since load holds, or that the previous request's prompt
 shares), those restored, and when fewer, why (`PromptCache.explainRestore`): `no_entry`, `entry_evicted`,
-`save_skipped_disk`, `save_not_finished`, `save_failed`, `prefix_differs_at=K` or `entry_not_used`;
+`save_skipped_disk`, `save_not_finished`, `save_failed`, `prefix_differs_at=K`, `entry_not_used`, or a save in a folder
+this build cannot read: `saved_by_other_build`, with `reason_words` saying which (`PromptCanary.otherArithmetic`,
+`beforeUpgrades`);
 `prompt_cache.restore_fallbacks` counts them since load and `restore_lost_tokens` the tokens read again. Each row
 also carries `memory_budget_deficit_gb_seconds` (GB-seconds the memory budget spent below its target while it ran;
 `/v1/status` has the total since load).
@@ -3300,7 +3352,10 @@ never by searching a drive:
 - `<data_dir>/family/<key>` and `support/<key>`;
 - downloads and conversions (by `.origami-download.json`, `.part` or `origami-model.json`) in the models folder and
   beside registered models;
-- the saved prompts' folders;
+- the saved prompts' folders; a folder whose every build is unusable (`SavedPrompts`) is an unused item of its own, and
+  `saved_prompts` lists each build with its state, size, conversations and kept names (the page's Saved prompts rows;
+  `POST /v1/storage/plan {"kind": "prune"}` previews and `POST /v1/jobs {"kind": "prune", "yes": [paths]}` runs
+  `SavedPrompts.prune`, a pinned or named folder only when its path is in `yes`);
 - what `<data_dir>/former-folders.json` remembers (the stores, hot copy and context folders before each change, written
   by `/v1/config` and `config set`), whose leftovers nothing reads.
 
@@ -3407,7 +3462,7 @@ so the port answers within a second of start and requests sent meanwhile wait (`
 | `POST /v1/config` | saves those six settings for the next start (the dashboard's Apply); a family `hot_copy_dir` on the model's drive is refused; a retired `expert_bits` is refused unless empty (the Clear that removes it) |
 | `POST /v1/hot-copy` | the Experts card: `{"build": true}` (top up or build now), `{"drive": "<drive path>"\|"auto"}` (saved as `hot_copy_dir`: none on the data folder's drive, the data folder's store there for Qwen, whose automatic copy goes beside the model, `/Volumes/<drive>/Origami/hot-copy` elsewhere), `{"size": "40GB"\|"auto"\|"off"}` (`hot_copy`), and for Qwen `{"copy": "<drive path>"}` (adds `/Volumes/<drive>/Origami/store` to `stores`, where setup writes all experts or a further copy); applied while the model serves (either engine) and answered with its `hot_copy` row; for Qwen's `copy` the front starts `origami setup` as a job of its own kind (`{"job": "hot-copy", "reload": …}`), refused while a reload is pending, and reloads after it only if the job changed what the model reads (`Stores.signature`: the stores' headers, their times and payload sizes) or the copy was turned off, on or moved; setup fails, saying what it needs, what is kept free, what is free and what 2.x copies hold there, when a further copy has no room |
 | `GET`, `PATCH`, `DELETE /v1/prompts/<id>`, `POST /v1/prompts` | one saved prompt's text; rename and keep; delete; save a system prompt's text (the running model only) |
-| `GET`, `POST`, `DELETE /v1/jobs` | the dashboard's job: adding a model (with `"base"`: a GGUF of low-bit experts as a variant of that exact model, as `model add --base`), or moving or removing a storage item (`"drive": true` moves a pack to that drive's store, the Experts card's Move…); its progress; cancel (front only) |
+| `GET`, `POST`, `DELETE /v1/jobs` | the dashboard's job: adding a model (with `"base"`: a GGUF of low-bit experts as a variant of that exact model, as `model add --base`), or moving or removing a storage item (`"drive": true` moves a pack to that drive's store, the Experts card's Move…), or removing unusable saved prompts (`prune`); its progress; cancel (front only) |
 | `GET /v1/storage` | the storage map: each drive with its size, free space and Origami's bytes by role, and its items (path, role, model, size, in use, unused, actions) (front only) |
 | `GET /v1/models/found`, `GET /v1/models/check?source=&to=` | models on this Mac Origami could add; what adding one would do and whether there is room (front only) |
 | `GET /v1/fs?path=&models`, `POST /v1/fs/mkdir` | the dashboard's folder browser: roots and folder settings, one folder's entries, a new folder (front only) |
@@ -3753,7 +3808,7 @@ expert selection and arithmetic are unchanged in exact mode. No performance gain
 | `relink [--yes]` | Finds the folders settings name on a drive now mounted under another name and uses the new places once confirmed (`Storage.relinks`). |
 | `service install\|remove [--label]` | Writes `~/Library/LaunchAgents/<label>.plist` (this binary's `serve` with the setting options given, folders made absolute, and this shell's `ORIGAMI_*` variables), prints it and loads it; or stops and deletes it. |
 | `config [--json]`, `config get\|set\|unset <key> [value]` | Lists every key with its value and source, or changes one through the shared validator. |
-| `cache [prune [--all] [--yes]]` | Lists the saved prompts per model, tier and build (Qwen's `<context_dir>/<fingerprint12>-<tier>/<build>`, the family engines' `<context_dir>/<epoch16>`, a context left on disk) with size and last use; `prune`, refused while a model is loaded (after `origami stop` it runs), keeps each model's newest build, `--all` removes them all, and a build with named or pinned entries stays unless `--yes`; it prints what it removes with sizes. It touches only Origami's own folders. |
+| `cache [prune [--all] [--yes]]` | Lists the saved prompts per model, tier and build (Qwen's `<context_dir>/<fingerprint12>-<tier>/<build>`, the family engines' `<context_dir>/<epoch16>`, a context left on disk) with size, last use and state (`SavedPrompts`): "in use" (a server holds its `.lock`), "usable by this build" or "unusable: <reason>" (another or an earlier build, by `SavedPrompts.whyUnreadable`: Qwen and family epoch folders carry the `origami-epoch.json` marker naming their build; a model file no registered or configured model has; a family context file of a process gone). `prune` removes the unusable ones, also while a model is loaded: each folder is locked (its `.lock`) and renamed aside before it is deleted, so a folder a server holds is never touched; `--all` also removes this build's and is refused while a model is loaded (after `origami stop` it runs). A build with named or pinned entries, or an index that cannot be read, stays unless `--yes`; it prints what it removes with sizes and what it kept and why. It touches only Origami's own folders. |
 | `verify [--deep]` | Re-hashes every record of each pack and further copy, and checks every hot copy record (either engine's) against its CRC32; `--deep` also compares each record with the model's own. |
 | `content verify\|import\|check` | Checks an explicit, ordered list of files against pinned SHA-256 digests and writes or checks a receipt bound to those files ([docs/content-receipts.md](docs/content-receipts.md)); loads no model. |
 | `refresh [--model <name>] [--yes]` | Rewrites the model's weight files in place and moves what was keyed by their old identity to the new one (`ModelRefresh`, see "Refreshing model files" under Digests and identity). Refuses while a server answers on the port or holds a prompt-cache `.lock`. |

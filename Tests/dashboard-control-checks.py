@@ -480,7 +480,7 @@ if model.endswith('broken'):
     print('origami: the model drive is not readable yet', file=sys.stderr, flush=True); sys.exit(1)
 port = int(""", 1).replace("    def do_GET(self):", """    def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
-        if model == 'crasher': os.kill(os.getpid(), 11)
+        if model == 'crasher': os.kill(os.getpid(), 30)  # SIGUSR1: ends the process like a crash, without macOS's crash dialog
         if body.get('stream'):
             self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Connection', 'close'); self.end_headers()
             self.wfile.write(('data: ' + json.dumps({'model': model, 'pid': os.getpid()}) + '\\n\\ndata: [DONE]\\n\\n').encode()); return
@@ -536,10 +536,10 @@ with tempfile.TemporaryDirectory(prefix='origami-front-') as temporary:
         # the signal, and the next request starts a model again.
         code, refusal = ask('crasher')
         for _ in range(100):
-            if 'crashed with signal 11' in (root / 'server.log').read_text(): break
+            if 'crashed with signal 30' in (root / 'server.log').read_text(): break
             time.sleep(.05)
         check(code == 502 and 'stopped while answering' in refusal['error']['message']
-              and 'crashed with signal 11' in (root / 'server.log').read_text() and ask('second')[1]['model'] == 'second',
+              and 'crashed with signal 30' in (root / 'server.log').read_text() and ask('second')[1]['model'] == 'second',
               'a model process that crashes under a request gives a 502 and a log line with its signal: ' + refusal['error']['message'])
         # A stream waiting on a switch (`slow` takes 12 s to listen) gets its headers and keepalives, then the model's
         # own stream without a second status line; a start that fails after the headers is a stream error event.
@@ -821,4 +821,160 @@ with tempfile.TemporaryDirectory(prefix='origami-drive-') as temporary:
             except subprocess.TimeoutExpired: process.kill(); process.wait()
             log.close()
             detach()
+
+# Slowed by: a stub model whose status says (in a 3.1.5 server's own fields) memory is held at a learned budget, its drive reads slowly and the hot copy is being built;
+# the front turns that into `slowed_by` (with this Mac's largest apps), in /v1/status, /health and the dashboard, and
+# `origami status` prints each with its fix, the costliest first.
+SLOW = WORKER.replace("{'status': 'ready', 'queue': {'busy': False, 'queued': 0}}", """{'status': 'ready', 'queue': {'busy': False, 'queued': 0},
+    'memory': {'available_bytes': 10121428992, 'budget_bytes': 14679362304, 'budget_mode': 'automatic', 'cap_bytes': 24051816858, 'floor_bytes': 4294967296,
+        'footprint_bytes': 11620984456, 'last_cut': None, 'recovery_target_bytes': 14679362304, 'reserved_bytes': 12565218464, 'start_bytes': 17589764720,
+        'target_bytes': 24051816858, 'temporarily_reduced': False},
+    'memory_learned': {'applied': True, 'bytes': 14679362304, 'cap_bytes': 24051816858, 'days': 12.28, 'minimum_bytes': 15679362304, 'regrowths': 292, 'trims': 129,
+        'in_force': 'memory: automatic; this Mac has changed since the memory limit was measured (cut on 3 days since): run `origami tune --memory`',
+        'limit_advice': {'applied': False, 'limit_bytes': None, 'measured': '2026-11-16T23:29:01Z', 'stale': 'cut on 3 days since', 'suggested_bytes': 25500000000, 'text': 'Chosen: 25.5GB'}},
+    'experts_from': {'sources': [
+        {'role': 'all', 'drive': 'Models', 'state': 'reading', 'slow_reads': {'high': True, 'share': 0.31, 'hour_share': 0.2, 'bytes': 1e12},
+         'detail': 'The model drive read its files below a third of its own speed for 31% of its reading time. (at least 25 min for 54.8 GB).'},
+        {'role': 'hot', 'drive': 'internal drive', 'state': 'building', 'progress': {'done_bytes': 12000000000, 'total_bytes': 40000000000, 'seconds_left': 600}}]}}""", 1)
+assert SLOW != WORKER
+with tempfile.TemporaryDirectory(prefix='origami-slowed-') as temporary:
+    root = pathlib.Path(temporary).resolve(); data = root / 'data'; model = data / 'models' / 'first'; model.mkdir(parents=True)
+    (model / 'config.json').write_text('{}')
+    (data / 'models.json').write_text(json.dumps({'models': [{'name': 'first', 'path': str(model), 'manifest': {'fingerprint': 'a' * 64}}]}))
+    worker = root / 'worker.py'; worker.write_text(SLOW); worker.chmod(0o755)
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+    config = root / 'config.json'
+    config.write_text(json.dumps({'data_dir': str(data), 'model': 'first', 'context': '32k', 'models_dirs': '[]', 'port': port})); config.chmod(0o600)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('ORIGAMI_')}
+    env['ORIGAMI_TEST_WORKER'] = str(worker)
+    log = open(root / 'server.log', 'w+')
+    process = subprocess.Popen([binary, 'serve', '--config', str(config)], env=env, stdout=log, stderr=log)
+    base = f'http://127.0.0.1:{port}/'
+    def get(path):
+        try:
+            with urllib.request.urlopen(base + path, timeout=15) as response: return json.load(response)
+        except (OSError, urllib.error.URLError, ValueError): return {}
+    try:
+        for _ in range(200):
+            if get('v1/status').get('status') == 'ready': break
+            time.sleep(.05)
+        status = get('v1/status')
+        ids = [item['id'] for item in status.get('slowed_by', []) if item['id'] not in ('mac_hot', 'low_power')]
+        check(ids == ['memory_low', 'model_drive_slow', 'hot_copy_building'] and all(item.get('since') for item in status['slowed_by']),
+              'the status lists memory, the slow drive and the hot copy, costliest first, each with since: ' + repr(status.get('slowed_by')))
+        memory = status['slowed_by'][0]
+        check(memory['text'] == "Memory: Origami has 14.7 GB of the 24.1 GB it may use: it holds itself to a budget learned from 12 days of this Mac's memory use and 129 cuts"
+              and memory['fix'].startswith('Other apps hold ') and 'press Reset' in memory['fix'] and len(status.get('memory_holders') or []) >= 1
+              and isinstance(status.get('mac_now', {}).get('low_power'), bool),
+              'memory held at a learned budget says so, names the apps that hold the most and what raises it; the status keeps memory_holders and mac_now: ' + repr(memory))
+        check([item['id'] for item in get('health').get('slowed_by', [])] == [item['id'] for item in status['slowed_by']]
+              and [item['id'] for item in get('v1/dashboard').get('slowed_by', [])] == [item['id'] for item in status['slowed_by']],
+              '/health and the dashboard carry the same list')
+        cli = subprocess.run([binary, 'status', '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60).stdout
+        lines = cli.splitlines()
+        slowed = [i for i, line in enumerate(lines) if line.startswith('Slowed by ')]
+        check(len(slowed) >= 3 and lines[slowed[0]].startswith('Slowed by Memory: Origami has 14.7 GB of the 24.1 GB') and lines[slowed[0] + 1].startswith('          Other apps hold ')
+              and any(lines[i].startswith("Slowed by The model's drive reads slowly: 31%") and 'run `origami refresh`' in lines[i + 1] and '(at least 25 min)' in lines[i + 1] for i in slowed)
+              and any(lines[i].startswith('Slowed by The hot copy is still being built (12.0 GB of 40.0 GB)') and 'in about 10 min' in lines[i + 1] for i in slowed)
+              and slowed[0] < min(i for i, line in enumerate(lines) if line.startswith('Live')),
+              'origami status prints each condition and its fix, before the live lines: ' + repr([lines[i] for i in slowed]))
+    except Exception:
+        log.flush(); print((root / 'server.log').read_text(), file=sys.stderr); raise
+    finally:
+        process.terminate()
+        try: process.wait(timeout=8)
+        except subprocess.TimeoutExpired: process.kill(); process.wait()
+        log.close()
+# Remove unusable saved prompts from the page while a "model" is loaded (the stub worker): another build's folders go, as
+# do a model file's no model uses; this build's, the running one and one a second server holds (a held `.lock`) stay; a
+# folder with a pinned conversation stays until its own tick.
+import fcntl
+with tempfile.TemporaryDirectory(prefix='origami-prune-') as temporary:
+    root = pathlib.Path(temporary).resolve(); data = root / 'data'; model = data / 'models' / 'first'; model.mkdir(parents=True)
+    (model / 'config.json').write_text('{}')
+    (data / 'models.json').write_text(json.dumps({'models': [{'name': 'first', 'path': str(model), 'manifest': {'fingerprint': 'a' * 64}}]}))
+    worker = root / 'worker.py'; worker.write_text(WORKER); worker.chmod(0o755)
+    context = root / 'context'; group = context / ('a' * 12 + '-32768')
+    build = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest()[:16]
+    arithmetic = re.search(r'value = "([0-9a-f]{64})"', (pathlib.Path(__file__).resolve().parent.parent / 'Sources/OrigamiEngine/Core/ArithmeticDigest.swift').read_text()).group(1)
+    identity = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest() + ' Version %s (Build %s)' % tuple(
+        subprocess.check_output(['sw_vers', flag], text=True).strip() for flag in ('-productVersion', '-buildVersion'))
+    def epoch(folder, marker_build=None, index=None):
+        folder.mkdir(parents=True); (folder / 'entry-0').mkdir(); (folder / 'entry-0' / 'checkpoint.origami').write_bytes(b'x' * 4096)
+        # This build's own marker also names it as the canary's fields do (`PromptCanary`): the arithmetic digest and the
+        # executable on this macOS.
+        mine = {'arithmetic': arithmetic, 'builds': [identity]} if marker_build == build else {}
+        if marker_build: (folder / 'origami-epoch.json').write_text(json.dumps({'model': 'first', 'context': 32768, 'version': '3.1.3', 'build': marker_build, **mine}))
+        if index is not None: (folder / 'index.json').write_text(json.dumps(index))
+        return folder
+    running = epoch(group / ('1' * 16), build, {'epoch': '1', 'entries': {'0': {'tokens': 600}}})
+    older = epoch(group / ('2' * 16), '0' * 16, {'epoch': '2', 'entries': {}})
+    unmarked = epoch(group / ('3' * 16))
+    pinned = epoch(group / ('4' * 16), '0' * 16, {'epoch': '4', 'entries': {'0': {'tokens': 600, 'pinned': True}}})
+    held = epoch(group / ('5' * 16), '0' * 16)
+    mine = epoch(group / ('6' * 16), build)
+    orphan = epoch(context / ('b' * 12 + '-32768') / ('7' * 16), build)
+    # The running server's lock and a second server's.
+    locks = [open(folder / '.lock', 'w') for folder in (running, held)]
+    for lock in locks: fcntl.flock(lock, fcntl.LOCK_EX)
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+    config = root / 'config.json'
+    config.write_text(json.dumps({'data_dir': str(data), 'context_dir': str(context), 'model': 'first', 'context': '32k', 'models_dirs': '[]', 'port': port})); config.chmod(0o600)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('ORIGAMI_')}
+    env['ORIGAMI_TEST_WORKER'] = str(worker)
+    log = open(root / 'server.log', 'w+')
+    process = subprocess.Popen([binary, 'serve', '--config', str(config)], env=env, stdout=log, stderr=log)
+    base = f'http://127.0.0.1:{port}/'
+    def call(path, body=None, origin=None):
+        headers = {'Content-Type': 'application/json', 'Origin': origin or base.rstrip('/')}
+        request = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response: return response.status, json.load(response)
+        except urllib.error.HTTPError as error: return error.code, json.load(error)
+    def job(body):
+        code, result = call('v1/jobs', body); assert code == 202, (code, result)
+        until = time.time() + 20
+        while time.time() < until:
+            current = call('v1/jobs')[1]['job']
+            if current['state'] != 'running':
+                assert current['state'] == 'done', current
+                return current
+            time.sleep(.05)
+        raise AssertionError('operation timed out')
+    try:
+        for _ in range(200):
+            try:
+                if call('v1/dashboard')[1]['dashboard']['active_model']: break
+            except (OSError, urllib.error.URLError, KeyError): pass
+            time.sleep(.05)
+        else: raise AssertionError('the stub worker did not become ready')
+        states = {pathlib.Path(b['path']).name: (b['state'], b.get('reason')) for b in call('v1/storage')[1]['saved_prompts']}
+        check(states == {'1' * 16: ('in_use', None), '2' * 16: ('unusable', 'made by another Origami build (version 3.1.3)'),
+                         '3' * 16: ('unusable', 'made by an earlier Origami build'), '4' * 16: ('unusable', 'made by another Origami build (version 3.1.3)'),
+                         '5' * 16: ('in_use', None), '6' * 16: ('usable', None), '7' * 16: ('unusable', 'a model file no model uses')},
+              'with a model loaded, the storage map says which saved prompts are in use, usable by this build or unusable and why: ' + repr(states))
+        code, refusal = call('v1/jobs', {'kind': 'prune', 'yes': []}, origin='http://elsewhere.example')
+        check(code == 403 and refusal['error']['message'] == "Start jobs from this server's own page" and older.exists(), 'Remove unusable starts only from the page itself')
+        code, plan = call('v1/storage/plan', {'kind': 'prune'})
+        going = {pathlib.Path(b['path']).name: b['kept'] for b in plan['folders']}
+        check(code == 200 and going == {'2' * 16: [], '3' * 16: [], '4' * 16: ['a pinned prompt'], '7' * 16: []}, 'the preview lists the unusable folders, the pinned one with what it keeps: ' + repr(going))
+        done = job({'kind': 'prune', 'yes': [], 'revision': plan['revision']})
+        check(not older.exists() and not unmarked.exists() and not orphan.exists() and all(f.exists() for f in (running, held, mine, pinned))
+              and 'Kept ' + str(group.name) + '/' + '4' * 16 in done.get('message', ''),
+              'with the model loaded, older builds and a model file no model uses go; the running, a held, this build\'s and the pinned folder stay: ' + repr(done.get('message')))
+        done = job({'kind': 'prune', 'yes': [str(pinned)], 'revision': plan['revision']})
+        check(not pinned.exists() and running.exists() and held.exists() and (running / 'entry-0' / 'checkpoint.origami').exists(),
+              'the pinned folder goes once ticked; the held ones are untouched: ' + repr(done.get('message')))
+        code, refusal = call('v1/jobs', {'kind': 'prune', 'yes': []})
+        check(code == 409 and refusal['error']['message'] == 'Only an item nothing uses is removed', 'with nothing unusable left, it refuses in the storage map\'s words: ' + repr(refusal))
+    except Exception:
+        log.flush(); print((root / 'server.log').read_text(), file=sys.stderr); raise
+    finally:
+        for lock in locks: lock.close()
+        process.terminate()
+        try: process.wait(timeout=8)
+        except subprocess.TimeoutExpired: process.kill(); process.wait()
+        log.close()
 print(f'{checks} control-plane checks passed')

@@ -830,6 +830,9 @@ let tests: [(String, () throws -> Void)] =
         ("hot_copy_curve", hotCopyCurve),
         ("usage_counts_decay", usageCountsDecay),
         ("slow_reason_rules", slowReasonRules),
+        ("slowed_by_rules", slowedByRules),
+        ("process_memory_names", processMemoryNames),
+        ("permission_subject_name", permissionSubjectName),
         ("hot_copy_automatic_size", hotCopyAutomaticSize),
         ("family_warm_start", familyWarmStart),
         ("family_resident_pack", familyResidentPackIsExplicitBoundedAndVerified),
@@ -910,6 +913,9 @@ let tests: [(String, () throws -> Void)] =
         ("disk_budget_hot_copy_gives_back_for_saves", PrefixReuseSelfChecks.diskBudgetGiveBack),
         ("prompt_cache_restore_reasons", PrefixReuseSelfChecks.restoreReasons),
         ("prompt_cache_dashboard_edits", PrefixReuseSelfChecks.promptCacheEdits),
+        ("prompt_cache_canary_shared_by_builds", PrefixReuseSelfChecks.canarySharedByBuilds),
+        ("prompt_cache_canary_refused_and_older_folders", PrefixReuseSelfChecks.canaryRefusedAndOlderFolders),
+        ("prompt_cache_canary_opens_for_saves", PrefixReuseSelfChecks.canaryOpensForSaves),
         ("reply_text_matches_whole_decode", replyTextMatchesWholeDecode),
         ("paged_checkpoint_disk_bytes_of_written_pages", PagedCheckpointSelfChecks.diskBytesOfWrittenPages),
         ("file_kv_leaves_no_folder_and_names_errors", QSAFilePageSelfChecks.leavesNoFolderAndNamesErrors),
@@ -987,7 +993,7 @@ let tests: [(String, () throws -> Void)] =
     + httpIngressPolicyChecks() + familyShrinkChecks() + hotCopyRefreshChecks() + hotCopyShareChecks() + hotCopyInPlaceChecks()
     + httpMetricsShutdownChecks()
     + familyPrefetchObservationChecks() + syntheticModelChecks() + familyExpertVariantChecks() + boundedWaitChecks() + modelDriveChecks()
-    + jsonModeChecks()
+    + jsonModeChecks() + arithmeticDigestChecks()
     + modelRefreshChecks() + familyOverlapChecks()
     + slowDriveReadsChecks() + diskBudgetCapChecks() + downloadRefusalChecks()
     + fuzzReplayChecks() + sessionWireChecks()

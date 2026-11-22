@@ -37,6 +37,7 @@ Tests/cli-checks.sh .build/release/origami        # the command-line contract
 python3 -B Tests/error-register-check.py .build/release/origami   # a release build: a compiler fault that crashed 3.1.0 (see the script)
 .build/release/engine-checks --fuzz gguf --seconds 60 --seed 1   # fuzz a parser (gguf, safetensors, http, template, socket)
 swift format format -i -r --configuration .swift-format Sources Tests
+python3 -B scripts/arithmetic-digest.py           # after changing a file that can change bits (arithmetic_digest_current says so)
 ```
 
 The checks are a plain executable printing JSON (no XCTest), so they build with the Command Line Tools alone.

@@ -609,8 +609,8 @@ enum DashboardScript {
           $("add-info").setAttribute("aria-busy", String(!!checking));
           $("job").setAttribute("aria-busy", String(running()));
           // A move or removal turns the button that started it; while any job runs the others wait.
-          const storing = jobPost === "move" || jobPost === "remove" || running() && (job.kind === "move" || job.kind === "remove");
-          $("storage").querySelectorAll('button[data-sact="move"], button[data-sact="remove"]').forEach((b) => hold(b, busyJob, storing && b.dataset.path === storagePath));
+          const storing = ["move", "remove", "prune"].includes(jobPost) || running() && ["move", "remove", "prune"].includes(job.kind);
+          $("storage").querySelectorAll('button[data-sact="move"], button[data-sact="remove"], button[data-sact="prune"]').forEach((b) => hold(b, busyJob, storing && b.dataset.path === storagePath));
           hold($("storage-refresh"), storageLoading, storageLoading);
           // Folder and drive choices and each saved prompt's Open wait for a job, a start or an Apply too; one saving keeps turning.
           const waits = busyJob || starting || !!applying;
@@ -918,7 +918,7 @@ enum DashboardScript {
           else if (jobLive === jobId(j)) {
             jobLive = null;
             if (j.kind === "hot-copy") $("experts-note").textContent = "";
-            if (j.state === "done") jobDone(j); else if (j.kind === "move" || j.kind === "remove") loadStorage();
+            if (j.state === "done") jobDone(j); else if (["move", "remove", "prune"].includes(j.kind)) loadStorage();
           }
           // The header's job text follows this poll's job, not the last one's (a page without its key keeps its own words).
           if (live.s && !offline) live(live.s); else gate();
@@ -969,6 +969,11 @@ enum DashboardScript {
             // The reused share, keyed to the bar's grey part; a fresh prompt shows none.
             if (reused) { keyed = esc(text) + ' · <i class="key" aria-hidden="true"></i>' + share + "% reused"; text += " · " + share + "% reused"; }
           }
+          // Slowed by: what slows Origami down now, the costliest first, each with its fix (`SlowedBy` on the server, also
+          // during a request); hidden when nothing does.
+          const slowed = (Array.isArray(s.slowed_by) ? s.slowed_by : []).map((c) => "<li><b>" + esc(c.text) + ".</b> " + esc(c.fix).replace(/`([^`]+)`/g, "<code>$1</code>") + "</li>").join("");
+          $("slowed").hidden = !slowed;
+          if ($("slowed-list").innerHTML !== slowed) $("slowed-list").innerHTML = slowed;
           $("chip").dataset.state = state; $("chip-text").textContent = chip; $("page").dataset.state = state;
           if (live.chip !== chip) { live.chip = chip; modelList(); }
           // While a model loads the page names it, in place of the numbers of the one before.
@@ -1472,7 +1477,8 @@ enum DashboardScript {
         // than wanted), its writing into the GPU and each drive's wait, and one verdict by the rules `SlowReason` (the engine)
         // applies for `origami status`; both are checked against one fixture.
         const RESTORE_WHY = { save_skipped_disk: "the saved copy was skipped for disk space", save_failed: "saving it had failed", save_not_finished: "its save had not finished",
-          entry_evicted: "its saved copy had been replaced by newer ones", entry_not_used: "the saved copy was not used", no_entry: "it had not been saved" };
+          entry_evicted: "its saved copy had been replaced by newer ones", entry_not_used: "the saved copy was not used", no_entry: "it had not been saved",
+          saved_by_other_build: "it was saved by another Origami build" };
         const restoreWhy = (why) => /^prefix_differs_at=/.test(why) ? "the prompt differed from the saved one at token " + why.slice(18) : RESTORE_WHY[why] || why;
         function slowParts(r) {
           const pc = r.phase_counters || {}, st = r.stage_seconds || {}, v = (k) => +pc[k] || 0, waits = [];
@@ -2509,7 +2515,8 @@ enum DashboardScript {
           const m = storageMap; if (!m) return;
           const items = m.drives.flatMap(d => (d.items || []).map(i => ({ ...i, drive: d.name })));
           const groups = new Map();
-          for (const i of items) { const key = i.model || "Other files"; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(i); }
+          // Unused saved prompts are listed per model under Saved prompts below, removed together there.
+          for (const i of items.filter(i => !(i.role === "prompts" && i.unused))) { const key = i.model || "Other files"; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(i); }
           const button = (i, act, label) => '<button type="button" data-sact="' + act + '" data-path="' + esc(i.path) + '">' + label + '</button>';
           const file = i => {
             const acts = i.actions || [];
@@ -2520,7 +2527,7 @@ enum DashboardScript {
               (acts.includes("relink") ? button(i,"relink","Locate…") : '') +
               (acts.includes("forget") ? button(i,"forget","Unlist…") : '') + '</div></li>';
           };
-          const html = '<div class="drive-grid">' + m.drives.map(storageDrive).join('') + '</div>' + [...groups.entries()].map(([name, files]) => '<details class="model-files" data-storage-key="model:' + esc(name) + '" open><summary><h3>' + esc(name) + '</h3><span>' + files.length + (files.length === 1 ? ' item · ' : ' items · ') + disk(files.reduce((n,i) => n + (i.allocated_bytes == null ? i.bytes : i.allocated_bytes),0)) + '</span></summary><ul class="sitems">' + files.map(file).join('') + '</ul></details>').join('');
+          const html = '<div class="drive-grid">' + m.drives.map(storageDrive).join('') + '</div>' + [...groups.entries()].map(([name, files]) => '<details class="model-files" data-storage-key="model:' + esc(name) + '" open><summary><h3>' + esc(name) + '</h3><span>' + files.length + (files.length === 1 ? ' item · ' : ' items · ') + disk(files.reduce((n,i) => n + (i.allocated_bytes == null ? i.bytes : i.allocated_bytes),0)) + '</span></summary><ul class="sitems">' + files.map(file).join('') + '</ul></details>').join('') + savedPrompts(m);
           if (html !== showStorage.html) {
             const expanded = new Map([...$("storage").querySelectorAll("details[data-storage-key]")].map(node => [node.dataset.storageKey, node.open]));
             const focused = document.activeElement && document.activeElement.dataset, focusPath = focused && focused.path, focusAction = focused && focused.sact;
@@ -2529,21 +2536,60 @@ enum DashboardScript {
             if (focusPath && focusAction) [...$("storage").querySelectorAll("button[data-sact]")].find(node => node.dataset.path === focusPath && node.dataset.sact === focusAction)?.focus();
           }
           swap("disk-budget", diskBudget(status));
-          $("storage-total").textContent = disk(items.reduce((n,i) => n + (i.allocated_bytes == null ? i.bytes : i.allocated_bytes),0)) + " on disk";
+          const stale = (m.saved_prompts || []).filter(b => b.state === "unusable").reduce((n, b) => n + b.bytes, 0);
+          $("storage-total").textContent = disk(items.reduce((n,i) => n + (i.allocated_bytes == null ? i.bytes : i.allocated_bytes),0)) + " on disk" +
+            (stale > 1e9 ? " · " + disk(stale) + " of saved prompts no build can read" : "");
           modelList();
           $("storage-recovery").innerHTML = (m.operations || []).map(o => '<p>Interrupted move · ' + esc(o.name) + ' <button type="button" data-recover="' + esc(o.id) + '">Recover…</button></p>').join('') +
             (m.relinks || []).map(r => '<p>Drive renamed or remounted · ' + esc(r.setting) + ': ' + wpath(r.from) + ' is at ' + wpath(r.to) + ' (' + esc(r.how) + '). Quit the server and run <code>origami relink</code> to use it there.</p>').join('');
           gate();
         }
+        // Saved prompts per model, in the words `origami cache` uses: what the running build reads (size, conversations, those
+        // kept by name or pin) and, apart, what nothing can read any more, with its size and age; one action removes those.
+        function savedPrompts(m) {
+          const builds = m.saved_prompts || [], models = new Map();
+          if (!builds.length) return "";
+          for (const b of builds) { if (!models.has(b.model)) models.set(b.model, []); models.get(b.model).push(b); }
+          const sum = (list, key) => list.reduce((n, b) => n + (key === "kept" ? b.kept.length : b[key]), 0);
+          const row = (title, tag, sub) => '<li class="frow"><div><div class="file-title">' + esc(title) + ' <span class="tag">' + esc(tag) + '</span></div><div class="file-location">' + esc(sub) + '</div></div></li>';
+          const rows = [...models.entries()].map(([model, list]) => {
+            const live = list.filter(b => b.state !== "unusable"), dead = list.filter(b => b.state === "unusable");
+            const newest = dead.reduce((t, b) => Math.max(t, b.used || 0), 0), kept = sum(live, "kept");
+            return (live.length ? row(model, live.some(b => b.state === "in_use") ? "in use" : "usable by this build",
+                disk(sum(live, "bytes")) + " · " + sum(live, "conversations") + " conversations" + (kept ? " · " + kept + " pinned or named" : "")) : "") +
+              (dead.length ? row(model, "unusable: " + [...new Set(dead.map(b => b.reason))].join("; "),
+                disk(sum(dead, "bytes")) + " · " + dead.length + (dead.length === 1 ? " folder" : " folders") + (newest ? " · last used " + ago(newest * 1000) : "")) : "");
+          }).join("");
+          const unusable = builds.filter(b => b.state === "unusable");
+          return '<details class="model-files" data-storage-key="prompts" open><summary><h3>Saved prompts</h3><span>' + disk(sum(builds, "bytes")) + '</span></summary><ul class="sitems">' + rows + '</ul>' +
+            (unusable.length ? '<div class="sact"><button type="button" data-sact="prune" data-path="">Remove unusable…</button></div>' : '') + '</details>';
+        }
+        // Remove unusable…: the server lists what goes; a folder with pinned or named conversations goes only when ticked.
+        async function pruneAction(button) {
+          const note = $("storage-note");
+          if (running()) return;
+          try {
+            const response = await post("v1/storage/plan", { kind: "prune" }), plan = await response.json();
+            if (!response.ok) throw Error(plan.error && plan.error.message || "Storage changed; refresh and try again.");
+            if (!await confirmStorage(plan)) return;
+            if (plan.revision && plan.revision !== revision) throw Error("Settings changed. Review the operation again.");
+            const yes = [...$("storage-confirm-body").querySelectorAll("input[data-yes]:checked")].map(i => i.dataset.yes);
+            storagePath = ""; await startJob({ kind: "prune", yes, revision: plan.revision }, button, note); storageAt = 0;
+          } catch (error) { note.textContent = error.message || "Could not start"; }
+        }
         let storageConfirmResolve = null;
         function confirmStorage(plan) {
           return new Promise(resolve => {
             storageConfirmResolve = resolve;
-            const action = { move: "Move", delete: "Delete", remove: "Delete", forget: "Remove from library", relink: "Use the new location" }[plan.kind];
+            const action = { move: "Move", delete: "Delete", remove: "Delete", forget: "Remove from library", relink: "Use the new location", prune: "Remove" }[plan.kind];
             $("storage-confirm-title").textContent = action + " · " + plan.name;
             $("storage-accept").textContent = action;
             const moving = plan.kind === "move", deleting = ["delete","remove"].includes(plan.kind);
-            $("storage-confirm-body").innerHTML = '<p>' + wpath(plan.path) + (plan.to ? '<br>→ ' + wpath(plan.to) : '') + '</p>' +
+            const kept = (b) => [b.kept.length ? "it holds " + b.kept.join(", ") : "", b.unreadable ? "its index could not be read, so it may hold named or pinned prompts" : ""].filter(Boolean).join("; ");
+            $("storage-confirm-body").innerHTML = plan.kind === "prune" ? '<p>Delete ' + disk(plan.bytes) + ' permanently: saved prompts no build can read. A running server keeps the ones it holds.</p>' +
+              plan.folders.map(b => kept(b) ? '<p><label><input type="checkbox" data-yes="' + esc(b.path) + '"> Also remove ' + esc(b.label) + ' · ' + disk(b.bytes) + ': ' + esc(kept(b)) + '</label></p>'
+                : '<p>' + esc(b.label) + ' · ' + disk(b.bytes) + ' · ' + esc(b.reason) + '</p>').join('') :
+              '<p>' + wpath(plan.path) + (plan.to ? '<br>→ ' + wpath(plan.to) : '') + '</p>' +
               (moving ? '<p>' + (plan.copy_bytes ? disk(plan.required_bytes) + ' required · ' + disk(plan.free_bytes) + ' free. Copy, verify, then remove the original.' : 'Same disk · no additional copy.') + '</p>' : '') +
               (deleting ? '<p>Delete ' + disk(plan.allocated_bytes || plan.bytes) + ' permanently.' + (plan.disables_cache ? ' Automatic hot copying will be turned off for this model.' : '')
                 + (plan.role === "download" ? ' This is a whole downloaded model: to use it again, all ' + disk(plan.allocated_bytes || plan.bytes) + ' must be downloaded again.' : '') + '</p>' : '') +
@@ -2553,6 +2599,7 @@ enum DashboardScript {
           });
         }
         async function storageAction(act, path, button) {
+          if (act === "prune") return pruneAction(button);
           const note = $("storage-note"), item = storageMap && storageMap.drives.flatMap(d => d.items || []).find(i => i.path === path);
           if (!item || running() || !item.actions.includes(act)) return;
           try {

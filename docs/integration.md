@@ -17,8 +17,8 @@ One request runs at a time; the others wait in a queue.
 | `POST /api/chat`, `POST /api/generate` | Ollama (`/api/generate` without `raw` or `suffix`) |
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama model list and details |
 | `GET /v1/models`, `GET /v1/models/<id>` | the model list (`?all` lists every model) |
-| `GET /health` | `loading` (with `loading.seconds` and the model's last log line, `loading.line`), `ready`, `degraded` (the model's drive went away: `degraded` says what to do; it clears by itself when the drive is back) or `failed`, the queue and the server defaults; `stopping` or `stopped` (with a 503) after `origami stop`; `pending` while a reload waits for the current reply |
-| `GET /v1/status` | memory (`temporarily_reduced` while a cut holds the budget below `recovery_target_bytes`, in either mode, and `last_cut`: its reason and time), the running request, recent requests, saved prompts, drives and the last 50 log lines (`events`), as JSON |
+| `GET /health` | `loading` (with `loading.seconds` and the model's last log line, `loading.line`), `ready`, `degraded` (the model's drive went away: `degraded` says what to do; it clears by itself when the drive is back) or `failed`, the queue and the server defaults; `stopping` or `stopped` (with a 503) after `origami stop`; `pending` while a reload waits for the current reply; `slowed_by` as in `/v1/status` |
+| `GET /v1/status` | memory (`temporarily_reduced` while a cut holds the budget below `recovery_target_bytes`, in either mode, and `last_cut`: its reason and time), the running request, recent requests, saved prompts, drives and the last 50 log lines (`events`), and `slowed_by`, as JSON |
 | `GET /v1/plan?context=&memory_limit=&expert_memory=&hot_copy=&context_dir=&quality=` | a preview of the memory plan for those settings |
 | `POST /v1/config` | saves settings for the next start (used by the dashboard) |
 | `POST /v1/stop`, `POST /v1/start` | the same as `origami stop` and `origami start` |
@@ -26,6 +26,14 @@ One request runs at a time; the others wait in a queue.
 | `/v1/hot-copy`, `/v1/prompts`, `/v1/memory/learned`, `/v1/memory/wired`, `/v1/storage`, `/v1/fs`, `/v1/reload`, `/v1/restart`, `/v1/lan`, `/v1/tuning/apply`, `/v1/config/restore` | the dashboard's own controls (hot copy, saved prompts, memory, files, reload, access, tuning); not a stable API |
 | `GET /v1/models/found`, `GET /v1/models/check?source=` | models found on this Mac, and whether a source would run |
 | `GET /dashboard` (and `GET /` from a browser) | the dashboard (see [dashboard.md](dashboard.md)) |
+
+`slowed_by` in `/health` and `/v1/status` lists what slows Origami down now, the costliest first and advice last, as
+the dashboard's Now tab and `origami status` show it: `[{"id", "text", "fix", "since"}]`, empty when nothing does.
+`text` says what, `fix` what to do (or that it recovers by itself, and when), `since` (ISO 8601) when it began or was
+first seen. The ids: `drive_gone`, `job`, `memory_low`, `memory_limit_not_kept`, `model_drive_slow`, `model_drive_due`,
+`drive_not_allowed`, `copy_drive_gone`, `hot_copy_building`, `hot_copy_no_room`, `hot_copy_failed`, `hot_copy_short`,
+`hot_copy_drive_slow`, `mac_hot`, `low_power`, `saves_paused`, `prompt_read_again`, `queue`, `memory_limit_low`,
+`not_tuned`; more may come, so show `text` and `fix` rather than matching ids. `/v1/status` also carries what the list reads from this Mac: `mac_now` (`thermal_state`, 0 to 3 as macOS reports it, and `low_power`) and, while the memory budget is 1 GB or more under what Origami may use (`memory.target_bytes`), `memory_holders` (the three largest other apps, `[{"name", "bytes"}]`).
 
 In `/v1/status`, `experts_from.sources` lists where experts are read from; the model's own row (`"role": "all"`), while
 its files are read, carries `slow_reads`: `busy_seconds` and `slow_seconds` (reading time since start, and the part of it
@@ -327,6 +335,15 @@ a second Ctrl-C quits at once.
 
 If the model or a store is on an external drive, macOS may need to allow **Removable Volumes** for `origami` (or
 your launcher); see [troubleshooting.md](troubleshooting.md).
+
+**Keeping that permission across upgrades.** macOS stores the permission for the service's own program, tied to that
+exact file, so a new `origami` binary as the service's program is asked about again. A small fixed launcher avoids
+it: build `Tools/launcher/origami-launcher.c` once (`cc -O2 -o origami-launcher Tools/launcher/origami-launcher.c`),
+keep the built file where it is (never rebuild or move it), and make it the service's program with `origami` as its
+first argument: `ProgramArguments` = `/path/to/origami-launcher`, `/path/to/origami`, `serve`. macOS then asks once,
+for the launcher; an upgrade replaces only `origami`. The launcher starts origami, passes on the signals that stop it
+and ends as origami ended, so `KeepAlive` still sees a crash as a crash. Origami's messages name the program macOS
+asks about.
 
 ## Request records
 

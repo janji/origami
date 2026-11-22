@@ -137,6 +137,7 @@ public final class GenerationDriver {
         prepareImages: ((Int) throws -> Void)? = nil,
         onProgress: ((GenerationProgress) -> Void)? = nil,
         onSample: ((Int) -> Void)? = nil,
+        onLogits: (([Float]) -> Void)? = nil,
         onToken: ((Int, String) throws -> Bool)? = nil
     ) throws -> GenerationResult {
         guard !qwenPairProbe || (quality.isExact && speculation == nil && (teacherTokens?.count ?? 0) >= 2 && maximumOutput >= 3) else {
@@ -337,6 +338,7 @@ public final class GenerationDriver {
                     token = decided
                     chosen = nil
                 } else if forced.isEmpty {
+                    onLogits?(logits)
                     var sampled = try sampler.next(
                         logits: constraint?.masked(logits) ?? logits, parameters: parameters, generated: output.generated)
                     // Teacher forcing: score this step's own pick, then continue from the teacher's token.

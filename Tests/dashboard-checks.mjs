@@ -268,6 +268,45 @@ const downloadRemoval = run('storageAction("remove", "/Volumes/B/.origami-moving
 check(/Delete 120\.0 GB permanently\. This is a whole downloaded model: to use it again, all 120\.0 GB must be downloaded again\./.test(element("storage-confirm-body").innerHTML),
   "deleting an unlisted download names its size and that it would have to be downloaded again");
 run('finishStorageConfirm(false)'); await downloadRemoval;
+// Saved prompts get rows per model: what the running build reads, and apart what nothing can read any more, with its size
+// and age, in `origami cache`'s words; the storage total says so above 1 GB. Remove unusable… lists what goes; a folder
+// with pinned or named conversations needs its own tick.
+const storageBefore = routes["v1/storage"], day = Date.now() / 1000 - 14 * 86400;
+routes["v1/storage"] = { ...storageBefore, drives: [{ ...storageBefore.drives[0], items: [...storageBefore.drives[0].items,
+    { path: "/c/0123456789ab-32768", name: "0123456789ab-32768", role: "prompts", bytes: 1e9, in_use: false, unused: true, actions: ["remove"], note: "saved prompts no build can read" }] }],
+  saved_prompts: [{ path: "/c/aaaaaaaaaaaa-32768/1111111111111111", label: "aaaaaaaaaaaa-32768/1111111111111111", model: "qwen", bytes: 2e9, conversations: 3, kept: ["chat-1"], unreadable: false, state: "in_use", used: day + 86400 * 13 },
+    { path: "/c/aaaaaaaaaaaa-32768/2222222222222222", label: "aaaaaaaaaaaa-32768/2222222222222222", model: "qwen", bytes: 6e9, conversations: 2, kept: ["plan"], unreadable: false, state: "unusable", reason: "made by another Origami build (version 3.1.3)", used: day },
+    { path: "/c/0123456789ab-32768/3333333333333333", label: "0123456789ab-32768/3333333333333333", model: "qwen", bytes: 1e9, conversations: 0, kept: [], unreadable: false, state: "unusable", reason: "a model file no model uses", used: day - 86400 }] };
+await run("loadStorage()"); await settle();
+const prompts = element("storage").innerHTML;
+check(/<h3>Saved prompts<\/h3>/.test(prompts) && /qwen <span class="tag">in use<\/span><\/div><div class="file-location">2\.0 GB · 3 conversations · 1 pinned or named/.test(prompts)
+  && /qwen <span class="tag">unusable: made by another Origami build \(version 3\.1\.3\); a model file no model uses<\/span><\/div><div class="file-location">7\.0 GB · 2 folders · last used 14 d ago/.test(prompts)
+  && !/Saved prompts <span class="tag">not used/.test(prompts) && /data-sact="prune"/.test(prompts), "saved prompts: the running build's and the unusable ones per model, in the words origami cache uses");
+check(/ on disk · 7\.0 GB of saved prompts no build can read$/.test(element("storage-total").textContent), "the storage total names unusable saved prompts above 1 GB: " + element("storage-total").textContent);
+routes["v1/storage"] = { ...routes["v1/storage"], saved_prompts: routes["v1/storage"].saved_prompts.slice(0, 1) };
+await run("loadStorage()"); await settle();
+check(/ on disk$/.test(element("storage-total").textContent) && !/data-sact="prune"/.test(element("storage").innerHTML), "with none unusable, no total line and no Remove unusable…");
+routes["v1/storage/plan"] = { kind: "prune", name: "unusable saved prompts", bytes: 7e9, revision: null, folders: [
+  { path: "/c/aaaaaaaaaaaa-32768/2222222222222222", label: "aaaaaaaaaaaa-32768/2222222222222222", bytes: 6e9, kept: ["plan"], unreadable: false, reason: "made by another Origami build" },
+  { path: "/c/0123456789ab-32768/3333333333333333", label: "0123456789ab-32768/3333333333333333", bytes: 1e9, kept: [], unreadable: false, reason: "a model file no model uses" }] };
+const pruneJobs = () => sent.filter((r) => r.path === "v1/jobs" && r.method === "POST").map((r) => JSON.parse(r.body)).filter((b) => b.kind === "prune");
+for (const tick of [false, true]) {
+  element("storage-confirm-body").querySelectorAll = () => tick ? [{ dataset: { yes: "/c/aaaaaaaaaaaa-32768/2222222222222222" } }] : [];
+  const pruning = run('storageAction("prune", "", $("storage-refresh"))'); await settle();
+  const body = element("storage-confirm-body").innerHTML;
+  check(element("storage-confirm").open && /Delete 7\.0 GB permanently/.test(body) && /0123456789ab-32768\/3333333333333333 · 1\.0 GB · a model file no model uses/.test(body)
+    && /<input type="checkbox" data-yes="\/c\/aaaaaaaaaaaa-32768\/2222222222222222"> Also remove aaaaaaaaaaaa-32768\/2222222222222222 · 6\.0 GB: it holds plan/.test(body),
+    "Remove unusable… lists each folder with its size, and a folder with named conversations has its own tick");
+  run('finishStorageConfirm(true)'); await pruning; await settle();
+  check(JSON.stringify(pruneJobs().pop().yes) === JSON.stringify(tick ? ["/c/aaaaaaaaaaaa-32768/2222222222222222"] : []), "the job carries the ticked folder only " + (tick ? "when ticked" : "(none ticked)"));
+}
+element("storage-confirm-body").querySelectorAll = () => [];
+const jobsBefore = routes["v1/jobs"];
+routes["v1/jobs"] = { job: { kind: "prune", title: "Removing unusable saved prompts", state: "done", stage: "done", seconds: 1, started: 7000, lines: [],
+  message: "Removed 1 of 2 folders of unusable saved prompts (1.0 GB). Kept aaaaaaaaaaaa-32768/2222222222222222  6.0 GB: it holds plan; ticking it removes it too." } };
+await run("refresh()"); await settle();
+check(/^Removed 1 of 2 folders of unusable saved prompts \(1\.0 GB\)\. Kept .*it holds plan; ticking it removes it too\.$/.test(element("job-stage").textContent), "the outcome says what was removed and what was kept, and why: " + element("job-stage").textContent);
+routes["v1/jobs"] = jobsBefore; routes["v1/storage"] = storageBefore; await run("refresh()"); await run("loadStorage()"); await settle();
 run('browse = async () => ({ path: "/Volumes/C/Models", drive: "C", free_bytes: 2e12 })');
 routes["v1/storage/plan"] = { kind: "move", path: "/Volumes/B/m<x>", to: "/Volumes/C/Models", name: "m<x>", in_use: true, copy_bytes: 1e11, required_bytes: 1.1e11, free_bytes: 2e12 };
 routes["v1/jobs"] = { job: { kind: "move", title: "Moving m<x>", state: "running", stage: "Copying and checking", seconds: 3, started: 5000, percent: 0.1, lines: [] } };
@@ -1193,6 +1232,27 @@ check(element("notice-title").textContent === "The model did not start", "a new 
     && /Writing 10\.0 s/.test(html) && /data-slow="">Slow because: 6,100 prompt tokens/.test(html), "the breakdown names the prompt read, the restore's reason and the verdict");
   const calm = run("whyHtml(" + JSON.stringify(cases[cases.length - 1].request) + ", {})");
   check(/GPU 8\.0 s · waiting on the model&#39;s drive 1\.0 s/.test(calm) && /\(1,950 wanted: its saved copy had been replaced by newer ones\)/.test(calm) && /<p class="verdict">Nothing unusual<\/p>/.test(calm), "an ordinary request: GPU, waits, and nothing unusual" + (/Nothing unusual/.test(calm) ? "" : ": " + calm));
+}
+
+// Slowed by: the notice at the top of Now shows the status's list (each fixture case's `slowed_by`, the lists the engine's
+// `SlowedBy` gives for `origami status`), one line per condition, what then the fix, also while a prompt is read; an
+// empty list hides it.
+{
+  const cases = JSON.parse(readFileSync(new URL("Fixtures/status/slowed-by.json", import.meta.url), "utf8"));
+  const order = cases.find((c) => /^the order/.test(c.rule)).slowed_by;
+  const reading = { status: "ready", queue: { busy: true, queued: 0 }, requests: { recent: [], current: { phase: "prefill", prompt_tokens: 50392, completed_prompt_tokens: 12000, reused_tokens: 0 } } };
+  run("live(" + JSON.stringify({ ...reading, slowed_by: order }) + ")");
+  const html = element("slowed-list").innerHTML, items = html.split("<li>").slice(1);
+  check(!element("slowed").hidden && /^Reading a 50,392-token prompt/.test(element("live-text").textContent) && items.length === order.length && order.length >= 3
+    && items.every((line, i) => line.startsWith("<b>" + run("esc(" + JSON.stringify(order[i].text) + ")") + ".</b> ")),
+    "while a 50,392-token prompt is read, the notice lists each condition in the status's order, what first" + (items.length ? "" : ": " + html));
+  check(cases.every((c) => { run("live(" + JSON.stringify({ ...reading, slowed_by: c.slowed_by }) + ")"); return element("slowed").hidden === !c.slowed_by.length && element("slowed-list").innerHTML.split("<li>").length - 1 === c.slowed_by.length; }),
+    "every fixture case shows one line per condition, and none when its list is empty");
+  const drive = cases.find((c) => /drive reads slowly/.test(c.rule)).slowed_by;
+  run("live(" + JSON.stringify({ status: "ready", requests: { recent: [] }, slowed_by: drive }) + ")");
+  check(/run <code>origami refresh<\/code>: it rewrites/.test(element("slowed-list").innerHTML) && !element("slowed").hidden, "a fix's command shows as code, also when idle");
+  run('live({ status: "ready", requests: { recent: [] }, slowed_by: [] })');
+  check(element("slowed").hidden && element("slowed-list").innerHTML === "", "nothing slowing it: no notice");
 }
 
 // The copy control lists every model's copies on a shared drive, each with its own keep box, and the swap backlog and the

@@ -4,6 +4,9 @@
 set -u
 bin=${1:-.build/release/origami}
 tmp=$(mktemp -d)
+# A saved-prompt folder's marker names this build by the canary's fields (`PromptCanary`): the arithmetic digest and the
+# executable on this macOS.
+mine="\"arithmetic\": \"$(sed -n 's/.*value = "\([0-9a-f]*\)".*/\1/p' "$(dirname "$0")/../Sources/OrigamiEngine/Core/ArithmeticDigest.swift")\", \"builds\": [\"$(shasum -a 256 "$bin" | cut -d' ' -f1) Version $(sw_vers -productVersion) (Build $(sw_vers -buildVersion))\"]"
 trap 'hdiutil detach -quiet "$tmp/data/vol" 2>/dev/null; hdiutil detach -quiet "$tmp/fat" 2>/dev/null; rm -rf "$tmp"' EXIT
 export ORIGAMI_CONFIG="$tmp/data/config.json" ORIGAMI_DATA_DIR="$tmp/data" ORIGAMI_MODEL="$tmp/no-model" ORIGAMI_PORT=1
 failures=0
@@ -469,7 +472,7 @@ front=$!
 for _ in $(seq 60); do curl -s -m 2 127.0.0.1:$port_a/health 2>/dev/null | grep -q '"failed"' && break; sleep 0.5; done
 check 0 "No model at" curl -s -m 5 127.0.0.1:$port_a/health
 # A running server keeps commands that rewrite its files out, saying how to quit it (`origami stop` is not enough).
-check 1 "Run \`origami stop\` (no model loads until \`origami start\`)" "$bin" cache prune --port $port_a
+check 1 "Run \`origami stop\` (no model loads until \`origami start\`)" "$bin" cache prune --all --port $port_a
 "$bin" store add "$tmp/sr" > /dev/null 2>&1
 check 1 "Quit it (Ctrl-C where \`origami serve\` runs" "$bin" store remove "$tmp/sr" --port $port_a
 "$bin" config unset stores > /dev/null
@@ -724,17 +727,18 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' $por
     check 0 "ok    model drive: 1% of 100 s of reading" env ORIGAMI_MODEL=glm ORIGAMI_PORT=$port_c "$bin" doctor
     kill "$fake"; wait "$fake" 2> /dev/null
     # Saved prompts of GLM and DeepSeek: each epoch folder's marker names its model; another model's (or build's) epoch is
-    # listed on its own and pruned; the current one and one without a marker stay.
+    # listed on its own and pruned, as one without a marker (an earlier build's); the current one stays.
     build=$(shasum -a 256 "$bin" | cut -c1-16)
     mkdir -p "$tmp/context/aaaaaaaaaaaaaaaa" "$tmp/context/bbbbbbbbbbbbbbbb" "$tmp/context/cccccccccccccccc"
-    echo "{\"model\": \"glm\", \"family_key\": \"$key\", \"context\": 8192, \"version\": \"x\", \"build\": \"$build\"}" > "$tmp/context/aaaaaaaaaaaaaaaa/origami-epoch.json"
-    echo "{\"model\": \"gone\", \"family_key\": \"0123456789abcdef\", \"context\": 8192, \"version\": \"3.0.1\", \"build\": \"$build\"}" > "$tmp/context/bbbbbbbbbbbbbbbb/origami-epoch.json"
+    echo "{\"model\": \"glm\", \"family_key\": \"$key\", \"context\": 8192, \"version\": \"x\", \"build\": \"$build\", $mine}" > "$tmp/context/aaaaaaaaaaaaaaaa/origami-epoch.json"
+    echo "{\"model\": \"gone\", \"family_key\": \"0123456789abcdef\", \"context\": 8192, \"version\": \"3.0.1\", \"build\": \"$build\", $mine}" > "$tmp/context/bbbbbbbbbbbbbbbb/origami-epoch.json"
     check 0 "bbbbbbbbbbbbbbbb (gone, 8192 context, version 3.0.1)" "$bin" cache
-    check 0 "(saved prompts of gone from version 3.0.1; safe to delete)" "$bin" cache
-    "$bin" cache | grep "aaaaaaaaaaaaaaaa\|cccccccccccccccc" | grep -q "safe to delete" && { echo "FAIL  cache lists a current epoch as unused"; failures=$((failures + 1)); }
+    check 0 "version 3.0.1)  0.0 GB  unusable: a model file no model uses" "$bin" cache
+    check 0 "cccccccccccccccc  0.0 GB  unusable: made by an earlier Origami build" "$bin" cache
+    "$bin" cache | grep "aaaaaaaaaaaaaaaa" | grep -q "usable by this build$" || { echo "FAIL  cache does not list the current epoch as usable"; failures=$((failures + 1)); }
     check 0 "Removes bbbbbbbbbbbbbbbb" "$bin" cache prune
-    [ -e "$tmp/context/bbbbbbbbbbbbbbbb" ] || [ ! -e "$tmp/context/aaaaaaaaaaaaaaaa" ] || [ ! -e "$tmp/context/cccccccccccccccc" ] \
-        && { echo "FAIL  cache prune removed a current epoch or kept another model's"; failures=$((failures + 1)); }
+    [ -e "$tmp/context/bbbbbbbbbbbbbbbb" ] || [ ! -e "$tmp/context/aaaaaaaaaaaaaaaa" ] || [ -e "$tmp/context/cccccccccccccccc" ] \
+        && { echo "FAIL  cache prune removed a current epoch or kept another model's or an earlier build's"; failures=$((failures + 1)); }
     # `setup --model <file>.gguf` makes it the model, as for a Qwen folder: `status` then names it.
     rm -f "$tmp/data/models.json"
     "$bin" setup --model "$tmp/fm/glm.gguf" > /dev/null 2>&1
@@ -887,9 +891,11 @@ rm -rf "$tmp/data/store/m1-abcdef012345/copy"
 # Saved prompts of a model file no model has (another fingerprint) are an unused item of their own; m1's stay in the shared one.
 if command -v python3 > /dev/null; then
     mkdir -p "$tmp/context/0123456789ab-8192/0123456789abcdef" "$tmp/context/abcdef012345-8192/0123456789abcdef"
+    echo "{\"build\": \"$(shasum -a 256 "$bin" | cut -c1-16)\", $mine}" > "$tmp/context/abcdef012345-8192/0123456789abcdef/origami-epoch.json"
     prompts() { curl -s -m 20 127.0.0.1:$port_a/v1/storage | python3 -c 'import json, sys; print(sorted((i["name"], i.get("note"), "remove" in i["actions"]) for d in json.load(sys.stdin)["drives"] for i in d["items"] if i["role"] == "prompts"))'; }
-    check 0 "[('0123456789ab-8192', 'saved prompts from an earlier Origami version or another model file; safe to delete', True), ('context', 'saved prompts and long contexts', False)]" prompts
-    check 0 "(from an earlier Origami version or another model file; safe to delete)" "$bin" cache
+    check 0 "[('0123456789ab-8192', 'saved prompts no build can read (a model file no model uses); safe to delete', True), ('context', 'saved prompts and long contexts', False)]" prompts
+    check 0 "0123456789ab-8192/0123456789abcdef  0.0 GB  unusable: a model file no model uses" "$bin" cache
+    check 0 "abcdef012345-8192/0123456789abcdef  0.0 GB  usable by this build" "$bin" cache
     rm -rf "$tmp/context/0123456789ab-8192" "$tmp/context/abcdef012345-8192"
 else echo "skip  saved prompts of another model file (no python3)"; fi
 # A copy Origami 2.x made for m1 is named by that version's fingerprint (config, index and shard sizes): it is said to be so.
@@ -1398,20 +1404,34 @@ check 0 "ext  /Volumes/origami-check-absent/ext  (drive origami-check-absent not
 check 1 "No model at /Volumes/origami-check-absent/ext: the drive origami-check-absent is not connected" sx setup --model ext
 check 1 "No model file at $sxd/typo.gguf: fix the path" sx model add "$sxd/typo.gguf"
 check 1 "models/typo may also mean the Hugging Face repo models/typo, not downloaded because ./models is a folder here" sh -c "cd '$sxd' && ORIGAMI_DATA_DIR='$sxd' ORIGAMI_CONFIG='$sxd/config.json' '$(cd "$(dirname "$bin")" && pwd)/origami' model add models/typo"
-# cache prune with a server that has no model loaded (`origami stop`): it lists what it removes with sizes, and keeps a
-# build with a named conversation unless --yes; with a model loaded it refuses.
+# cache prune lists what it removes with sizes, and keeps a build with a named conversation unless --yes. With a model
+# loaded it removes what no server holds (a held `.lock`) and says what it left and why; --all needs the model stopped.
 mkdir -p "$sxd/prompt-cache/0123456789ab-8192/aaaaaaaaaaaaaaaa" "$sxd/prompt-cache/0123456789ab-8192/bbbbbbbbbbbbbbbb" "$sxd/prompt-cache/family-context"
+touch "$sxd/prompt-cache/family-context/state-999999-left"  # a context file of a process gone
 echo '{"entries": {"0": {"name": "chat-1", "tokens": 9}}}' > "$sxd/prompt-cache/0123456789ab-8192/aaaaaaaaaaaaaaaa/index.json"
 echo "{\"entries\": {}}" > "$sxd/prompt-cache/0123456789ab-8192/bbbbbbbbbbbbbbbb/index.json"; touch -t 202001010000 "$sxd/prompt-cache/0123456789ab-8192/aaaaaaaaaaaaaaaa/index.json" "$sxd/prompt-cache/0123456789ab-8192/bbbbbbbbbbbbbbbb/index.json"
 mkdir -p "$sxd/prompt-cache/0123456789ab-8192/cccccccccccccccc"; echo "{\"entries\": {}}" > "$sxd/prompt-cache/0123456789ab-8192/cccccccccccccccc/index.json"
-echo '{"status": "stopped"}' > "$tmp/fake-health.json"
-check 0 "Keeps 0123456789ab-8192/aaaaaaaaaaaaaaaa  0.0 GB: it holds chat-1; \`origami cache prune --yes\` removes it too" sx cache prune --port $port_g
-[ -e "$sxd/prompt-cache/0123456789ab-8192/aaaaaaaaaaaaaaaa" ] && [ ! -e "$sxd/prompt-cache/0123456789ab-8192/bbbbbbbbbbbbbbbb" ] && [ ! -e "$sxd/prompt-cache/family-context" ] \
-    || fail "cache prune removed a named conversation without --yes, or kept another build or a family context"
+# This build's (dddd, its marker) and one a running server holds (eeee: another build's, its .lock held) stay while serving.
+for e in dddd eeee; do mkdir -p "$sxd/prompt-cache/0123456789ab-8192/$e$e$e$e"; done
+echo "{\"build\": \"$(shasum -a 256 "$bin" | cut -c1-16)\", $mine}" > "$sxd/prompt-cache/0123456789ab-8192/dddddddddddddddd/origami-epoch.json"
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "w"); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2], "w").close(); time.sleep(120)' \
+    "$sxd/prompt-cache/0123456789ab-8192/eeeeeeeeeeeeeeee/.lock" "$tmp/held" & holder=$!
+for _ in $(seq 50); do [ -e "$tmp/held" ] && break; sleep 0.1; done
 echo '{"status": "ready"}' > "$tmp/fake-health.json"
-check 1 "Run \`origami stop\`" sx cache prune --yes --port $port_g
+check 0 "Keeps 0123456789ab-8192/aaaaaaaaaaaaaaaa  0.0 GB: it holds chat-1; \`origami cache prune --yes\` removes it too" sx cache prune --port $port_g
+check 0 "unusable: made by an earlier Origami build" sx cache
+check 0 "0123456789ab-8192/aaaaaaaaaaaaaaaa  0.0 GB  last used " sx cache
+check 0 "0123456789ab-8192/eeeeeeeeeeeeeeee  0.0 GB  in use" sx cache
+[ -e "$sxd/prompt-cache/0123456789ab-8192/aaaaaaaaaaaaaaaa" ] && [ ! -e "$sxd/prompt-cache/0123456789ab-8192/bbbbbbbbbbbbbbbb" ] && [ ! -e "$sxd/prompt-cache/0123456789ab-8192/cccccccccccccccc" ] \
+    && [ ! -e "$sxd/prompt-cache/family-context/state-999999-left" ] && [ -e "$sxd/prompt-cache/0123456789ab-8192/dddddddddddddddd" ] && [ -e "$sxd/prompt-cache/0123456789ab-8192/eeeeeeeeeeeeeeee" ] \
+    || fail "cache prune with a model loaded removed a named conversation without --yes, this build's or a held folder, or kept an earlier build's or a context left on disk"
+check 0 "Keeps 0123456789ab-8192/eeeeeeeeeeeeeeee  0.0 GB: a running server holds it" sx cache prune --port $port_g
+check 0 "Keeps 0123456789ab-8192/dddddddddddddddd  0.0 GB: usable by this build" sx cache prune --port $port_g
+check 1 "Run \`origami stop\`" sx cache prune --all --yes --port $port_g
+kill "$holder"; wait "$holder" 2> /dev/null; rm -f "$tmp/held"
 echo '{"status": "stopped"}' > "$tmp/fake-health.json"
 check 0 "Removes 0123456789ab-8192/aaaaaaaaaaaaaaaa" sx cache prune --yes --port $port_g
+check 0 "Removes 0123456789ab-8192/dddddddddddddddd" sx cache prune --all --port $port_g
 kill "$fake"; wait "$fake" 2> /dev/null
 rm -rf "$tmp/sx" "$tmp/fake-health.json"
 # cache and uninstall touch only Origami's folders in a shared context_dir and store.

@@ -172,9 +172,12 @@ or a restart reads only what is new.
   free, dropping the oldest first.
 - **Keeping one:** the header `X-Origami-Keep: <name>` pins a conversation; the chat command `origami save` pins a
   chat's system prompt.
-- **When it is removed:** saved prompts belong to one Origami build. After an update the first long prompt is read
-  again; the old build's prompts go after 14 days unused, or sooner when disk runs short. Pinned or named ones, and
-  other models' prompts, are never removed automatically.
+- **After an update:** saved prompts are kept when the new build computes the same bits. When saved prompts exist,
+  its first start with a model reads a short fixed probe (for Qwen about 600 tokens; for GLM and DeepSeek 18) and
+  compares its bits with the folder's (written while the server was idle after the first save); equal, it restores the old saves, else it says so in the log and starts its own. An update
+  that changes the engine's arithmetic, and the first update to a version that keeps them, start empty once.
+- **When it is removed:** prompts this build cannot read go after 14 days unused, or sooner when disk runs short.
+  Pinned or named ones, and other models' prompts, are never removed automatically.
 - **Cleaning up:** `origami cache` lists them; `origami cache prune` removes old builds' prompts and those of model
   files no model uses (with the server quit or stopped).
 
@@ -264,5 +267,5 @@ These are ideas waiting for a measurement, not promises. The full list is in [RO
   ([switches.md](switches.md)).
 - Smaller speed-ups that still need measuring: kernel fusions, GPU keep-alive power use.
 
-Also planned: a signed binary and a Homebrew tap, built-in TLS, and keeping saved prompts across upgrades
+Also planned: a signed binary and a Homebrew tap, and built-in TLS
 (parked in [ROADMAP.md](../ROADMAP.md) section 7, each with what reopens it).

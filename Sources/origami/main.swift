@@ -1,7 +1,7 @@
 import Foundation
 import OrigamiEngine
 
-let version = "3.1.4"
+let version = "3.1.5"
 
 /// Options that set a setting; every command that reads settings accepts them. Help lists them in this order: the
 /// ones people change most first, the quality knobs last.
@@ -122,7 +122,7 @@ let help = """
       refresh               Rewrite the model's files in place when its drive reads them slowly
       verify [--deep]       Check the expert copies against their checksums
       inspect [folder]      Show what a model folder or GGUF holds and whether Origami runs it
-      cache [prune]         List saved prompts, or remove those no model uses
+      cache [prune]         List saved prompts, or remove those no build can read
 
     Settings and speed:
       config                List every setting; `config set <key> <value>`, `config unset <key>`
@@ -229,7 +229,7 @@ let commands: [String: CommandSpec] = [
     "cache": .init(
         usage: "cache [prune [--all] [--yes]] [options]",
         summary:
-            "List the saved prompts per model, context and Origami build (Qwen, GLM and DeepSeek). prune lists, with sizes, then\nremoves those of older builds, of model files no model uses and a GLM or DeepSeek context left on disk; --all removes\nevery one. A build holding pinned or named conversations is kept unless --yes. It runs with the server quit or stopped\n(`origami stop`)",
+            "List the saved prompts per model, context and Origami build (Qwen, GLM and DeepSeek), each \"in use\", \"usable by this\nbuild\" or \"unusable: <reason>\". prune lists, with sizes, then removes the unusable ones: older builds', those of model\nfiles no model uses and a GLM or DeepSeek context left on disk. It runs while a model is loaded and never removes a\nfolder a running server holds. A build holding pinned or named conversations is kept unless --yes. --all removes this\nbuild's too, with the server quit or stopped (`origami stop`)",
         options: ["all", "yes"], arguments: 1),
     "refresh": .init(
         usage: "refresh [--model <name>] [--yes] [options]",

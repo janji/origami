@@ -58,6 +58,10 @@ final class ModelFront: @unchecked Sendable {
     /// The loaded model's drive seen gone at this many checks in a row (`checkModelDrive`): from the second it is
     /// `degraded` until the drive is mounted again (the model process reopens its files by itself, `ModelDrive`).
     private var driveMisses = 0
+    /// `slowed_by` (`markSlowed`): when each listed condition was first seen, and the last list with its time, which
+    /// `/health` reuses for 5 s.
+    private var slowSeen: [String: String] = [:]
+    private var lastSlowed: (at: Date, list: [[String: Any]])?
     private let connectionBudget = HTTPConnectionBudget(maximumRequests: maximumConnections)
     /// Wrong keys from another device (or a trusted proxy's client): 10 a minute, then 429 until the minute ends.
     private let authLimiter = HTTPAuthLimiter()
@@ -429,7 +433,8 @@ final class ModelFront: @unchecked Sendable {
                 throw ServingFailure(
                     (state == .slow
                         ? "\(drive), where the model is, did not answer within 30 s; macOS may be waiting for permission: "
-                        : "macOS has not let Origami read \(drive), where the model is: ") + "allow Removable Volumes for origami in "
+                        : "macOS has not let Origami read \(drive), where the model is: ")
+                        + "allow Removable Volumes for \(PermissionSubject.name) in "
                         + "System Settings > Privacy & Security > Files & Folders, then reload", status: 503, type: "engine_unavailable"
                 )
             }
@@ -571,7 +576,7 @@ final class ModelFront: @unchecked Sendable {
     private func stop(_ child: Child) {
         let process = child.process
         guard process.isRunning else { return }
-        let footprint = Self.footprint(process.processIdentifier)
+        let footprint = ProcessMemory.footprint(process.processIdentifier)
         lock.withLock {
             held = footprint
             pendingReload = nil
@@ -583,15 +588,6 @@ final class ModelFront: @unchecked Sendable {
             kill(process.processIdentifier, SIGKILL)
             process.waitUntilExit()
         }
-    }
-
-    /// A process's physical footprint (what Activity Monitor shows as its memory, Metal buffers included), or nil.
-    static func footprint(_ pid: pid_t) -> UInt64? {
-        var info = rusage_info_v4()
-        let status = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
-        }
-        return status == 0 ? info.ri_phys_footprint : nil
     }
 
     // MARK: requests
@@ -1093,19 +1089,23 @@ final class ModelFront: @unchecked Sendable {
             if isUnloaded {
                 switch path {
                 case "/api/ps": return answer(["models": [Any]()])
-                case "/health", "/v1/health", "/v1/status", "/": return answer(stoppedState(), status: 503)
+                case "/health", "/v1/health", "/v1/status", "/":
+                    var state = stoppedState()
+                    markSlowed(&state)
+                    return answer(state, status: 503)
                 default: return reject(Self.stoppedFailure)
                 }
             }
-            // Health, status and the dashboard go to whichever model runs, without waiting behind a switch; while a reload
-            // waits for the running reply, health and status also say so (`pending`).
+            // Health, status and the dashboard go to whichever model runs, without waiting behind a switch; health and
+            // status add what slows it now (`slowed_by`) and, while a reload waits for the running reply, say so (`pending`).
             if let running = scheduler.acquireRunning() {
                 defer { scheduler.releaseRunning() }
                 let pending = lock.withLock { pendingReload }
-                if ["/health", "/v1/health", "/v1/status", "/"].contains(path), pending != nil || degraded != nil {
+                if ["/health", "/v1/health", "/v1/status", "/"].contains(path) {
                     var state = DashboardState.status(port: running.child.port, key: settings.apiKey, path: path)
                     if let pending { state["pending"] = pending }
                     markDegraded(&state)
+                    markSlowed(&state, port: path == "/v1/status" ? nil : running.child.port)
                     return answer(state, status: state["status"] as? String == "unavailable" ? 503 : 200)
                 }
                 return Self.pipe(raw, client: client, port: running.child.port, cancelled: cancelled, lifecycle: lifecycle)
@@ -1115,18 +1115,15 @@ final class ModelFront: @unchecked Sendable {
             case "/api/ps": answer(["models": [Any]()])
             case "/health", "/v1/health", "/v1/status", "/":
                 let permission = lock.withLock { self.permission }
-                if let failure, starting == nil {
-                    answer(
-                        [
-                            "status": "failed", "failure": failure, "version": version, "model": firstID,
-                            "permission": permission ?? NSNull(),
-                            "download": Models.defaultRepo,
-                        ], status: 503)
-                } else {
-                    answer([
-                        "status": "loading", "version": version, "model": starting ?? firstID, "loading": loadingProgress() ?? NSNull(),
-                    ])
-                }
+                var state: [String: Any] =
+                    failure != nil && starting == nil
+                    ? [
+                        "status": "failed", "failure": failure ?? "", "version": version, "model": firstID,
+                        "permission": permission ?? NSNull(), "download": Models.defaultRepo,
+                    ]
+                    : ["status": "loading", "version": version, "model": starting ?? firstID, "loading": loadingProgress() ?? NSNull()]
+                markSlowed(&state)
+                answer(state, status: failure != nil && starting == nil ? 503 : 200)
             default:
                 reject(
                     ServingFailure(
@@ -1212,7 +1209,40 @@ final class ModelFront: @unchecked Sendable {
             }
         }
         if let pending = lock.withLock({ pendingReload }), active != nil { state["pending"] = pending }
+        markSlowed(&state)
         return (state, active, generation)
+    }
+
+    /// `slowed_by` (`SlowedBy`) from `state` with what the front knows itself, added to `state` too: this Mac's heat and
+    /// Low Power Mode (`mac_now`), the largest other apps while memory is short of what Origami may use
+    /// (`memory_holders`); and read only: the job and the last tuning run while none is applied.
+    /// `port`: `state` is the model's `/health`, so the list comes from its `/v1/status` (one from the last 5 s is reused).
+    private func markSlowed(_ state: inout [String: Any], port: UInt16? = nil) {
+        if let port {
+            if let last = lock.withLock({ lastSlowed }), Date().timeIntervalSince(last.at) < 5 {
+                state["slowed_by"] = last.list
+                return
+            }
+            var full = DashboardState.status(port: port, key: settings.apiKey)
+            full["pending"] = state["pending"]
+            markDegraded(&full)
+            markSlowed(&full)
+            state["slowed_by"] = full["slowed_by"]
+            return
+        }
+        state["mac_now"] = [
+            "thermal_state": ProcessInfo.processInfo.thermalState.rawValue, "low_power": ProcessInfo.processInfo.isLowPowerModeEnabled,
+        ]
+        if SlowedBy.memoryShort(state) { state["memory_holders"] = ProcessMemory.others().map { ["name": $0.name, "bytes": $0.bytes] } }
+        var signals = state
+        if let job = jobs.report { signals["job"] = job }
+        if (state["tuning"] as? [String: Any])?["state"] as? String == "none" { signals["last_tuning"] = DashboardState.lastRun(settings) }
+        let list = lock.withLock {
+            let list = SlowedBy.stamp(SlowedBy.list(signals), seen: &slowSeen)
+            lastSlowed = (Date(), list)
+            return list
+        }
+        state["slowed_by"] = list
     }
 
     /// `/v1/tuning/apply` (under the caller's settings lock): saves the tuning result, then reloads.
@@ -1300,6 +1330,17 @@ final class ModelFront: @unchecked Sendable {
     private func storagePlan(_ request: BoundedHTTPRequest) throws -> [String: Any] {
         let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] ?? [:]
         let fresh = try Settings.load(flags: flags)
+        // Remove unusable saved prompts: each folder that goes, with its size and the kept conversations that need a tick.
+        if body["kind"] as? String == "prune" {
+            let going = Storage.map(fresh, found: foundForStorage(fresh)).prompts.filter {
+                if case .unusable = $0.state { true } else { false }
+            }
+            guard !going.isEmpty else { throw ServingFailure("Only an item nothing uses is removed", status: 409) }
+            return [
+                "kind": "prune", "name": "unusable saved prompts", "folders": going.map(\.json),
+                "bytes": going.reduce(UInt64(0)) { $0 + $1.bytes }, "revision": DashboardState.revision(fresh),
+            ]
+        }
         let all = Storage.items(fresh, found: foundForStorage(fresh))
         guard let item = all.first(where: { $0.path == body["path"] as? String }) else {
             throw ServingFailure("This item is no longer available", status: 409)
@@ -1566,6 +1607,27 @@ final class ModelFront: @unchecked Sendable {
             try jobs.run(kind: "recover", title: "Recovering move") { [self] _, _ in
                 try scheduler.holding(nil) { try MoveJournal.recover(id, settings: fresh) }
             }
+        // Remove unusable saved prompts (`SavedPrompts.prune`), with the model loaded: a folder a server holds stays, and one
+        // with named or pinned conversations goes only when its path is in `yes`.
+        case "prune":
+            let fresh = (try? Settings.load(flags: flags)) ?? settings
+            try DashboardState.check(body["revision"] as? String, settings: fresh)
+            let yes = Set(body["yes"] as? [String] ?? [])
+            let unusable = { @Sendable [self] in
+                Storage.map(fresh, found: foundForStorage(fresh)).prompts.filter { if case .unusable = $0.state { true } else { false } }
+            }
+            guard !unusable().isEmpty else { throw ServingFailure("Only an item nothing uses is removed", status: 409) }
+            try jobs.run(kind: "prune", title: "Removing unusable saved prompts") { [self] _, _ in
+                scheduler.holding(nil) {
+                    let builds = unusable()
+                    let result = SavedPrompts.prune(
+                        builds, all: false, yes: { yes.contains($0.path) }, command: "ticking it")
+                    let kept = result.lines.filter { $0.hasPrefix("Keeps ") }.map { $0.dropFirst(6) }
+                    return
+                        "Removed \(result.removed) of \(builds.count) folders of unusable saved prompts (\(OrigamiPlan.gigabytes(result.freed)))."
+                        + (kept.isEmpty ? "" : " Kept " + kept.joined(separator: "; ") + ".")
+                }
+            }
         case let kind? where ["move", "remove", "delete", "forget", "relink"].contains(kind):
             let fresh = (try? Settings.load(flags: flags)) ?? settings
             // Matched as written, else by the folder it resolves to (/tmp is /private/tmp).
@@ -1670,7 +1732,7 @@ final class ModelFront: @unchecked Sendable {
                     return try outcome.get()
                 }
             }
-        default: throw ServingFailure("kind must be prepare, add, move or remove")
+        default: throw ServingFailure("kind must be prepare, add, move, remove or prune")
         }
     }
 

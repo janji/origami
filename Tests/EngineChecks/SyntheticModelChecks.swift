@@ -17,6 +17,7 @@ func syntheticModelChecks() -> [(String, () throws -> Void)] {
     [
         ("synthetic_glm_end_to_end", { try syntheticEndToEnd(.glm) }),
         ("synthetic_deepseek_end_to_end", { try syntheticEndToEnd(.deepseek) }),
+        ("synthetic_family_canary", { for family in [ModelFamily.glm, .deepseek] { try syntheticCanary(family) } }),
         ("synthetic_glm_prompt_buffers", { try syntheticPromptBuffers(.glm) }),
         ("synthetic_deepseek_prompt_buffers", { try syntheticPromptBuffers(.deepseek) }),
         ("synthetic_prompt_cancel_resumes", { for family in [ModelFamily.glm, .deepseek] { try syntheticPromptCancelResumes(family) } }),
@@ -945,4 +946,27 @@ private func syntheticReadAheadUnderPressure(_ family: ModelFamily) throws {
         10 * p.readAheads >= 9 * f.readAheads && 10 * p.prefetches >= 9 * f.prefetches && 10 * p.misses <= 11 * f.misses + 10,
         "read-aheads \(p.readAheads) against \(f.readAheads), guesses \(p.prefetches) against \(f.prefetches), "
             + "demand misses \(p.misses) against \(f.misses)")
+}
+
+/// The saved prompts' canary (`FamilyServingBackend.canary`) on the synthetic model's real forward pass: the same bits run
+/// to run and with another expert budget (two and three fifths of the routed experts, and all of them), and the model left reset; a
+/// budget, a cache's contents or a drive must never change it.
+private func syntheticCanary(_ family: ModelFamily) throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { throw FixtureUnavailable(description: "no Metal device") }
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("origami-synthetic-canary-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let weights = try FamilyWeights(gguf: GGUFSource(try syntheticFamilyGGUF(family, in: folder)), device: device)
+    let routed = weights.gguf.tensors.values.filter { $0.name.contains("_exps.") }.reduce(0) { $0 + Int($1.length) }
+    let tokenizer = try tinyFamilyTokenizer("{% for m in messages %}{{ m.content }}{% endfor %}", fillers: weights.geometry.vocab - 261)
+    var canaries: [String] = []
+    for budget in [routed * 2 / 5, routed * 3 / 5, routed * 2] {
+        try autoreleasepool {
+            let model = try makeFamilyModel(weights, expertBudget: UInt64(budget), context: 4_096) { _ in }
+            let backend = FamilyServingBackend(model: model, tokenizer: tokenizer, stops: [259], version: "check", fastAllowed: true)
+            canaries += [try backend.canary(), try backend.canary()]
+            guard model.position == 0 else { throw EngineError("synthetic canary: the model was not left reset") }
+        }
+    }
+    guard Set(canaries).count == 1 else { throw EngineError("synthetic \(family) canary differs by run or budget: \(canaries)") }
 }

@@ -709,6 +709,36 @@ public final class FamilyServingBackend: ServingBackendStopping, ServingPromptCo
             "saved the system prompt as **\(label)** (\(end) tokens\(prefilled ? String(format: ", read in %.0f s", Date().timeIntervalSince(started)) : ", already cached")). New chats with it start from there."
     }
 
+    /// The saved prompts' canary (`PromptCanary.familyProbe`): the fixed prompt read on a reset model, then its decode
+    /// tokens one at a time, exact; the bits of every step's logits and of the final state. Nothing is restored, and the
+    /// decode uses it counts are left out of the usage counts. While loading, or (`yielding`) as idle work: the conversation
+    /// in memory is saved first (as at a stop), and a request arriving stops the probe at its next layer step
+    /// (`IOOperationCancelled`).
+    package func canary(yielding: Bool = false) throws -> String {
+        if yielding { saveLiveConversation() }
+        var result = ""
+        let run = { [self] in
+            let probe = PromptCanary.familyProbe(vocabulary: model.vocabulary)
+            try model.reset()
+            let previous = model.shouldContinue
+            if yielding { model.shouldContinue = { [gate] in !gate.waiting } }
+            defer {
+                model.shouldContinue = previous
+                try? model.reset()
+                history = []
+                halvedAt = (model.expertUses, model.expertMisses)
+            }
+            model.routing = .exact
+            try model.reserveState(probe.prompt.count + probe.decode.count)
+            var logits = [try model.forward(probe.prompt)]
+            for token in probe.decode { logits.append(try model.forward([token])) }
+            let state = model.stateParts(at: model.position).map { UnsafeRawBufferPointer(start: $0.buffer.contents(), count: $0.bytes) }
+            result = PromptCanary.digest(logits: logits, state: state)
+        }
+        guard try gate.whileIdle({ !busy && !warmingNow && !held }, run) else { throw IOOperationCancelled() }
+        return result
+    }
+
     /// Saved prompts for `/v1/status`, as Qwen's server reports them.
     package func promptCacheReport() -> [String: Any]? { promptCache?.report }
 

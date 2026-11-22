@@ -45,5 +45,7 @@ package final class ServingGate: @unchecked Sendable {
         try work()
         return true
     }
+    /// A request is arriving: background work under `lock` that can stop (the idle canary probe) stops for it.
+    package var waiting: Bool { arriving.load(ordering: .sequentiallyConsistent) > 0 }
     private func quiet(_ idle: () -> Bool) -> Bool { arriving.load(ordering: .sequentiallyConsistent) == 0 && idle() }
 }

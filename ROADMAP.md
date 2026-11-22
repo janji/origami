@@ -111,6 +111,16 @@ A user ran 3.1.3 on a Mac Studio M4 Max with 128 GB and reported it (issue #1 on
 - **`origami doctor` for GLM and DeepSeek** does not know whether every expert fits in memory without the loaded model, so on such a Mac it says a hot copy will be built where the server says none is needed (`FamilySetup.rows`, marked `shortcut:`). S.
 - **Not measured:** the cold start on that Mac without a hot copy against with one (the rule above assumes the difference is minutes, once per start), and anything on 64 or 96 GB.
 
+## 0.12 3.1.5: an upgrade no longer empties the saved prompts (2026-11-22)
+
+Three upgrades in three days each emptied the saved prompts: the owner's next turn of a 50,000-token conversation was read again in nine minutes, on a model that had started with its smallest cache because other apps held memory, and nothing on the page said either. Shipped: saved prompts keyed on a digest of the arithmetic sources with a canary per folder (F2, in place of the per-entry replay first designed); the live "Slowed by" list; old saved prompts shown and removed from the dashboard; permission messages that name the program macOS asks about. What is left:
+
+- **The canary's coverage.** Its probe (Qwen: 600 prompt tokens and 3 decode steps; GLM and DeepSeek: 16 and 2) does not reach long-context attention, a context kept in files, images, or the batched per-expert prompt kernel of GLM and DeepSeek; those are guarded by the digest alone. Widen it only if a digest miss is ever found.
+- **A build replaced before its first two idle minutes** leaves saves no later build can check (they stay in its folder and go by the usual rules).
+- **`origami cache` and the storage map** say "usable by this build" for a folder that still waits for its canary check; `PromptCanary.notCheckedYet` has the words.
+- **"Slowed by":** helper programs show under their process names ("node", "python3.14"), and the memory line is long with three apps named.
+- **The launcher** is described for this Mac only; `origami service install` still installs `origami` itself as the job's program, so an upgrade there asks for the permission again.
+
 ## 1. Phase 0: done
 
 H1 and H2 were done on 2026-11-10, H3 on 2026-11-11. H3's screen on the real GLM and DeepSeek (one cold start per variant, replies identical to control everywhere) found no experiment switch that beats the default by 3%: early prefetch, prefetch into allocated slots, arriving-first, read lanes at any worker count, buffered reads, the protected cache, compact shrink, the admission variants, grouped prefill gate/up, Engram overlap and memo are neutral or worse; adaptive prefetch off, warm-after-restore and one prompt slice hurt. They are deleted (S4). Not screened: Qwen's switches, DeepSeek's restore and startup looks, the draft items (parked), and O18, which refuses exact mode. The screen's own findings were fixed and confirmed on the real models the same day (the hedge rule, the restart reply, the second long conversation); what is left of them is parked in section 7 (drive slowdown, GLM resume points). Baselines on 3.1 (short runs, 8 GB copy): first token on a 2,500-token prompt GLM 80 s, DeepSeek 149 s, Qwen 37 s; 200-token decode 0.72, 1.08 and 6.59 tok/s.
@@ -166,14 +176,6 @@ Nothing here is queued. Each entry is parked until what its **Reopens when** lin
 ### 7.2 Faster, output unchanged
 
 Every entry must give identical tokens, logits and state. Family hedged reads, read timeouts and demand-first scheduling come with S1 and are not repeated here.
-
-#### F2 · Keep saved prompts across upgrades
-- **Engines:** all · **Size:** M · **Expected:** no full re-read of every saved conversation after an upgrade; time saved unmeasured.
-- **Why:** The prompt cache is keyed on the binary's hash, so every upgrade throws away all saved prompts. Audit O06 kept it that way because a wrong compatibility claim would silently corrupt answers. A first design (rewind the restored state one token and recompute its logits) cannot work: every engine's state has parts updated in place (Qwen's 36 recurrent states and convolution tails, GLM's KDA, conv and indexer carry, DeepSeek's window ring and unfinished compressor group), an entry holds one state at one position, and one token alone runs other kernels than the prefill slice that made the saved logits.
-- **What:** Key saved prompts on an arithmetic-version number per engine. With each entry also save a verification point: the in-place parts as they were at the start of the entry's last prefill slice, that slice's shape and the logits it produced (about 115 MB more per Qwen entry; GLM and DeepSeek unmeasured). A different binary restores that point, replays the last slice with the same kernels and compares the logits bitwise before trusting the entry (once per entry per upgrade); on mismatch, discard. First confirm on the real models that replaying a last slice from its start reproduces the stored logits bit for bit with the same binary, and that Qwen's tiles can be replayed from a 256-token boundary.
-- **Check:** An upgrade with unchanged arithmetic reuses saved prompts; a test build with one changed kernel is caught by the restore check; the same binary does no extra work.
-- **Source:** review; audit O06; 2026-11-11 design study.
-- **Reopens when:** the first upgrade of a deployed 3.1 shows what reading every saved conversation again costs, or the owner asks for it.
 
 #### F4 · Qwen: faster lone misses and less host waiting
 - **Engines:** Qwen · **Size:** M · **Expected:** Qwen's own calibration reads 1.57 GB/s at queue depth 1 vs 2.93 GB/s at depth 4; end-to-end gain unmeasured.

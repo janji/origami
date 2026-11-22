@@ -867,4 +867,270 @@ package enum PrefixReuseSelfChecks {
         }
         try require(ledger.snapshot().reserved == 0, "Clone-base fixture leaked a reservation")
     }
+
+    // Saved prompts across upgrades (`PromptCanary`): fake builds are executable digests, probes return canaries.
+    private static func canaryCache(_ root: URL, _ ledger: MemoryLedger, build: String, epoch: String = "fixture") throws -> PromptCache {
+        try PromptCache(
+            root: root, epoch: epoch, entries: 2, systemEntries: 0,
+            entryBytes: PagedCheckpointFormat.layout(capacity: 8192, tokens: 8192, hasLogits: true).bytes * 2,
+            ledger: ledger, capacity: 8192, minimumFreeBytes: 0, build: build)
+    }
+    /// The canary of fixed logits; `perturbed` flips one logit's lowest bit (a build with one kernel changed).
+    private static func canary(perturbed: Bool = false) -> String {
+        var logits: [[Float]] = [[0.25, -1.5, 3], [7, 0.125, -2]]
+        if perturbed { logits[1][1] = logits[1][1].nextUp }
+        return PromptCanary.digest(logits: logits)
+    }
+    private static func noProbe() throws -> String { throw EngineError("A build its folder's canary lists ran the probe") }
+    /// Every file of a folder with its bytes' SHA-256: nothing of it may change.
+    private static func snapshot(_ folder: URL) -> [String: Data] {
+        var files: [String: Data] = [:]
+        for case let url as URL in FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil) ?? .init()
+        where (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+            files[url.path] = (try? Data(contentsOf: url)) ?? Data("unreadable".utf8)
+        }
+        return files
+    }
+
+    /// A build's idle probe writes its folder's canary (`canaryWhenIdle` with its idle time 0 and on the caller's thread).
+    /// A cache held closed for the load-time probe opens with what the server made meanwhile intact: the conversation's
+    /// frontier folder is made under `frontierParent` before `settle` (as `PrefixReuseController` makes it at load), and
+    /// after `settle` a frontier's recurrent file is made there, a prompt image is saved, and the next start restores it.
+    /// On (a) a new folder probed at load (`ORIGAMI_TEST_CANARY_AT_LOAD`), (b) a folder whose canary matches (an
+    /// upgrade) and (c) a refused canary's own folder.
+    package static func canaryOpensForSaves() throws {
+        let ledger = try MemoryLedger(ceiling: 4_000_000_000, transientMargin: 0)
+        let parent = try folder()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("0123456789abcdef", isDirectory: true)
+        let geometry = try ConversationGeometry(context: 8192)
+        for (n, (build, probe, forced)) in [
+            ("build-a", canary(), true), ("build-b", canary(), false), ("build-c", canary(perturbed: true), false),
+        ]
+        .enumerated() {
+            try autoreleasepool {
+                if forced { setenv("ORIGAMI_TEST_CANARY_AT_LOAD", "1", 1) }
+                let cache = try canaryCache(root, ledger, build: build)
+                unsetenv("ORIGAMI_TEST_CANARY_AT_LOAD")  // the switch probes at every load: the next start here runs without it
+                try require(cache.savesOff == PromptCache.checking, "Case \(n): the cache was not held closed for the probe")
+                let store = try ConversationFrontierStore(
+                    parent: cache.frontierParent, maximumBytes: geometry.frontierDiskBytes, ledger: ledger,
+                    memoryBytes: geometry.frontierMemoryBytes)
+                cache.settle { probe }
+                try require(
+                    cache.savesOff == nil && (n == 2) == (cache.root.lastPathComponent != root.lastPathComponent),
+                    "Case \(n): \(cache.savesOff ?? "folder")")
+                do { _ = try store.make(offset: 512) } catch {
+                    throw EngineError("Case \(n): after the probe a frontier could not be saved: \(error)")
+                }
+                let ids = (1...600).map { Int64($0 + n * 1_000) }
+                try cache.write(image(ledger, ids: ids))
+                let next = try canaryCache(root, ledger, build: build)
+                next.settle(probe: noProbe)
+                try require(next.candidates(for: ids).count == 1, "Case \(n): the next start did not find the save")
+            }
+        }
+    }
+
+    private static func idleCanary(_ cache: PromptCache, _ probe: @escaping () throws -> String = { canary() }) {
+        cache.canaryIdle = 0
+        cache.canaryWhenIdle(idle: true, blocked: false, wait: true, probe: probe)
+    }
+
+    /// Two builds (other executables) of one arithmetic share saved prompts once the second's canary matches the first's.
+    /// A new folder runs no probe at load: its build is listed at once. Build B arriving before the canary exists cannot
+    /// check and saves in its own folder; the folder reads as not checked yet for it, never unusable. Build A's idle probe
+    /// does not run while busy, gives way to a request (cancelled) and is tried again, then writes the canary. Build B's
+    /// load then runs the probe, says so first, and restores A's Qwen checkpoint and family state; the canary lists both,
+    /// neither probes again, and B on another macOS build probes once more.
+    package static func canarySharedByBuilds() throws {
+        let ledger = try MemoryLedger(ceiling: 2_000_000_000, transientMargin: 0)
+        let parent = try folder()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("0123456789abcdef", isDirectory: true)
+        let qwen = (1...600).map(Int64.init)
+        let family = Array(700..<1300)
+        let (a, b, newOS) = ("build-a macOS 1", "build-b macOS 1", "build-b macOS 2")
+        try require(
+            PromptCanary.build.hasPrefix(PromptCanary.executable)
+                && PromptCanary.build.hasSuffix(ProcessInfo.processInfo.operatingSystemVersionString),
+            "A canary's build is not the executable and the macOS build")
+        try autoreleasepool {
+            let first = try canaryCache(root, ledger, build: a)
+            first.settle(probe: noProbe)
+            try require(
+                first.savesOff == nil && PromptCanary.marker(root) == .init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: [a]),
+                "A new folder was not this build's at once: \(first.savesOff ?? "")")
+            try first.write(image(ledger, ids: qwen))
+            try first.writeState(tokens: family, bytes: 4) {
+                try FamilyStateFile.write([], logits: [0.5], tokens: family, epoch: "fixture", to: $0)
+            }
+        }
+        try require(
+            PromptCanary.whyUnreadable(root, build: a) == nil && PromptCanary.whyUnreadable(root, build: b) == nil
+                && PromptCanary.notCheckedYet(root, build: a) == nil && PromptCanary.notCheckedYet(root, build: b) != nil,
+            "A folder without its canary yet does not read as usable for its build and not checked yet for another")
+        try autoreleasepool {
+            let early = try canaryCache(root, ledger, build: b)
+            early.settle(probe: noProbe)
+            try require(
+                early.root.lastPathComponent == PromptCanary.ownFolder(root, build: b).lastPathComponent
+                    && early.canaryNote?.contains("no canary yet") == true && early.candidates(for: qwen).isEmpty,
+                "A build arriving before the canary did not save in its own folder and say so")
+        }
+        try autoreleasepool {
+            let first = try canaryCache(root, ledger, build: a)
+            first.canaryIdle = 0
+            first.canaryWhenIdle(idle: false, blocked: false, wait: true, probe: noProbe)
+            first.canaryWhenIdle(idle: true, blocked: true, wait: true, probe: noProbe)
+            idleCanary(first) { throw IOOperationCancelled() }
+            try require(PromptCanary.marker(root)?.canary == nil, "A cancelled idle probe wrote a canary")
+            idleCanary(first)
+            try require(PromptCanary.marker(root)?.canary == canary(), "The idle probe was not tried again or wrote no canary")
+        }
+        try autoreleasepool {
+            let later = try canaryCache(root, ledger, build: b)
+            try require(later.candidates(for: qwen).isEmpty, "Build B read saved prompts before its canary")
+            var lines: [String] = []
+            later.log = { lines.append($0) }
+            later.settle {
+                guard lines.contains(where: { $0.contains(PromptCache.checking) }) else { throw EngineError("The probe ran unannounced") }
+                return canary()
+            }
+            try require(
+                lines.contains { $0.contains("checked against the folder's canary in") } && later.root == root.resolvingSymlinksInPath(),
+                "Build B was not checked against the canary: \(lines)")
+            let found = later.candidates(for: qwen)
+            let segments = try PrefillReadSchedule(promptTokens: qwen.count, computeTile: 256, readScope: 8192)
+                .checkpointSegments(arithmeticEpoch: identity().arithmeticEpoch)
+            let restored = try found.first?.store.read(expectedIdentity: identity(), expectedSegments: segments, expectedConsumedIDs: qwen)
+            try require(restored?.consumedIDs == qwen, "Build B did not restore build A's Qwen checkpoint")
+            let slot = later.entries.first { $0.tokens == family.count }.flatMap { Int($0.id.split(separator: "-")[0]) }
+            let folder = try slot.map { later.stateFolder($0) } ?? { throw EngineError("Build B lost build A's family state") }()
+            let header = try FamilyStateFile.header(folder, epoch: "fixture", prompt: family + [1])
+            try require(try FamilyStateFile.read(folder, header: header, into: []) == [0.5], "Build B did not read build A's family state")
+        }
+        try require(
+            PromptCanary.marker(root)?.builds == [a, b] && PromptCanary.whyUnreadable(root, build: b) == nil
+                && PromptCanary.notCheckedYet(root, build: b) == nil,
+            "The canary does not list both builds")
+        // The same build on a known folder does no extra work; on another macOS build it proves the canary again.
+        for build in [a, b] {
+            try autoreleasepool {
+                let again = try canaryCache(root, ledger, build: build)
+                try require(again.savesOff == nil && !again.candidates(for: qwen).isEmpty, "A listed build found its folder closed")
+                again.settle(probe: noProbe)
+                try require(again.savesOff == nil, "A listed build ran its probe")
+            }
+        }
+        try autoreleasepool {
+            let updated = try canaryCache(root, ledger, build: newOS)
+            var probes = 0
+            updated.settle {
+                probes += 1
+                return canary()
+            }
+            try require(probes == 1 && PromptCanary.marker(root)?.builds == [a, b, newOS], "A new macOS build did not prove the canary")
+        }
+    }
+
+    /// A build whose canary differs (one logit's lowest bit) is refused: one loud line, nothing of the shared folder
+    /// restored, written or removed, its saves go to its own folder, a restore says why the shared save is not used, and
+    /// at its next start it goes to its own folder without a probe. Another arithmetic is another folder, read as
+    /// another build's; a folder from before (no canary) is ignored, said so, and still removed after 14 days unused.
+    package static func canaryRefusedAndOlderFolders() throws {
+        let ledger = try MemoryLedger(ceiling: 2_000_000_000, transientMargin: 0)
+        let parent = try folder()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("0123456789abcdef", isDirectory: true)
+        let saved = (1...600).map(Int64.init)
+        try autoreleasepool {
+            let a = try canaryCache(root, ledger, build: "build-a")
+            try a.write(image(ledger, ids: saved))
+            idleCanary(a)
+        }
+        let before = snapshot(root)
+        try autoreleasepool {
+            let c = try canaryCache(root, ledger, build: "build-c")
+            var lines: [String] = []
+            c.log = { lines.append($0) }
+            c.settle { canary(perturbed: true) }
+            try require(
+                lines.contains { $0.contains("WARNING") && $0.contains("different bits") }
+                    && c.root.lastPathComponent != root.lastPathComponent && c.savesOff == nil,
+                "A different canary was not refused loudly: \(lines)")
+            try require(c.candidates(for: saved).isEmpty, "A refused build found the shared folder's prompts")
+            try c.write(image(ledger, ids: (2_001...2_600).map(Int64.init)))
+            c.explainRestore(saved.map(Int.init) + [7], restored: 0)
+            let row = c.takeRestore()
+            try require(
+                row?["reason"] as? String == "saved_by_other_build" && row?["reason_words"] as? String == PromptCanary.otherArithmetic
+                    && row?["wanted"] as? Int == saved.count,
+                "A restore did not say the save is another build's: \(row ?? [:])")
+            try require(
+                PromptCanary.whyUnreadable(root, build: "build-c") == PromptCanary.otherArithmetic, "The refused folder reads as readable")
+        }
+        try require(snapshot(root) == before, "The refused folder changed")
+        try autoreleasepool {
+            let c = try canaryCache(root, ledger, build: "build-c")
+            try require(
+                c.root.lastPathComponent == PromptCanary.ownFolder(root, build: "build-c").lastPathComponent
+                    && c.candidates(for: (2_001...2_600).map(Int64.init)).count == 1,
+                "A refused build did not go back to its own folder")
+            c.settle(probe: noProbe)
+        }
+        // Another arithmetic keys another folder; its prompts read as another build's.
+        let other = parent.appendingPathComponent(String(PromptCanary.epoch("settings", arithmetic: "other").prefix(16)))
+        try require(
+            PromptCanary.epoch("settings", arithmetic: "other") != PromptCanary.epoch("settings"),
+            "The arithmetic digest does not key the folder")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try require(
+            PromptCanary.write(.init(arithmetic: "other", canary: canary(), builds: ["build-a"]), to: other)
+                && PromptCanary.whyUnreadable(other, build: "build-a") == PromptCanary.otherArithmetic,
+            "Another arithmetic's folder reads as readable")
+        // A folder from before upgrades kept saved prompts (no canary): not read, said so, removed after 14 days unused.
+        let old = parent.appendingPathComponent("00112233445566ff", isDirectory: true)
+        let kept = parent.appendingPathComponent("00112233445566fe", isDirectory: true)
+        let entry = #"{"tokens":600,"prefix":"\#(PromptCache.prefixHash(saved[...]))","used":0}"#
+        for (folder, pinned) in [(old, false), (kept, true)] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let pin = pinned ? #","pinned":true"# : ""
+            let index = folder.appendingPathComponent("index.json")
+            try Data(#"{"epoch":"old","entries":{"0":\#(entry.dropLast())\#(pin)}}}"#.utf8).write(to: index)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -15 * 86_400)], ofItemAtPath: index.path)
+        }
+        // A 3.1 family marker (model, key, build) has no canary fields.
+        try Data(#"{"model":"m","family_key":"k","context":8192,"build":"0123456789abcdef"}"#.utf8)
+            .write(to: old.appendingPathComponent(PromptCanary.file))
+        try require(
+            PromptCanary.whyUnreadable(old, build: "build-a") == PromptCanary.beforeUpgrades, "An executable-keyed folder reads as readable"
+        )
+        try autoreleasepool {
+            let fresh = parent.appendingPathComponent("fedcba9876543210", isDirectory: true)
+            let d = try canaryCache(fresh, ledger, build: "build-d", epoch: "new")
+            d.settle { canary() }
+            try require(
+                !FileManager.default.fileExists(atPath: old.path) && FileManager.default.fileExists(atPath: kept.path),
+                "The 14-day rule did not remove the old unpinned folder, or removed a pinned one")
+            d.explainRestore(saved.map(Int.init) + [7], restored: 0)
+            let row = d.takeRestore()
+            try require(
+                row?["reason"] as? String == "saved_by_other_build" && row?["reason_words"] as? String == PromptCanary.beforeUpgrades
+                    && d.unusableNote?.contains("saved before upgrades kept saved prompts") == true,
+                "A restore or the start did not say the save predates the canary: \(d.unusableNote ?? "no note")")
+        }
+        // An empty folder with another build's canary holds nothing to protect: no probe at load, and it becomes this build's.
+        try autoreleasepool {
+            let empty = parent.appendingPathComponent("0123456789abcdee", isDirectory: true)
+            try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+            _ = PromptCanary.write(.init(arithmetic: PromptCanary.arithmetic, canary: canary(), builds: ["build-x"]), to: empty)
+            let e = try canaryCache(empty, ledger, build: "build-e")
+            e.settle(probe: noProbe)
+            try require(
+                e.savesOff == nil
+                    && PromptCanary.marker(empty) == .init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: ["build-e"]),
+                "An empty folder ran the probe at load or kept another build's canary")
+        }
+    }
 }

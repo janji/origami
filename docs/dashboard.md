@@ -21,6 +21,14 @@ waits for it, and a banner says so; the same banner says when conversation saves
 ## Tabs
 
 - **Now.** What is happening, and the one next action when something is needed.
+  - **Slowed by**, at the top while something slows Origami down now, also while a request runs: one line per
+    condition, what and then the fix, the costliest first and settings advice last. Memory 1 GB or more under what Origami may
+    use says why (cut by macOS, held at the budget learned from this Mac's memory use, or started small), names the three
+    apps that hold the most and what brings it back (by itself, or Reset on the Memory limit line for a learned budget);
+    the others are a drive reading slowly or due for `origami refresh`, gone or not allowed, the hot copy building, without room or failed, heat, Low Power Mode,
+    conversation saves paused, a prompt read again (and why), a job, waiting requests, a memory limit this Mac does not
+    keep or one under the measured limit, and never tuned. `origami status` prints the same lines; apps read
+    `slowed_by` ([integration.md](integration.md)).
   - On a first run: the models Origami found on this Mac (**Add**), the download it is made for, or your own file.
     A model added but not loaded: **Load**. Stopped: **Start**. A model that did not start: why (a memory limit of
     yours that is too small is named), **Try again** and **Change the setup**.
@@ -104,6 +112,14 @@ disk shows as unavailable. Files Origami cannot prove it owns are never offered 
 - An interrupted move stays visible. **Recover…** checks the remaining copies, then finishes the cleanup or puts the
   original back. Stop the loaded model first. If the copies differ or a disk is missing, recovery keeps every file
   and reports the problem.
+
+- **Saved prompts** are listed per model, in the words `origami cache` uses: those the running build reads (**in use**
+  or **usable by this build**) with their size, conversations and how many are pinned or named, and apart those no
+  build can read any more (**unusable**: made by an earlier or another Origami build, of a model file no model uses, a
+  GLM or DeepSeek context left on disk) with their size and when they were last used. Above 1 GB of those, the storage
+  total says so. **Remove unusable…** lists every folder that goes with its size, and removes them, also while a model
+  is loaded: a folder a running server holds is never removed. A folder with pinned or named conversations, or whose
+  index cannot be read, is named with its own box and goes only when ticked. The result says what was kept and why.
 
 Full and partial expert copies move independently, even when they share a folder. Turning a cache off keeps its
 files for reuse.

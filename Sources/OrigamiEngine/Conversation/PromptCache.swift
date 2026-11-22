@@ -6,7 +6,8 @@ import Foundation
 /// (`PersistentCheckpointStore`, paged format) in its own slot folder; a small index maps
 /// slots to their token prefix. Lookup takes the longest saved prefix of a new request;
 /// saving replaces the same prompt's entry, a free slot, or the least recently used one.
-/// Entries from another engine build or model (another epoch) are deleted at start.
+/// Entries from another epoch (another arithmetic, model or settings) are deleted at start. Builds of one arithmetic
+/// share a folder once their canary matches (`PromptCanary`, `settle`).
 public final class PromptCache {
     /// One saved image in `index.json`, keyed by its slot number. The tokens themselves are not stored here; the
     /// slot's checkpoint holds them and its read verifies them against the request.
@@ -48,17 +49,18 @@ public final class PromptCache {
         /// Prompt tokens requests had to read since this cache began.
         var read: Int? = nil
     }
-    public let root: URL
+    /// The folder in use: the epoch's own, or this build's after the epoch's folder refused its canary (`settle`).
+    public private(set) var root: URL
     /// Parent of the per-process conversation frontier and context-file folders: `root`, or a private temporary folder
     /// while another server holds `root` (`shared`), whose start would remove them. That folder goes at exit, or at a
     /// later start once its process is gone (`temporaryFolder`).
     public let frontierParent: URL
     /// Another server process holds `root` (its `.lock`): this one reads, writes and removes nothing there, nor in the
     /// data folder's other shared files (the usage counters), which only the folder's owner writes.
-    public let shared: Bool
+    public private(set) var shared: Bool
     /// Serializes index writes, so the last one written holds the latest index.
     private let indexWrites = NSLock()
-    private let slots: [PersistentCheckpointStore]
+    private var slots: [PersistentCheckpointStore]
     /// Slots 0..<regular hold prompt and conversation images; the rest hold system-prompt snapshots,
     /// so a day of one-off chats cannot evict a harness's system prompt.
     private let regular: Int
@@ -67,14 +69,23 @@ public final class PromptCache {
     private var index: Index
     private let minimumFreeBytes: UInt64
     private let sameModel: ((URL) -> Bool?)?
+    private let epoch: String, entryBytes: UInt64, ledger: MemoryLedger, capacity: Int
+    /// This executable's SHA-256 when the folder is shared by builds of one arithmetic (`PromptCanary`); nil: not shared.
+    private let build: String?
+    /// The folder is held closed until `settle` ran this build's canary against it: nothing read, written or removed.
+    private var pending: (savesOff: String?, savesNote: String?)?
+    /// Entries of sibling folders this build cannot read (`PromptCanary.whyUnreadable`), with why, for `explainRestore`.
+    private var unreadable: [(tokens: Int, prefix: String, why: String)] = []
     /// The slot of the last image written, the clone base of the next save.
     private var lastWritten: Int?
     /// Why saving is off (a data folder that cannot be kept private, such as one on exFAT); nil when saves work. The
     /// server still serves, without reuse across restarts; the runtime says so once at start.
-    package let savesOff: String?
+    package private(set) var savesOff: String?
     /// Saves are on, on a drive with file permissions that is mounted with ownership ignored (an external APFS or
     /// Mac OS Extended drive, by macOS's default): what the start says once about who can read them.
-    package let savesNote: String?
+    package private(set) var savesNote: String?
+    /// Saved prompts of this model in folders this build cannot read (`PromptCanary.whyUnreadable`): what the start says once.
+    package private(set) var unusableNote: String?
 
     /// Why prompts are not saved in `root`, a folder with `owner` and `mode` on a drive mounted at `drive` with
     /// `mountFlags` (`statfs`), or nil: saves trust only a folder this user owns and no one else can write (as
@@ -133,9 +144,11 @@ public final class PromptCache {
     ///   - sameModel: whether a sibling epoch folder is another build of this model (true), another model's (false), or
     ///     cannot say (nil: an older build's folder without a marker). Without it every sibling is this model's, as in
     ///     Qwen's `<fingerprint12>-<context>` folders.
+    ///   - build: this executable's SHA-256 when `epoch` is keyed on the arithmetic digest (`PromptCanary.epoch`): the
+    ///     folder opens at once when its canary lists this build, else stays closed until `settle`.
     public init(
         root: URL, epoch: String, entries: Int, systemEntries: Int = 4, entryBytes: UInt64, ledger: MemoryLedger,
-        capacity: Int, minimumFreeBytes: UInt64 = 10_000_000_000, sameModel: ((URL) -> Bool?)? = nil
+        capacity: Int, minimumFreeBytes: UInt64 = 10_000_000_000, sameModel: ((URL) -> Bool?)? = nil, build: String? = nil
     ) throws {
         if let drive = Self.missingDrive(root) {
             throw EngineError(
@@ -149,12 +162,11 @@ public final class PromptCache {
         frontierParent = shared ? try Self.temporaryFolder() : self.root
         self.minimumFreeBytes = minimumFreeBytes
         self.sameModel = sameModel
+        (self.epoch, self.entryBytes, self.ledger, self.capacity, self.build) = (epoch, entryBytes, ledger, capacity, build)
         regular = max(1, entries)
-        slots = try (0..<regular + max(0, systemEntries)).map { slot in
-            try PersistentCheckpointStore(
-                directory: root.appendingPathComponent("entry-\(slot)", isDirectory: true),
-                maximumBytes: entryBytes, ledger: ledger, capacity: capacity)
-        }
+        index = Index(epoch: epoch, entries: [:])
+        systemBlocks = []
+        slots = try Self.slots(in: root, count: regular + max(0, systemEntries), entryBytes: entryBytes, ledger: ledger, capacity: capacity)
         var folder = stat()
         var volume = statfs()
         let looked = stat(slots[0].directory.path, &folder) == 0 && statfs(slots[0].directory.path, &volume) == 0
@@ -170,6 +182,173 @@ public final class PromptCache {
                     root: root, owner: folder.st_uid, mode: folder.st_mode, mountFlags: volume.f_flags, filesystem: filesystem,
                     drive: drive)
         savesNote = looked && savesOff == nil ? Self.savesNote(mountFlags: volume.f_flags, filesystem: filesystem, drive: drive) : nil
+        // Frontier and context-file folders of a process that did not exit cleanly hold no live files (they are unlinked).
+        // They go now, before this process makes its own beside them (`frontierParent`), never after: a folder held
+        // closed for the canary opens (`open`) once the conversation's frontier folder exists.
+        if !shared { Self.remove(in: self.root) { $0.hasPrefix("frontiers-") || $0.hasPrefix("kv-") } }
+        if let build, savesOff == nil {
+            let marker = PromptCanary.marker(self.root)
+            let forced = ProcessInfo.processInfo.environment["ORIGAMI_TEST_CANARY_AT_LOAD"] == "1"
+            switch PromptCanary.known(self.root, build: build) {
+            case .listed where !forced: break
+            case .refused(let own) where !forced: try use(own)
+            case _ where !PromptCanary.holdsEntries(self.root) && !forced:
+                // Nothing to restore: the folder is this build's, its canary written while idle (`canaryWhenIdle`). An earlier
+                // build's canary there is dropped with its list: this build has not reproduced it, and keeping it would
+                // vouch for saves it did not check; the next upgrade checks the canary this build writes.
+                guard PromptCanary.write(.init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: [build]), to: self.root) else {
+                    savesOff = "the saved prompts' marker could not be written in \(self.root.path)"
+                    break
+                }
+            case _ where marker?.canary == nil && !forced:
+                // Saves whose canary their build has not written yet: nothing to check them against.
+                canaryNote =
+                    "the saved prompts in \(self.root.path) have no canary yet (their build writes it while idle), so this build "
+                    + "cannot check them and saves its own"
+                try use(PromptCanary.ownFolder(self.root, build: build))
+                if savesOff == nil {
+                    _ = PromptCanary.write(
+                        .init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: [build], refused: self.root.lastPathComponent),
+                        to: self.root)
+                }
+            default:
+                pending = (savesOff, savesNote)
+                savesOff = Self.checking
+                return
+            }
+        }
+        try open()
+    }
+    /// What a cache held closed says while the probe runs (`settle`), in the log, the load progress and `/health`.
+    package static let checking = "checking this build against the saved prompts' canary"
+    /// The folder this build could not check (`init`), said once at start.
+    package private(set) var canaryNote: String?
+
+    /// The slot stores of a folder.
+    private static func slots(in root: URL, count: Int, entryBytes: UInt64, ledger: MemoryLedger, capacity: Int) throws
+        -> [PersistentCheckpointStore]
+    {
+        try (0..<count).map { slot in
+            try PersistentCheckpointStore(
+                directory: root.appendingPathComponent("entry-\(slot)", isDirectory: true),
+                maximumBytes: entryBytes, ledger: ledger, capacity: capacity)
+        }
+    }
+
+    /// Moves to this build's own folder `folder` (the epoch's refused its canary) before anything is read there.
+    private func use(_ folder: URL) throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        root = folder.standardizedFileURL.resolvingSymlinksInPath()
+        slots = try Self.slots(in: root, count: slots.count, entryBytes: entryBytes, ledger: ledger, capacity: capacity)
+        if !Self.hold(root) {
+            shared = true
+            savesOff =
+                "another Origami server is using the data folder \(root.path), so this one saves and reuses no prompts; give "
+                + "each server its own folder (origami config set context_dir <folder>)"
+        }
+    }
+
+    /// Runs this build's canary against a folder held closed (`build`): `probe` returns the SHA-256 of the fixed probe's
+    /// bits (`PromptCanary`), run before any saved prompt is read or written. Equal to the folder's: this build joins its
+    /// list and the folder opens; a new folder takes this canary. Different: one loud line, nothing of that folder is
+    /// read, written or removed, and this build uses its own folder (`PromptCanary.ownFolder`). A probe that fails leaves
+    /// saves off for this run. Returns at once when there is nothing to check (the canary lists this build, the folder
+    /// is not shared by builds, or saves are off).
+    package func settle(probe: () throws -> String) {
+        guard let build, let opened = pending else { return }
+        log?("saved prompts: \(Self.checking) (a fixed probe, before any saved prompt is read)")
+        let started = Date()
+        let canary: String
+        do { canary = try probe() } catch {
+            log?("saved prompts: off for this run: the canary probe failed (\(error))")
+            savesOff = "the canary probe failed: \(error)"
+            return
+        }
+        let seconds = String(format: "%.1f", Date().timeIntervalSince(started))
+        (savesOff, savesNote) = opened
+        pending = nil
+        var marker = PromptCanary.marker(root)
+        if marker?.canary == nil {
+            // A folder without a canary holds nothing this build can vouch for (only `ORIGAMI_TEST_CANARY_AT_LOAD` gets here).
+            try? FileManager.default.removeItem(at: root.appendingPathComponent("index.json"))
+            marker = PromptCanary.Marker(arithmetic: PromptCanary.arithmetic, canary: canary, builds: [])
+            log?("saved prompts: this build wrote the folder's canary in \(seconds) s")
+        } else if marker!.canary == canary {
+            log?("saved prompts: this build was checked against the folder's canary in \(seconds) s")
+        } else {
+            let refused = root
+            log?(
+                "saved prompts: WARNING: this build computes different bits than the builds that saved the prompts in "
+                    + "\(refused.path) (canary \(marker!.canary!.prefix(12)) there, \(canary.prefix(12)) here, checked in \(seconds) s): "
+                    + "nothing is restored from that folder; this build saves its own")
+            do { try use(PromptCanary.ownFolder(refused, build: build)) } catch {
+                savesOff = "this build's own saved-prompt folder could not be made: \(error)"
+                return
+            }
+            marker = PromptCanary.Marker(
+                arithmetic: PromptCanary.arithmetic, canary: canary, builds: [], refused: refused.lastPathComponent)
+        }
+        if !marker!.builds.contains(build) { marker!.builds.append(build) }
+        if savesOff == nil, !PromptCanary.write(marker!, to: root) {
+            savesOff = "the saved prompts' canary could not be written in \(root.path)"
+            return
+        }
+        try? open()
+    }
+
+    /// Seconds without a request before the idle probe runs (`canaryWhenIdle`); settable for checks.
+    package var canaryIdle: TimeInterval = 120
+    /// Since when no request came, whether the idle probe runs, and whether it has nothing (more) to do this run.
+    private var quietSince = Date(), canaryRunning = false, canaryDone = false
+
+    /// Writes the canary of the folder this build made (its marker lists only this build and has none), once something
+    /// is saved there and the server has had no request for `canaryIdle`. Called at each look of the server's loop with
+    /// whether the engine is idle and whether other work blocks it (a hot copy being built); never under memory pressure.
+    /// `probe` runs as a request any arriving request cancels (it then throws): tried again at the next idle spell. `wait`
+    /// runs it on the caller's thread.
+    package func canaryWhenIdle(idle: Bool, blocked: Bool, wait: Bool = false, probe: @escaping () throws -> String) {
+        let now = Date()
+        let start: Bool = lock.withLock {
+            if !idle { quietSince = now }
+            guard idle, !blocked, !canaryRunning, !canaryDone, pending == nil, !shared, savesOff == nil, !index.entries.isEmpty,
+                now.timeIntervalSince(quietSince) >= canaryIdle
+            else { return false }
+            canaryRunning = true
+            return true
+        }
+        guard start else { return }
+        let finish = { (done: Bool) in self.lock.withLock { (self.canaryRunning, self.canaryDone) = (false, done) } }
+        guard let build, MemoryPressureLevel.current().map({ $0 == .normal }) ?? true else { return finish(false) }
+        guard let marker = PromptCanary.marker(root), marker.canary == nil, marker.refused == nil, marker.builds == [build] else {
+            return finish(true)
+        }
+        nonisolated(unsafe) let me = self  // its state is read and written under its lock only
+        let work = {
+            let started = Date()
+            let canary = Result { try probe() }
+            let seconds = String(format: "%.1f", Date().timeIntervalSince(started))
+            guard case .success(let value) = canary else {
+                me.lock.withLock { me.quietSince = Date() }
+                me.log?("saved prompts: the idle canary probe gave way to a request; it runs again at the next idle spell")
+                return finish(false)
+            }
+            // Written only if the folder is still this build's alone and without a canary.
+            if var now = PromptCanary.marker(me.root), now.canary == nil, now.builds == [build] {
+                now.canary = value
+                if PromptCanary.write(now, to: me.root) {
+                    me.log?("saved prompts: this build wrote the folder's canary while idle in \(seconds) s")
+                }
+            }
+            finish(true)
+        }
+        nonisolated(unsafe) let detached = work  // touches the cache only under its lock
+        if wait { work() } else { Thread.detachNewThread { detached() } }
+    }
+
+    /// Reads the folder's index as this epoch's and applies the start rules (slots, leftovers, other builds' folders).
+    private func open() throws {
+        let root = self.root
+        let epoch = self.epoch
         let indexURL = root.appendingPathComponent("index.json")
         let indexData = shared ? nil : try? Data(contentsOf: indexURL)
         let saved = indexData.flatMap { try? JSONDecoder().decode(Index.self, from: $0) }
@@ -213,18 +392,19 @@ public final class PromptCache {
         for (folder, used) in otherBuilds(lowDisk: false) where Date().timeIntervalSince(used) > 14 * 86_400 {
             try? FileManager.default.removeItem(at: folder)
         }
-        // Frontier and context-file folders of a process that did not exit cleanly hold no live files (they are unlinked).
-        // So are the slot folders past the last slot, from a run with more entries.
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-        where name.hasPrefix("frontiers-") || name.hasPrefix("kv-")
-            || (name.hasPrefix("entry-") && Int(name.dropFirst(6)).map { $0 >= count } ?? false)
-        {
-            try? FileManager.default.removeItem(at: root.appendingPathComponent(name))
+        unreadable = build.map { PromptCanary.unreadableEntries(beside: root, build: $0, sameModel: sameModel) } ?? []
+        let kinds = Set(unreadable.map(\.why)).sorted()
+        if !kinds.isEmpty {
+            unusableNote =
+                "\(unreadable.count) saved prompt\(unreadable.count == 1 ? "" : "s") of this model beside \(root.path) cannot be used by "
+                + "this build (\(kinds.joined(separator: "; "))): it starts without them; unless kept, they go after 14 days unused"
         }
+        // The slot folders past the last slot, from a run with more entries, go (leftover frontiers went at `init`).
+        Self.remove(in: root) { $0.hasPrefix("entry-") && Int($0.dropFirst(6)).map { $0 >= count } ?? false }
         saveIndex()
         let entries = slots.indices
         budgetEntry = DiskBudget.shared.add(
-            "prompt cache", folder: { [root] in root },
+            "prompt cache", folder: { root },
             bytes: { [weak self] in self.map { cache in entries.reduce(UInt64(0)) { $0 + cache.diskBytes($1) } } ?? 0 })
     }
     deinit { if let budgetEntry { DiskBudget.shared.remove(budgetEntry) } }
@@ -667,6 +847,15 @@ public final class PromptCache {
         "conversation saves are paused: \(OrigamiPlan.gigabytes(free)) free, and a save keeps \(OrigamiPlan.gigabytes(floor)) free "
             + "plus its image (\(OrigamiPlan.gigabytes(image))); free disk space or lower the context"
     }
+    /// Removes the entries of `folder` whose names `which` picks.
+    private static func remove(in folder: URL, _ which: (String) -> Bool) {
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [] where which(name) {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+        }
+    }
+    /// A conversation save that failed on the file system (a folder gone, a drive error): shown as saves paused in the
+    /// status and said once in the log until a save works again, not only in a line of its own each time.
+    package func saveFailed(_ what: String) { pause("conversation saves are failing: " + what) }
     private func pause(_ note: String?) {
         let changed = lock.withLock {
             defer { paused = note }
@@ -691,7 +880,7 @@ public final class PromptCache {
     }
 
     private func saveIndex() {
-        guard !shared else { return }
+        guard !shared, pending == nil else { return }
         indexWrites.lock()
         defer { indexWrites.unlock() }
         lock.lock()
@@ -725,7 +914,13 @@ public final class PromptCache {
         heldLock.withLock {
             guard !held.contains(folder.path) else { return true }
             let fd = Darwin.open(folder.appendingPathComponent(".lock").path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            if fd >= 0, flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            // The storage map's probe (`inUse`) takes the lock for a moment: a folder still held after 0.1 s is another server's.
+            var locked = fd >= 0 ? flock(fd, LOCK_EX | LOCK_NB) : 0
+            for _ in 0..<5 where locked != 0 && errno == EWOULDBLOCK {
+                usleep(20_000)
+                locked = flock(fd, LOCK_EX | LOCK_NB)
+            }
+            if fd >= 0, locked != 0 {
                 let busy = errno == EWOULDBLOCK
                 Darwin.close(fd)
                 // A drive without locks serves as before.
@@ -835,7 +1030,8 @@ public final class PromptCache {
     /// longest prefix of it a save tried since load holds, or the previous request's prompt shares; when more was wanted
     /// than restored, why: `no_entry` (that prompt was never saved), `entry_evicted`, `save_skipped_disk` (no room even
     /// after the hot copies gave back), `save_not_finished`, `save_failed`, `prefix_differs_at=K` (the request leaves
-    /// the saved tokens at K) or `entry_not_used` (whole, but not restored). For the request's row (`takeRestore`).
+    /// the saved tokens at K), `entry_not_used` (whole, but not restored), or `saved_by_other_build` (a save in a folder
+    /// this build cannot read; `reason_words` say why: `PromptCanary.whyUnreadable`). For the request's row (`takeRestore`).
     package func explainRestore(_ ids: [Int], restored: Int) {
         let request = ids.map { Int32(truncatingIfNeeded: $0) }
         func common(_ saved: [Int32]) -> Int {
@@ -845,8 +1041,10 @@ public final class PromptCache {
             return n
         }
         lock.withLock {
+            quietSince = Date()
             var wanted = restored
             var reason: String?
+            var words: String?
             for attempt in attempts.reversed() {
                 let shared = common(attempt.ids)
                 guard shared > wanted else { continue }
@@ -860,12 +1058,20 @@ public final class PromptCache {
                 wanted = previous
                 reason = "no_entry"
             }
+            // A save in a folder this build cannot read (another build's arithmetic, or one from before upgrades kept them).
+            for entry in unreadable where entry.tokens > wanted && entry.tokens <= ids.count {
+                guard Self.prefixHash(ids.prefix(entry.tokens).map(Int64.init)[...]) == entry.prefix else { continue }
+                wanted = entry.tokens
+                reason = PromptCanary.savedByOtherBuild
+                words = entry.why
+            }
             previousPrompt = request
             if let reason {
                 restoreReasons[reason.hasPrefix("prefix_differs") ? "prefix_differs" : reason, default: 0] += 1
                 restoreLostTokens += wanted - restored
             }
             lastRestore = ["wanted": wanted, "restored": restored, "reason": reason ?? NSNull()]
+            if let words { lastRestore?["reason_words"] = words }
         }
     }
     /// The last request's restore (`explainRestore`), once: nil when none was explained since.

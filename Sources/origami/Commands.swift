@@ -660,7 +660,11 @@ enum Commands {
                     gpuKeepAlive: settings.gpuKeepAlive ?? tuning.tuned.gpuKeepAlive,
                     qwenPrefillScope: tuning.tuned.qwenPrefillScope,
                     memoryHistory: history, learnsMemory: memoryLimit == nil,
-                    log: log)
+                    stage: { deferred.stage = $0 }, log: log)
+                // Names this build in its saved prompts' folder, as the family engines' do: `origami cache` and the
+                // storage map tell this build's folder from another build's by it (`SavedPrompts.whyUnreadable`).
+                FamilySetup.markEpoch(
+                    loaded.promptCache.root, model: ModelFront.listedID(settings), key: model.fingerprint, context: context)
                 // The hot copy: attached now when one is finished, then built, grown and attached between replies.
                 source.keeper = try? HotCopy.qwenKeeper(
                     settings, model: model, pack: storage.packFolder, backend: loaded.backend, event: log)
@@ -711,6 +715,12 @@ enum Commands {
                 log("the process that started this server is gone; stopping")
                 server.stop()
             }
+            // The saved prompts' canary, written while idle once something is saved (`PromptCache.canaryWhenIdle`).
+            if let backend = deferred.backend, let cache = backend.promptCache {
+                cache.canaryWhenIdle(idle: backend.hotCopyIdle, blocked: source.keeper?.keepers.contains { $0.building } == true) {
+                    try backend.canary(yielding: true)
+                }
+            }
             try await Task.sleep(for: .milliseconds(200))
         }
         log("stopping (finishing prompt-cache saves; Ctrl-C again quits at once)")
@@ -728,15 +738,15 @@ enum Commands {
     /// `serve` for a GLM-5.3-Flash or DeepSeek-V4.1-Flash GGUF: the family engine reads the file as stored (dense
     /// weights resident, routed experts read on demand into the expert memory); the tokenizer and chat template
     /// come from the GGUF.
-    /// The epoch of a family model's saved prompts (`PromptCache`): this build, the hot copy's identity (the GGUF's key and
-    /// the expert representation), a resident pack's, the GGUF's tensor table, the context and the decode path
-    /// (`ORIGAMI_FAMILY_GROUPED_DECODE=0`: no check shows the two give the same bits end to end, so states never cross it).
+    /// The epoch of a family model's saved prompts (`PromptCache`): the engine's arithmetic digest (`PromptCanary.epoch`),
+    /// the hot copy's identity (the GGUF's key and the expert representation), a resident pack's, the GGUF's tensor table,
+    /// the context and the decode path (`ORIGAMI_FAMILY_GROUPED_DECODE=0`: no check shows the two give the same bits end
+    /// to end, so states never cross it).
     static func familyEpoch(_ gguf: GGUFSource, identity: String, resident: String, context: Int) throws -> String {
         let table = gguf.tensors.values.sorted { $0.name < $1.name }.map { "\($0.name):\($0.type):\($0.file):\($0.offset):\($0.length)" }
             .joined(separator: ",")
         let path = FamilyRunner.groupsDecodeExperts ? "" : "|ungrouped-decode"
-        return OrigamiRuntime.hex(
-            SHA256.hash(data: Data((try OrigamiRuntime.executableDigest() + identity + resident + table + "\(context)" + path).utf8)))
+        return PromptCanary.epoch(identity + resident + table + "\(context)" + path)
     }
 
     static func serveFamily(settings: Settings, flags: [String: [String]], gguf url: URL, parent: pid_t) async throws {
@@ -949,6 +959,32 @@ enum Commands {
             ledger.setUsable(learned)
             runner.fitExperts()
         }
+        // Saved prompts in Qwen's prompt cache, one folder per epoch: the engine's arithmetic (shared by the builds whose
+        // canary matches, `PromptCanary`), the GGUF (its tokenizer and template included), the effective expert
+        // representation and the context. The support files written from the GGUF at each start do not enter it.
+        let epoch = try familyEpoch(gguf, identity: identity, resident: residentPack?.representationIdentity ?? "", context: context)
+        let cacheLedger = try MemoryLedger(ceiling: 1 << 30, transientMargin: 1, availableFloor: 1)
+        let cache = try PromptCache(
+            root: settings.promptCacheRoot.appendingPathComponent(String(epoch.prefix(16)), isDirectory: true), epoch: epoch,
+            entries: PromptCache.regularEntries(context: context, entries: settings.promptCacheEntries),
+            // The slots' Qwen checkpoints are never written here; the smallest store holds the folders.
+            entryBytes: PromptCache.entryDiskBytes(context: 8192) * 2, ledger: cacheLedger, capacity: 8192,
+            // Sibling epoch folders are any family model's: only this key's and context's are its other builds.
+            sameModel: { folder in
+                FamilySetup.epoch(folder).map { $0["family_key"] as? String == key && $0["context"] as? Int == context }
+            }, build: PromptCanary.build)
+        cache.log = log
+        // A build the folder's canary does not list yet runs the probe now, before the warm-up and any request.
+        cache.settle { try backend.canary() }
+        if let off = cache.savesOff { log("prompt cache: off (\(off))") }
+        if let note = cache.savesNote { log("prompt cache: \(note)") }
+        if let note = cache.unusableNote { log("saved prompts: \(note)") }
+        if let note = cache.canaryNote { log("saved prompts: \(note)") }
+        FamilySetup.markEpoch(cache.root, model: ModelFront.listedID(settings), key: key, context: context)
+        // Only the server that owns the data folder writes the usage counts back.
+        if cache.shared { backend.usesFile = nil }
+        backend.promptCache = cache
+        backend.epoch = epoch
         // The empty pool warmed from the saved decode uses, most used first, until the first request (`FamilyServingBackend.warm`).
         if let runner = model as? FamilyRunner {
             backend.warm(runner.experts, keys: uses.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)) { placed, seconds in
@@ -974,29 +1010,6 @@ enum Commands {
                 initialSwapouts: initialSwapouts)
         }
         governor?.start()
-        // Saved prompts in Qwen's prompt cache, one folder per epoch: this build, the GGUF (its tokenizer and template
-        // included), the effective expert representation and the context. The support files written from the GGUF
-        // at each start do not enter it.
-        let epoch = try familyEpoch(gguf, identity: identity, resident: residentPack?.representationIdentity ?? "", context: context)
-        let epochFolder = settings.promptCacheRoot.appendingPathComponent(String(epoch.prefix(16)), isDirectory: true)
-        let cacheLedger = try MemoryLedger(ceiling: 1 << 30, transientMargin: 1, availableFloor: 1)
-        let cache = try PromptCache(
-            root: epochFolder, epoch: epoch,
-            entries: PromptCache.regularEntries(context: context, entries: settings.promptCacheEntries),
-            // The slots' Qwen checkpoints are never written here; the smallest store holds the folders.
-            entryBytes: PromptCache.entryDiskBytes(context: 8192) * 2, ledger: cacheLedger, capacity: 8192,
-            // Sibling epoch folders are any family model's: only this key's and context's are its other builds.
-            sameModel: { folder in
-                FamilySetup.epoch(folder).map { $0["family_key"] as? String == key && $0["context"] as? Int == context }
-            })
-        if let off = cache.savesOff { log("prompt cache: off (\(off))") }
-        if let note = cache.savesNote { log("prompt cache: \(note)") }
-        FamilySetup.markEpoch(epochFolder, model: ModelFront.listedID(settings), key: key, context: context)
-        // Only the server that owns the data folder writes the usage counts back.
-        if cache.shared { backend.usesFile = nil }
-        cache.log = log
-        backend.promptCache = cache
-        backend.epoch = epoch
         var http = LocalHTTPConfiguration()
         http.port = UInt16(settings.port)
         http.applyContextLimits(context)
@@ -1145,6 +1158,10 @@ enum Commands {
             if getppid() != parent {
                 log("the process that started this server is gone; stopping")
                 server.stop()
+            }
+            // The saved prompts' canary, written while idle once something is saved (`PromptCache.canaryWhenIdle`).
+            cache.canaryWhenIdle(idle: backend.idle, blocked: keeper?.keepers.contains { $0.building } == true) {
+                try backend.canary(yielding: true)
             }
             try await Task.sleep(for: .milliseconds(200))
         }
@@ -1308,9 +1325,9 @@ enum Commands {
         for line in lines {
             if line.hasPrefix(" "), !blocks.isEmpty { blocks[blocks.count - 1].append(line) } else { blocks.append([line]) }
         }
-        let rank = ["Server": 0, "Live": 1, "Model": 2, "Memory": 3]
+        let rank = ["Server": 0, "Slowed": 1, "Live": 2, "Model": 3, "Memory": 4]
         let ordered = blocks.enumerated().sorted {
-            let (a, b) = (rank[String($0.element[0].prefix { $0 != " " })] ?? 4, rank[String($1.element[0].prefix { $0 != " " })] ?? 4)
+            let (a, b) = (rank[String($0.element[0].prefix { $0 != " " })] ?? 5, rank[String($1.element[0].prefix { $0 != " " })] ?? 5)
             return a != b ? a < b : $0.offset < $1.offset
         }
         emit(ordered.flatMap(\.element), report, json)
@@ -1341,6 +1358,12 @@ enum Commands {
         let now = liveLines(live)
         lines += now.map { "Live      " + $0 }
         if !now.isEmpty { report["live"] = now }
+        // What slows it down now (`SlowedBy`, as the dashboard's Now tab shows it), each with its fix on the next line.
+        let slowed = live["slowed_by"] as? [[String: Any]] ?? []
+        for item in slowed {
+            lines += ["Slowed by " + (item["text"] as? String ?? ""), "          " + (item["fix"] as? String ?? "")]
+        }
+        if live["slowed_by"] != nil { report["slowed_by"] = slowed }
         if let advice = (learned["limit_advice"] as? [String: Any])?["text"] as? String { lines.append("Memory    " + advice) }
         let host = try? OrigamiHost.current()
         if let host {
@@ -2466,63 +2489,11 @@ enum Commands {
 
     // MARK: cache
 
-    /// `<data_dir>/prompt-cache/<model>-<context>/<build>/`; 1.0.0 kept its entries in `<model>-<context>/` itself.
+    /// The saved prompts per build (`SavedPrompts`), each in use, usable by this build or unusable with the reason; `prune`
+    /// removes the unusable ones no server holds, also while a server runs, and `--all` every one with the model stopped.
     static func cache(_ arguments: [String], flags: [String: [String]], all: Bool, yes: Bool = false) throws {
         let settings = try Settings.load(flags: flags)
-        let manager = FileManager.default
-        func children(_ url: URL) -> [URL] {
-            ((try? manager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
-                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }.sorted { $0.path < $1.path }
-        }
-        func bytes(_ urls: [URL]) -> UInt64 {
-            urls.reduce(0) { total, url in
-                total
-                    + ((manager.enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])?.compactMap {
-                        (try? ($0 as? URL)?.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize
-                    }.reduce(0, +)).map(UInt64.init) ?? 0)
-            }
-        }
-        func used(_ folder: URL) -> Date {
-            (try? folder.appendingPathComponent("index.json").resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-        }
-        // (model folder, files that make one build's cache, label, last use)
-        var builds: [(model: URL, items: [URL], label: String, used: Date)] = []
-        for model in cacheFolders(settings) {
-            for build in children(model) where build.lastPathComponent.count == 16 && build.lastPathComponent.allSatisfy(\.isHexDigit) {
-                builds.append((model, [build], model.lastPathComponent + "/" + build.lastPathComponent, used(build)))
-            }
-            let legacy = ((try? manager.contentsOfDirectory(at: model, includingPropertiesForKeys: nil)) ?? [])
-                .filter {
-                    $0.lastPathComponent.hasPrefix("entry-") || $0.lastPathComponent == "index.json"
-                        || $0.lastPathComponent.hasPrefix("frontiers-")
-                }
-            if !legacy.isEmpty { builds.append((model, legacy, model.lastPathComponent + " (1.0.0)", used(model))) }
-        }
-        // GLM's and DeepSeek's `<epoch16>` folders, each its own build, named by its marker when it has one.
-        for epoch in children(settings.promptCacheRoot)
-        where epoch.lastPathComponent.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil {
-            let marker = FamilySetup.epoch(epoch)
-            let label =
-                epoch.lastPathComponent
-                + (marker.map {
-                    " (\($0["model"] as? String ?? "?"), \($0["context"] as? Int ?? 0) context, version \($0["version"] as? String ?? "?"))"
-                }
-                    ?? "")
-            builds.append((epoch, [epoch], label, used(epoch)))
-        }
-        // A GLM or DeepSeek context kept in files while serving (`family-context`): nothing reads it once no model runs.
-        let context = settings.promptCacheRoot.appendingPathComponent("family-context", isDirectory: true)
-        let scratch = manager.fileExists(atPath: context.path) ? [context] : []
-        builds += scratch.map { ($0, [$0], "family-context (a GLM or DeepSeek context kept on disk while serving)", used($0)) }
-        // Folders of a model file no registered model has (an earlier version's identity, a replaced file) or, for a family
-        // epoch, of another build or GGUF, as the storage map finds them.
-        let notes = Dictionary(
-            Storage.items(settings, found: ([], nil)).filter { $0.role == "prompts" && $0.unused }.map {
-                (($0.path as NSString).lastPathComponent, $0.note ?? "")
-            }
-        ) { a, _ in a }
-        let unreachable = Set(notes.keys)
+        let builds = Storage.map(settings, found: ([], nil)).prompts
         switch arguments.first {
         case nil:
             if builds.isEmpty { print("No saved prompts in \(settings.promptCacheRoot.path)") }
@@ -2531,60 +2502,24 @@ enum Commands {
             formatter.timeStyle = .short
             for build in builds {
                 print(
-                    "\(build.label)  \(gigabytes(bytes(build.items)))  last used \(formatter.string(from: build.used))"
-                        + (!unreachable.contains(build.model.lastPathComponent)
-                            ? ""
-                            : build.items == [build.model]
-                                ? "  (\(notes[build.model.lastPathComponent]!))"
-                                : "  (from an earlier Origami version or another model file; safe to delete)"))
+                    "\(build.label)  \(gigabytes(build.bytes))"
+                        + (build.used == .distantPast ? "" : "  last used \(formatter.string(from: build.used))") + "  \(build.state.text)")
             }
         case "prune":
-            // A server with no model loaded (`origami stop`) reads none of them, and loads none until `origami start`.
-            let state = serverState(settings)
-            guard state.hasPrefix("not running") || state.hasPrefix("stopped") else {
-                throw CLIError(
-                    "An Origami server is \(state), and its model uses these files or may load and use them.\n"
-                        + "Run `origami stop` (no model loads until `origami start`), or quit it, then `origami cache prune` again.")
-            }
-            let newest = Dictionary(grouping: builds, by: \.model).compactMapValues { $0.max { $0.used < $1.used }?.label }
-            /// The names of the conversations and prompts a build keeps by name or pin (`PromptCache` never drops them itself).
-            func kept(_ build: URL) -> [String] {
-                let entries = (try? Settings.readConfig(build.appendingPathComponent("index.json")))?["entries"] as? [String: [String: Any]]
-                return (entries ?? [:]).values.compactMap {
-                    $0["name"] as? String ?? ($0["pinned"] as? Bool == true ? "a pinned prompt" : nil)
+            // This build's own saved prompts go only with no model loaded (`origami stop`), which loads none until `origami start`.
+            if all {
+                let state = serverState(settings)
+                guard state.hasPrefix("not running") || state.hasPrefix("stopped") else {
+                    throw CLIError(
+                        "An Origami server is \(state), and its model uses these files or may load and use them.\n"
+                            + "Run `origami stop` (no model loads until `origami start`), or quit it, then `origami cache prune --all` again."
+                    )
                 }
-                .sorted()
             }
-            let chosen = builds.filter {
-                all || newest[$0.model] != $0.label || unreachable.contains($0.model.lastPathComponent) || scratch.contains($0.model)
-            }
-            /// An index that cannot be read: the server keeps such a build (it may name or pin prompts), and so does prune
-            /// unless --yes.
-            func unreadable(_ build: URL) -> Bool { (try? Settings.readConfig(build.appendingPathComponent("index.json"))) == nil }
-            let held = chosen.filter { !yes && (!$0.items.flatMap(kept).isEmpty || $0.items.contains(where: unreadable)) }
-            let going = chosen.filter { build in !held.contains { $0.label == build.label } }
-            for build in going {
-                print(
-                    "Removes \(build.label)  \(gigabytes(bytes(build.items)))"
-                        + (build.items.contains(where: unreadable)
-                            ? "  (its index could not be read, so any named or pinned prompts in it go too)" : ""))
-            }
-            for build in held {
-                let names = build.items.flatMap(kept)
-                let why =
-                    (names.isEmpty ? [] : ["it holds " + names.joined(separator: ", ")])
-                    + (build.items.contains(where: unreadable)
-                        ? ["its index could not be read, so it may hold named or pinned prompts"] : [])
-                print(
-                    "Keeps \(build.label)  \(gigabytes(bytes(build.items))): \(why.joined(separator: "; ")); "
-                        + "`origami cache prune\(all ? " --all" : "") --yes` removes it too")
-            }
-            var freed: UInt64 = 0
-            for build in going {
-                freed += bytes(build.items)
-                for item in build.items { try manager.removeItem(at: item) }
-            }
-            print(going.isEmpty ? "Nothing removed." : "Freed \(gigabytes(freed))")
+            let result = SavedPrompts.prune(
+                builds, all: all, yes: { _ in yes }, command: "`origami cache prune\(all ? " --all" : "") --yes`")
+            for line in result.lines { print(line) }
+            print(result.removed == 0 ? "Nothing removed." : "Freed \(gigabytes(result.freed))")
         default: throw CLIError.usage("Usage: origami cache [prune [--all] [--yes]]")
         }
     }

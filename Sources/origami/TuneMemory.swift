@@ -335,19 +335,10 @@ extension Tuning {
             + ". Kept: \(count == 1 ? "it" : "them") for a day; no setting changed. Next: run `origami tune --memory` again to continue from \(count == 1 ? "it" : "them")."
     }
 
-    /// "Other apps hold memory: …; swap 8.1 of 9.2 GB used.": the three largest other processes by physical footprint
-    /// (not Origami's own), and swap.
+    /// "Other apps hold memory: …; swap 8.1 of 9.2 GB used.": the three largest other apps by physical footprint
+    /// (not Origami's own, `ProcessMemory.others`), and swap.
     static func otherMemory() -> String {
-        var pids = [pid_t](repeating: 0, count: Int(max(0, proc_listallpids(nil, 0))) + 64)
-        let count = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)))
-        let own = ProcessInfo.processInfo.processName
-        let largest = pids.prefix(max(0, count)).compactMap { pid -> (String, UInt64)? in
-            var path = [UInt8](repeating: 0, count: 4096)  // PROC_PIDPATHINFO_MAXSIZE
-            guard pid > 0, proc_pidpath(pid, &path, UInt32(path.count)) > 0, let bytes = ModelFront.footprint(pid) else { return nil }
-            let text = (String(decoding: path.prefix { $0 != 0 }, as: UTF8.self) as NSString).lastPathComponent
-            return text == own ? nil : (text, bytes)
-        }
-        .sorted { $0.1 > $1.1 }.prefix(3)
+        let largest = ProcessMemory.others()
         var swap = xsw_usage()
         var size = MemoryLayout<xsw_usage>.size
         let swapText =

@@ -12,7 +12,13 @@ public enum SlowReason {
         "save_skipped_disk": "the saved copy was skipped for disk space", "save_failed": "saving it had failed",
         "save_not_finished": "its save had not finished", "entry_evicted": "its saved copy had been replaced by newer ones",
         "entry_not_used": "the saved copy was not used", "no_entry": "it had not been saved",
+        "saved_by_other_build": "it was saved by another Origami build",
     ]
+    /// A restore's `reason` in words; a reason without words shows as its code.
+    static func why(_ reason: String) -> String {
+        reason.hasPrefix("prefix_differs_at=")
+            ? "the prompt differed from the saved one at token " + reason.dropFirst(18) : restoreWhy[reason] ?? reason
+    }
 
     /// Where the request's time went: reading the prompt and writing (stage seconds), the GPU's share of writing, and
     /// each drive's wait while the reply waited on reads; the prompt tokens read new and restored, and those a saved
@@ -76,10 +82,7 @@ public enum SlowReason {
         let wait = p.waits.first
         let enough = { (cost: Double) in cost >= 2 && cost >= 0.2 * seconds }
         if enough(reread), reread >= wait?.seconds ?? 0 {
-            let why = p.why.map {
-                $0.hasPrefix("prefix_differs_at=")
-                    ? "the prompt differed from the saved one at token " + $0.dropFirst(18) : restoreWhy[$0] ?? $0
-            }
+            let why = p.why.map(Self.why)
             return "slow because: \(grouped(p.lost)) prompt tokens were read again" + (why.map { " — " + $0 } ?? "")
         }
         if let wait, enough(wait.seconds) {
