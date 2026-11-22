@@ -313,6 +313,8 @@ c = card(deepseek(hotRow({ state: "ready", bytes: 4e10, records: 5212, has_count
 check(/2\.1 GB more to add after this reply/.test(c.table) && /data-xact="build">Build now/.test(c.acts), "a top-up waiting offers Build now");
 c = card(deepseek(hotRow({ state: "not_possible", detail: "The model and the copy would share This Mac's drive: no gain.", choices: choices.map((x) => x.drive === "internal drive" ? { ...x, status: "holds all experts", sizes: undefined } : x) })));
 check(/Not possible here/.test(c.table) && /data-m="none"/.test(c.table) && /data-xact="put:\/Volumes\/Fast">Put it on Fast/.test(c.acts) && !/Put it on ExternalSSD/.test(c.acts), "not possible on the model's drive offers each other drive with room");
+c = card(deepseek(hotRow({ state: "not_needed", path: "/Users/me/o/family/k/hot", detail: "This Mac keeps every expert in memory once it is read, so a copy would only help the first minutes after a start." })));
+check(/Not needed/.test(c.table) && /keeps every expert in memory/.test(c.table) && !/family\/k\/hot/.test(c.table), "a Mac that keeps every expert in memory: the copy is not needed, and no folder is shown for it");
 c = card(deepseek(hotRow({ state: "off", detail: "Turned off in the settings." })));
 check(/Off.*Turned off in the settings\./.test(c.table) && /data-xact="on">Turn on/.test(c.acts), "off offers Turn on");
 c = card(deepseek(hotRow({ state: "not_allowed", detail: "macOS has not let Origami use Fast yet; reading from the model's drive only.", drive: "Fast" })));

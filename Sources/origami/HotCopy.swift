@@ -22,11 +22,13 @@ enum HotCopy {
     /// `hot_copy_dir`. Automatic, it starts at half the routed experts' bytes, at most 40 GB and what leaves 20 GB free, at
     /// least 20 GB, and grows from the usage counts while the curve pays (`HotCopyCurve.automatic`); by default it is possible only off the model's drive and with room for 20 GB (or the size asked, if smaller)
     /// that still leaves 20 GB free. A copy already there counts as room (`heldHere`).
-    static func place(_ settings: Settings, model: URL, key: String, routed: UInt64) -> (_ heldHere: (URL) -> UInt64) ->
-        HotCopyKeeper.Place
-    {
+    /// `resident`: the expert memory holds every routed expert, so an automatic copy is not built (`Place.unneeded`).
+    static func place(_ settings: Settings, model: URL, key: String, routed: UInt64, resident: Bool = false) -> (
+        _ heldHere: (URL) -> UInt64
+    ) -> HotCopyKeeper.Place {
         { heldHere in
             if settings.hotCopy == 0 { return .none(state: "off", detail: "Turned off in the settings.") }
+            if let none = HotCopyKeeper.Place.unneeded(resident: resident, size: settings.hotCopy) { return none }
             if let dir = settings.hotCopyDir {
                 if !Stores.volume(dir).mounted {
                     return .none(state: "not_connected", detail: "\(name(dir)) is not connected; reading from the model's drive only.")
@@ -71,9 +73,13 @@ enum HotCopy {
     /// folder of the store `Stores.hotCopyFolder` picks (any drive, the model's included: a copy is one read per expert
     /// instead of nine). Automatic, it starts at the shipped ranking's experts (`StoreBuilder.maximumMirrorRecords`) and
     /// grows from the usage counts while the curve pays (`HotCopyCurve.automatic`); at least 512 records, leaving `HotCopyKeeper.keepFree` free. A copy already there, and the offline mirror it replaces, count as room.
-    static func qwenPlace(_ settings: Settings, model: ModelSource) -> (_ heldHere: (URL) -> UInt64) -> HotCopyKeeper.Place {
+    /// `resident`: this Mac's plan keeps every expert in memory, so an automatic copy is not built (`Place.unneeded`).
+    static func qwenPlace(_ settings: Settings, model: ModelSource, resident: Bool = false) -> (_ heldHere: (URL) -> UInt64) ->
+        HotCopyKeeper.Place
+    {
         { heldHere in
             if settings.hotCopy == 0 { return .none(state: "off", detail: "Turned off in the settings.") }
+            if let none = HotCopyKeeper.Place.unneeded(resident: resident, size: settings.hotCopy) { return none }
             if let dir = settings.hotCopyDir {
                 if !Stores.volume(dir).mounted {
                     return .none(state: "not_connected", detail: "\(name(dir)) is not connected; reading from the model's drive only.")
@@ -203,13 +209,13 @@ enum HotCopy {
     /// The family places' folders, on whose drive each copy goes: `hot_copy_dir` (else the data folder), then `hot_copy_more`'s.
     static func folders(_ settings: Settings) -> [URL] { placeSettings(settings).map { $0.hotCopyDir ?? $0.dataDir } }
     /// Every place of a family model's hot copy (`place` for each of `placeSettings`).
-    static func places(_ settings: Settings, model: URL, key: String, routed: UInt64) -> [(_ heldHere: (URL) -> UInt64) ->
-        HotCopyKeeper.Place]
-    {
+    static func places(_ settings: Settings, model: URL, key: String, routed: UInt64, resident: Bool = false) -> [(
+        _ heldHere: (URL) -> UInt64
+    ) -> HotCopyKeeper.Place] {
         let all = placeSettings(settings)
         let bases = folders(settings)
         return all.indices.map { index in
-            let one = place(all[index], model: model, key: key, routed: routed)
+            let one = place(all[index], model: model, key: key, routed: routed, resident: resident)
             return index == 0 ? one : alone(one, folder: bases[index], earlier: Array(bases[..<index]))
         }
     }
@@ -224,8 +230,15 @@ enum HotCopy {
     static func qwenPlaces(_ settings: Settings, model: ModelSource) -> [(_ heldHere: (URL) -> UInt64) -> HotCopyKeeper.Place] {
         let all = placeSettings(settings)
         let bases = qwenFolders(settings, model: model)
+        // Whether this Mac's plan keeps every one of Qwen's experts in memory, as `origami setup` asks for its stores.
+        let resident =
+            (try? OrigamiHost.current()).flatMap { host in
+                try? OrigamiPlan.make(
+                    model: model, host: host, context: settings.context, memoryLimit: settings.memoryLimit,
+                    expertMemory: settings.expertMemory, promptCache: settings.promptCacheRoot)
+            }?.allResident ?? false
         return all.indices.map { index in
-            let one = qwenPlace(all[index], model: model)
+            let one = qwenPlace(all[index], model: model, resident: resident)
             return index == 0 ? one : alone(one, folder: bases[index], earlier: Array(bases[..<index]))
         }
     }
@@ -336,7 +349,8 @@ enum HotCopy {
         row["read_share"] = readShare.map { $0 as Any } ?? NSNull()
         row["can_build"] = row["has_counts"] as? Bool == true && ["learning", "ready", "failed"].contains(state)
         let offered = choices(
-            settings, reads: reads, current: ["off", "not_possible", "not_connected"].contains(state) ? nil : path, held: bytes)
+            settings, reads: reads, current: ["off", "not_needed", "not_possible", "not_connected"].contains(state) ? nil : path,
+            held: bytes)
         row["choices"] = offered
         if let usage {
             let sizes = offered.flatMap { ($0["sizes"] as? [Any] ?? []).compactMap { ($0 as? Int).map(UInt64.init) } }

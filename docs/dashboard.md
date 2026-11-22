@@ -168,7 +168,8 @@ Mac for the running model and context. Too low a limit starves the expert cache;
   next one up is still measured. The highest limit kept wins: more memory is faster unless the Mac starts cutting or
   swapping, and those are measured reliably while one trial's speed is not. Speed only guards against something
   being wrong: a kept limit loses to the next lower kept one only if both its first reply and its repeat are over 15%
-  slower, and it is measured once more first (the better of its two tries counts). When fewer than four were
+  slower, and it is measured once more first (the better of its two tries counts). Where kept limits held the same
+  expert cache (a Mac that keeps every expert in memory), more memory buys nothing: the lowest of them is chosen. When fewer than four were
   measured, one more halfway to the next limit up is tried (from the highest kept, or with none kept, from the
   highest the model did not start at), and wins only if it is kept too.
 - When even the lowest limit is cut or swapped (other apps hold the memory), it goes on downwards: next the level

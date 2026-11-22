@@ -20,6 +20,7 @@ func hotCopyRefreshChecks() -> [(String, () throws -> Void)] {
         ("hot_copy_opens_3_0_1_layout", hotCopyOpens301Layout),
         ("hot_copy_read_error_disables_then_revives", hotCopyReadErrorDisablesThenRevives),
         ("hot_copy_keeper_keeps_working_copy", hotCopyKeeperKeepsWorkingCopy),
+        ("hot_copy_not_needed_when_resident", hotCopyNotNeededWhenResident),
     ]
 }
 

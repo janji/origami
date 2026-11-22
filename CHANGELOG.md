@@ -4,6 +4,28 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.4 (2026-11-22)
+
+**Replies:** unchanged.
+
+From the first report of a Mac Origami had not seen, a Mac Studio M4 Max with 128 GB
+([issue #1](https://github.com/janji/origami/issues/1)): it runs, with every one of Qwen's experts in memory and about
+30 tok/s once warm (the README has the numbers), and it showed three things:
+
+- **No automatic hot copy where every expert stays in memory.** That Mac built a 57 GB copy that served 2% of its
+  expert reads: each expert is read once after a start there, so a copy shortens only those first minutes. With the
+  size automatic the copy is no longer built on such a Mac (state `not_needed`, "Not needed" on the dashboard, with the
+  reason); one already built is not read and the Models tab deletes it; `hot_copy <size>` still builds one. New check:
+  `hot_copy_not_needed_when_resident`.
+- **`origami tune --memory` no longer chooses between limits that hold the same experts.** There the three limits
+  tried were 1 GB apart, all held the full 67.9 GB cache, and the highest was chosen on one trial's speed each (31.6,
+  29.6 and 31.2 tok/s). Among kept limits with the same expert cache the lowest is now chosen, and the result says
+  that the higher ones add nothing.
+- `origami report` and `/v1/status` say `null` for a learned-memory ceiling that is not set, instead of the largest
+  64-bit number.
+- The README says what to do when `swift build` stops with "Could not initialize build system" (reported with the
+  Command Line Tools 27.2): `swift build -c release --build-system native`.
+
 ## 3.1.3 (2026-11-21)
 
 **Replies:** unchanged.

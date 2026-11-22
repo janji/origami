@@ -10,12 +10,24 @@ import Foundation
 /// time, with no second file. `place` says where the copy goes and how big it may be.
 package final class HotCopyKeeper: @unchecked Sendable {
     /// Where the copy goes: its folder and drive, its size (`budget`, within the room the drive has) and the drive's
-    /// free bytes; or why there is none (`state`: off, not_possible, not_connected, not_allowed) in the card's words.
+    /// free bytes; or why there is none (`state`: off, not_needed, not_possible, not_connected, not_allowed) in the card's
+    /// words.
     /// `auto` (an automatic size): the budget may grow from the usage curve (`HotCopyCurve.automatic`) up to `room`
     /// (the drive's free bytes above `keepFree`, the copy's own counted) and `whole` (the model's expert bytes).
     package enum Place: Sendable {
         case folder(URL, drive: String, budget: UInt64, free: UInt64, target: UInt64? = nil, auto: Auto? = nil)
         case none(state: String, detail: String)
+
+        /// No copy where this Mac keeps every expert in memory once it is read (`resident`) and the size is automatic
+        /// (`size` nil): each expert is read once after a start, so a copy would shorten only those first minutes, for
+        /// tens of gigabytes of disk. A size asked for is still built. Nil: the place decides as otherwise.
+        package static func unneeded(resident: Bool, size: UInt64?) -> Place? {
+            guard resident, size == nil else { return nil }
+            return .none(
+                state: "not_needed",
+                detail: "This Mac keeps every expert in memory once it is read, so a copy would only help the first minutes after "
+                    + "a start (one already there is not read: the Models tab deletes it). Set hot_copy to a size to build one anyway.")
+        }
     }
     package struct Auto: Sendable {
         package let room: UInt64, whole: UInt64
@@ -716,7 +728,7 @@ package final class HotCopyKeeper: @unchecked Sendable {
         return true
     }
 
-    /// For `/v1/status` (`experts_from`): the state (learning, building, paused, ready, off, not_possible,
+    /// For `/v1/status` (`experts_from`): the state (learning, building, paused, ready, off, not_needed, not_possible,
     /// not_connected, not_allowed, failed), its detail, the copy's folder, drive, bytes and records, its size limit, a
     /// build's progress, the top-up waiting below `topUpBytes`, and since when the copy serves; `coverage`, the share of
     /// counted expert uses a copy of the size limit holds, and `size_limit`, what set an automatic size (null: set by the user).

@@ -103,6 +103,15 @@ Shipped (CHANGELOG.md). Found by a comparison with Strata v0.2.17 on 2026-11-20,
 - **GLM and DeepSeek** save through `PromptCache.writeState` inside the request and are unchanged; whether their next turn waits is not measured. S.
 - **A new chat right after a reply** still waits for the saves (it may need them from disk, and its growth may evict what they hold).
 
+## 0.11 3.1.4: the first Mac from outside (2026-11-22)
+
+A user ran 3.1.3 on a Mac Studio M4 Max with 128 GB and reported it (issue #1 on GitHub; the README has the numbers): the first M4, the first Mac that keeps every one of Qwen's experts in memory, the first build with Swift 6.4.2. Shipped from it (CHANGELOG.md): no automatic hot copy there, a memory search that does not choose between limits holding the same experts, a readable report. Left:
+
+- **`swift build -c release` failed there** with "Could not initialize build system" (Command Line Tools 27.2, where SwiftPM's default build system is the new one); `--build-system native` built it. Not reproduced: the Command Line Tools 27.0 build with the default, and 26 has only the native one. The README names the fallback. *Reopens when* someone has 27.2 at hand: find what the new build system needs (Xcode?) and whether the manifest can ask for the native one.
+- **The memory search still runs its three trials** on a Mac where every limit holds every expert (two minutes for nothing new but the proof that no limit is cut or swaps). It could stop after the first kept trial there. S.
+- **`origami doctor` for GLM and DeepSeek** does not know whether every expert fits in memory without the loaded model, so on such a Mac it says a hot copy will be built where the server says none is needed (`FamilySetup.rows`, marked `shortcut:`). S.
+- **Not measured:** the cold start on that Mac without a hot copy against with one (the rule above assumes the difference is minutes, once per start), and anything on 64 or 96 GB.
+
 ## 1. Phase 0: done
 
 H1 and H2 were done on 2026-11-10, H3 on 2026-11-11. H3's screen on the real GLM and DeepSeek (one cold start per variant, replies identical to control everywhere) found no experiment switch that beats the default by 3%: early prefetch, prefetch into allocated slots, arriving-first, read lanes at any worker count, buffered reads, the protected cache, compact shrink, the admission variants, grouped prefill gate/up, Engram overlap and memo are neutral or worse; adaptive prefetch off, warm-after-restore and one prompt slice hurt. They are deleted (S4). Not screened: Qwen's switches, DeepSeek's restore and startup looks, the draft items (parked), and O18, which refuses exact mode. The screen's own findings were fixed and confirmed on the real models the same day (the hedge rule, the restart reply, the second long conversation); what is left of them is parked in section 7 (drive slowdown, GLM resume points). Baselines on 3.1 (short runs, 8 GB copy): first token on a 2,500-token prompt GLM 80 s, DeepSeek 149 s, Qwen 37 s; 200-token decode 0.72, 1.08 and 6.59 tok/s.

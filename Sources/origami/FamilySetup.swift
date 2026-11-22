@@ -161,6 +161,8 @@ extension FamilySetup {
                     more: expertsFile.map { ["experts file: \($0.text)"] + gguf.expertFiles.dropFirst() } ?? gguf.expertFiles))
         }
         // The hot copy: what its folder holds, and whether serving would read it (`HotCopy.place` decides as serving does).
+        // shortcut: without the loaded model this does not know whether every expert fits in memory, so on such a Mac it
+        // says a copy is built where serving says none is needed; pass `resident` once the plan here has the experts' bytes.
         let bytes = FamilyExperts.recordBytes(gguf, geometry: geometry)
         let sizes = RecordSizes(bytes, experts: geometry.experts)
         let folder = hotFolder(settings, key: key)

@@ -616,7 +616,8 @@ enum Storage {
         guard let sources else { return "checking" }
         let active = sources.contains { source in
             guard let path = source["path"] as? String, let role = source["role"] as? String,
-                !["off", "not_built", "not_possible", "not_connected", "not_read", "failed"].contains(source["state"] as? String ?? "")
+                !["off", "not_built", "not_needed", "not_possible", "not_connected", "not_read", "failed"].contains(
+                    source["state"] as? String ?? "")
             else { return false }
             if item.path == path { return item.role == "hot copy" ? role == "hot" : ["pack", "more"].contains(role) }
             guard (item.path as NSString).deletingLastPathComponent == path else { return false }

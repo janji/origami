@@ -839,7 +839,9 @@ enum Commands {
         let placeSettings = HotCopy.placeSettings(settings)
         let hotFolders = placeSettings.map { FamilySetup.hotFolder($0, key: key) }
         let hotFolder = hotFolders[0]
-        let places = HotCopy.places(settings, model: expertsAt, key: key, routed: routed)
+        // The expert memory holds every routed expert (a Mac with more memory than the model's experts): no automatic copy.
+        let resident = (model as? FamilyRunner).map { routed > 0 && $0.experts.budget >= routed } ?? false
+        let places = HotCopy.places(settings, model: expertsAt, key: key, routed: routed, resident: resident)
         // A finished copy counts as room on its drive: else a copy that filled the drive would be removed at each start.
         var startCopies: [OrigamiEngine.HotCopy?] = []
         for (index, folder) in hotFolders.enumerated() {
@@ -1025,7 +1027,8 @@ enum Commands {
             status.update(fresh)
             if body["build"] as? Bool == true { backend.releaseIdleHotCopyHold() }
             keeper.trigger(
-                places: HotCopy.places(fresh, model: expertsAt, key: key, routed: routed), force: body["build"] as? Bool == true)
+                places: HotCopy.places(fresh, model: expertsAt, key: key, routed: routed, resident: resident),
+                force: body["build"] as? Bool == true)
             if body["keep_when_idle"] != nil { HotCopy.shareDrives(fresh, flags: flags, identity: identity, keeper: keeper) }
             let rows = status.hotSources()
             return ["hot_copy": rows[0], "hot_copies": rows, "restart": restart]

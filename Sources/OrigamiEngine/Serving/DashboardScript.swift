@@ -1015,7 +1015,7 @@ enum DashboardScript {
         // Each state's mark (as the status chip's: ink ready, accent live work, graphite waiting, none when not possible) and words.
         const STATES = { reading: ["ink", "Reading"], not_read: ["dim", "Not read"], ready: ["ink", "Ready"], building: ["live", "Building"],
           paused: ["dim", "Paused · the model is reading"], learning: ["dim", "Learning: built after the first reply"], off: ["dim", "Off"],
-          not_possible: ["none", "Not possible here"], not_connected: ["none", "Not connected"], not_allowed: ["none", "Not allowed"],
+          not_needed: ["dim", "Not needed"], not_possible: ["none", "Not possible here"], not_connected: ["none", "Not connected"], not_allowed: ["none", "Not allowed"],
           failed: ["fail", "Could not build"], not_built: ["dim", "Not built yet"] };
         const place = (drive) => !drive || drive === "internal drive" ? "This Mac" : drive;
         const gbs = (bytes) => (bytes >= 1e10 ? fmt.format(Math.round(bytes / 1e9)) : one.format(bytes / 1e9)) + " GB";
@@ -1046,7 +1046,7 @@ enum DashboardScript {
           const track = live ? '<span class="job-track x-track" role="progressbar" aria-label="Hot copy written" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + done + '"><span style="width:' + done + '%"></span></span>' : "";
           const reads = r.read_share == null || !(from.split && from.split.reads) || r.state === "not_read" || (r.role === "hot" && !r.read_share) ? "–" : pct(r.read_share);
           // A copy that is off or cannot be built has no folder to show.
-          const path = r.path && !(r.role === "hot" && (r.state === "off" || r.state === "not_possible")) ? r.path : "";
+          const path = r.path && !(r.role === "hot" && (r.state === "off" || r.state === "not_needed" || r.state === "not_possible")) ? r.path : "";
           const define = defineText(r) ? ' title="' + esc(defineText(r)) + '"' : "";
           return "<tr><td>" + esc(place(r.drive)) + (path ? '<span class="sub wide">' + wpath(path) + "</span>" : "") + '</td><td class="x-role"' + define + ">" + esc(roleText(r)) +
             '</td><td class="r x-sz">' + size + '</td><td class="x-state"><i class="mark" data-m="' + mark + '" aria-hidden="true"></i>' + esc(state) + track +

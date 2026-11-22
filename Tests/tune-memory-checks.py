@@ -194,6 +194,10 @@ def run(binary, scenario):
                 assert short in outcomes[0]["reason"], prefix + output
         elif scenario == "normal":
             assert fixture.process.returncode == 0 and outcomes[0]["outcome"] == "comparison", prefix + output
+            # The fixture's expert cache is the same size at every limit, as on a Mac that keeps every expert in memory:
+            # the lowest limit tried is chosen and the result says why, instead of the highest by one trial's speed.
+            assert "Chosen: " + f"{min(limits) // GB}.{min(limits) // (GB // 10) % 10}GB" in outcomes[0]["reason"], prefix + output
+            assert "hold the same experts in memory, so they add nothing" in outcomes[0]["reason"], prefix + output
             entries = json.loads(tuning.read_text())["entries"]
             assert "memory@" + KEY in entries and entries["memory@" + KEY]["trials"], prefix + "result not stored"
             aside = [p for p in fixture.data.iterdir() if p.name.startswith("tuning.json.unreadable-")]

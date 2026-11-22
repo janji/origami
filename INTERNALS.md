@@ -1194,8 +1194,9 @@ development Mac's counters the curve stops at about 195 GB for DeepSeek (98%), 1
 (98%), so the internal drive's free space is what limits the first two. Checks: `hot_copy_curve` (a hand-computed case and
 a replay of the counters on the copy each ranking builds), `hot_copy_automatic_size`.
 
-**Status.** The keeper's state (`learning`, `building`, `paused`, `ready`, `off`, `not_possible`, `not_connected`,
-`not_allowed`, `failed`), progress and drive are `/v1/status`'s `experts_from` (`FamilyStatus.expertsFrom`;
+**Status.** The keeper's state (`learning`, `building`, `paused`, `ready`, `off`, `not_needed`, `not_possible`,
+`not_connected`, `not_allowed`, `failed`; `not_needed`: the size is automatic and this Mac keeps every expert in
+memory once read, `HotCopyKeeper.Place.unneeded`, so each expert is read once after a start and a copy is not built), progress and drive are `/v1/status`'s `experts_from` (`FamilyStatus.expertsFrom`;
 `HotCopy.place` sizes and places it, `HotCopy.choices` lists the drives the dashboard offers, one per disk, the one in
 use with its own folder). Each finished request's record in `/v1/status` carries `hot_copy`: whether the copy served
 reads during it (`ReadsSince` on `expert_hot_reads`, or Qwen's hot copy reads), from which the card compares writing
@@ -4052,7 +4053,7 @@ observers and experiments behind `ORIGAMI_FAMILY_*` variables, and the request-s
 All numbers below were measured on the development Mac, an M2 Pro (6 performance + 4 efficiency cores, 16-core GPU, 32 GB, macOS 26), unless stated. Each
 says where it is published. Run-to-run noise is about ±5%.
 
-**How far these numbers reach.** Every figure here comes from that one Mac. One other Mac has run Origami, an M1 MacBook Air with 16 GB (the README's
+**How far these numbers reach.** Every figure here comes from that one Mac. Two other Macs have run Origami, an M1 MacBook Air with 16 GB and a user's M4 Max with 128 GB (the README's
 table has what it measured). Rows marked
 "expected", "simulated" or "planned only" below are inferences from it or from the planner, not runs on those Macs.
 

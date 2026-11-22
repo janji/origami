@@ -539,7 +539,8 @@ public final class MemoryHistory: @unchecked Sendable {
             return [
                 "bytes": learned.map { $0 as Any } ?? NSNull(), "days": days, "trims": trims.count,
                 "regrowths": all.reduce(0) { $0 + $1.grows },
-                "applied": applied && learned != nil, "cap_bytes": cap, "minimum_bytes": minimum, "limit_advice": advice ?? NSNull(),
+                "applied": applied && learned != nil, "cap_bytes": cap == .max ? NSNull() : cap as Any, "minimum_bytes": minimum,
+                "limit_advice": advice ?? NSNull(),
             ]
         }
     }
@@ -602,19 +603,27 @@ extension SelfTuning {
         trials.filter { $0.excluded == nil && $0.speed > 0 }.sorted { $0.limit < $1.limit }
     }
 
-    /// The limit chosen: more memory is faster unless the Mac cuts or swaps, and that is measured reliably while one
-    /// trial's speed is not, so the highest kept; passed over for the next lower kept one only while both its first
-    /// reply and its repeat are more than `memorySlowerGuard` slower than that one's (`memoryPassedOver`).
-    public static func chosenMemory(_ trials: [MemoryTrial]) -> MemoryTrial? {
+    /// The kept limits the speed guard leaves, lowest first: the highest is passed over for the next lower one while both
+    /// its first reply and its repeat are more than `memorySlowerGuard` slower than that one's.
+    static func guardedMemory(_ trials: [MemoryTrial]) -> [MemoryTrial] {
         var kept = keptMemory(trials)
         while kept.count > 1, slower(kept[kept.count - 1], than: kept[kept.count - 2]) { kept.removeLast() }
+        return kept
+    }
+
+    /// The limit chosen: more memory is faster unless the Mac cuts or swaps, and that is measured reliably while one
+    /// trial's speed is not, so the highest kept the speed guard leaves (`guardedMemory`, `memoryPassedOver`). More memory
+    /// is only faster while it holds more experts: where a lower kept limit held the same expert cache (a Mac that keeps
+    /// every expert in memory), the lowest of those is chosen, and their speeds, one trial each, do not decide.
+    public static func chosenMemory(_ trials: [MemoryTrial]) -> MemoryTrial? {
+        var kept = guardedMemory(trials)
+        while kept.count > 1, kept[kept.count - 1].cache > 0, kept[kept.count - 1].cache == kept[kept.count - 2].cache { kept.removeLast() }
         return kept.last
     }
 
     /// The highest kept limit the guard would pass over, measured once more before that (`origami tune --memory`), or nil.
     public static func memoryPassedOver(_ trials: [MemoryTrial]) -> UInt64? {
-        let kept = keptMemory(trials)
-        guard let chosen = chosenMemory(trials), let top = kept.last, top.limit != chosen.limit else { return nil }
+        guard let guarded = guardedMemory(trials).last, let top = keptMemory(trials).last, top.limit != guarded.limit else { return nil }
         return top.limit
     }
 
@@ -659,10 +668,14 @@ extension SelfTuning {
                 + (lowest.map { ", down to \(memorySize($0))" } ?? "") + "; nothing to suggest"
         }
         let now = current ?? automatic
+        let top = keptMemory(trials).last
         var text =
             "Chosen: \(memorySize(best.limit)) — \(rate(best)) ("
-            + (best.limit == keptMemory(trials).last?.limit
-                ? "highest limit this Mac kept)" : "a higher limit kept was over \(Int(memorySlowerGuard * 100))% slower)")
+            + (best.limit == top?.limit
+                ? "highest limit this Mac kept)"
+                : best.cache > 0 && top?.cache == best.cache
+                    ? "the higher limits kept hold the same experts in memory, so they add nothing)"
+                    : "a higher limit kept was over \(Int(memorySlowerGuard * 100))% slower)")
         if let mine = trials.first(where: { near($0.limit, now) }), mine.limit != best.limit {
             text +=
                 "; \(current == nil ? "the automatic budget" : "your current limit") \(memorySize(now)) — \(mine.excluded ?? rate(mine))"

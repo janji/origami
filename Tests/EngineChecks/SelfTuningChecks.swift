@@ -320,6 +320,30 @@ func selfTuningMemoryCalibration() throws {
         SelfTuning.chosenMemory([trial(24 * gb, 9, 9, "800 MB swapped")]) == nil
             && SelfTuning.memoryText([], current: nil, automatic: automatic).hasPrefix("No memory limit"), "nothing kept")
 
+    // A Mac that keeps every expert in memory (a 128 GB one: 112.4, 113.4 and 114.4 GB all held 67.9 GB of experts and
+    // wrote 31.6, 29.6 and 31.2 tok/s): the lowest of the limits with the same cache, said as such, and nothing measured
+    // again; a limit whose cache is larger still wins, and trials without a cache size decide as before.
+    func held(_ limit: UInt64, _ warm: Double, _ cache: UInt64) -> SelfTuning.MemoryTrial {
+        var one = trial(limit, warm - 6, warm)
+        one.cache = cache
+        return one
+    }
+    let full = [
+        held(112_400_000_000, 31.6, 67_947_724_800), held(113_400_000_000, 29.6, 67_947_724_800),
+        held(114_400_000_000, 31.2, 67_947_724_800),
+    ]
+    let fullText = SelfTuning.memoryText(full, current: nil, automatic: 113_400_000_000, applied: true)
+    try require(
+        SelfTuning.chosenMemory(full)?.limit == 112_400_000_000 && SelfTuning.memoryPassedOver(full) == nil
+            && fullText
+                == "Chosen: 112.4GB — 31.6 tok/s on a repeat (the higher limits kept hold the same experts in memory, so they add nothing); the automatic budget 113.4GB — 29.6 tok/s on a repeat; automatic mode uses it",
+        "every expert in memory: \(fullText)")
+    try require(
+        SelfTuning.chosenMemory([held(22 * gb, 10.2, 15 * gb), held(24 * gb, 10.4, 17 * gb), held(25 * gb, 10.3, 17 * gb)])?.limit == 24
+            * gb
+            && SelfTuning.chosenMemory([held(22 * gb, 10.2, 15 * gb), held(24 * gb, 10.4, 17 * gb)])?.limit == 24 * gb,
+        "the cache rule passed over a limit that held more")
+
     // Higher limits are skipped only after one cut for pressure or swapped; not after one merely slow or too small to start.
     try require(
         !SelfTuning.memorySkipsHigher([trial(20 * gb, 1.9, 1.8), trial(21 * gb, 0, 0, SelfTuning.notStarted)])

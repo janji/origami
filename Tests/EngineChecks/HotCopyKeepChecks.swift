@@ -7,6 +7,22 @@ import OrigamiEngine
 /// for both); (c) a failed build is planned again after a reply once its back-off has passed; (d) a detached copy is
 /// reported as such (state, no records, no bytes), with a log line for each detach, re-attach and failure. The place
 /// sizes the copy as both engines' places do (`HotCopyRefreshPlan.capacity`).
+/// A Mac that keeps every expert in memory once read (a 128 GB one built a 57 GB copy that served 2% of its reads): an
+/// automatic copy has no place, and says why; a size asked for is still placed, and so is any copy where experts are
+/// read again and again.
+func hotCopyNotNeededWhenResident() throws {
+    func require(_ ok: Bool, _ what: String) throws { if !ok { throw EngineError("hot copy not needed: " + what) } }
+    guard case .none(let state, let detail)? = HotCopyKeeper.Place.unneeded(resident: true, size: nil) else {
+        throw EngineError("hot copy not needed: an automatic copy was placed where every expert stays in memory")
+    }
+    try require(
+        state == "not_needed" && detail.contains("keeps every expert in memory") && detail.contains("hot_copy"), "\(state): \(detail)")
+    try require(HotCopyKeeper.Place.unneeded(resident: true, size: 40_000_000_000) == nil, "a size asked for was refused")
+    try require(
+        HotCopyKeeper.Place.unneeded(resident: false, size: nil) == nil && HotCopyKeeper.Place.unneeded(resident: false, size: 0) == nil,
+        "a copy refused where experts are read again")
+}
+
 func hotCopyKeeperKeepsWorkingCopy() throws {
     func require(_ ok: Bool, _ what: @autoclosure () -> String) throws {
         if !ok { throw EngineError("hot copy keeper keeps its copy: " + what()) }
