@@ -594,6 +594,13 @@ extension SelfTuning {
         trials.contains { trial in trial.excluded.map { !$0.hasPrefix("not tried") && $0 != notStarted } ?? false }
     }
 
+    /// Whether higher limits add nothing: the two highest kept hold the same expert cache (every expert is in memory), so
+    /// the lowest of them is chosen (`chosenMemory`) whatever a higher one would measure.
+    public static func memoryHoldsAll(_ trials: [MemoryTrial]) -> Bool {
+        let kept = keptMemory(trials)
+        return kept.count > 1 && kept[kept.count - 1].cache > 0 && kept[kept.count - 1].cache == kept[kept.count - 2].cache
+    }
+
     /// How much slower, in both the first reply and the repeat, a kept limit must be than the next lower kept one to be
     /// passed over for it: one trial's tok/s is noisy, so speed only guards against something being wrong.
     public static let memorySlowerGuard = 0.15
@@ -632,9 +639,11 @@ extension SelfTuning {
     }
 
     /// One more limit halfway between the highest kept (none kept: the highest the model did not start at) and the next
-    /// above it (cut, swapped or not tried), when those are 1.5 GB apart or more; chosen only if it is kept too.
+    /// above it (cut, swapped or not tried), when those are 1.5 GB apart or more; chosen only if it is kept too. None where the
+    /// limits kept already hold every expert (`memoryHoldsAll`).
     public static func memoryRefinement(_ trials: [MemoryTrial]) -> UInt64? {
         guard
+            !memoryHoldsAll(trials),
             let low = keptMemory(trials).last?.limit ?? trials.filter({ $0.excluded == notStarted }).map(\.limit).max(),
             let above = trials.map(\.limit).filter({ $0 > low }).min(), above - low >= 1_500_000_000
         else { return nil }

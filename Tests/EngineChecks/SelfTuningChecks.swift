@@ -338,6 +338,14 @@ func selfTuningMemoryCalibration() throws {
             && fullText
                 == "Chosen: 112.4GB — 31.6 tok/s on a repeat (the higher limits kept hold the same experts in memory, so they add nothing); the automatic budget 113.4GB — 29.6 tok/s on a repeat; automatic mode uses it",
         "every expert in memory: \(fullText)")
+    // Two kept limits with the same cache end the search: nothing higher, and nothing between, is measured.
+    let skipped = Array(full.prefix(2)) + [trial(116 * gb, 0, 0, "not tried: the lower limits hold every expert in memory")]
+    try require(
+        SelfTuning.memoryHoldsAll(skipped) && !SelfTuning.memoryHoldsAll(Array(full.prefix(1)))
+            && SelfTuning.memoryRefinement(skipped) == nil
+            && SelfTuning.chosenMemory(skipped)?.limit == 112_400_000_000
+            && !SelfTuning.memoryHoldsAll([held(22 * gb, 10.2, 15 * gb), held(24 * gb, 10.4, 17 * gb)]),
+        "every expert in memory: higher limits not skipped")
     try require(
         SelfTuning.chosenMemory([held(22 * gb, 10.2, 15 * gb), held(24 * gb, 10.4, 17 * gb), held(25 * gb, 10.3, 17 * gb)])?.limit == 24
             * gb

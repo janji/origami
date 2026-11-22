@@ -105,10 +105,9 @@ Shipped (CHANGELOG.md). Found by a comparison with Strata v0.2.17 on 2026-11-20,
 
 ## 0.11 3.1.4: the first Mac from outside (2026-11-22)
 
-A user ran 3.1.3 on a Mac Studio M4 Max with 128 GB and reported it (issue #1 on GitHub; the README has the numbers): the first M4, the first Mac that keeps every one of Qwen's experts in memory, the first build with Swift 6.4.2. Shipped from it (CHANGELOG.md): no automatic hot copy there, a memory search that does not choose between limits holding the same experts, a readable report. Left:
+A user ran 3.1.3 on a Mac Studio M4 Max with 128 GB and reported it (issue #1 on GitHub; the README has the numbers): the first M4, the first Mac that keeps every one of Qwen's experts in memory, the first build with Swift 6.4.2. Shipped from it (CHANGELOG.md): no automatic hot copy there, a memory search that neither chooses between limits holding the same experts nor goes on above them, a readable report. Left:
 
 - **`swift build -c release` failed there** with "Could not initialize build system" (Command Line Tools 27.2, where SwiftPM's default build system is the new one); `--build-system native` built it. Not reproduced: the Command Line Tools 27.0 build with the default, and 26 has only the native one. The README names the fallback. *Reopens when* someone has 27.2 at hand: find what the new build system needs (Xcode?) and whether the manifest can ask for the native one.
-- **The memory search still runs its three trials** on a Mac where every limit holds every expert (two minutes for nothing new but the proof that no limit is cut or swaps). It could stop after the first kept trial there. S.
 - **`origami doctor` for GLM and DeepSeek** does not know whether every expert fits in memory without the loaded model, so on such a Mac it says a hot copy will be built where the server says none is needed (`FamilySetup.rows`, marked `shortcut:`). S.
 - **Not measured:** the cold start on that Mac without a hot copy against with one (the rule above assumes the difference is minutes, once per start), and anything on 64 or 96 GB.
 

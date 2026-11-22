@@ -20,7 +20,8 @@ From the first report of a Mac Origami had not seen, a Mac Studio M4 Max with 12
 - **`origami tune --memory` no longer chooses between limits that hold the same experts.** There the three limits
   tried were 1 GB apart, all held the full 67.9 GB cache, and the highest was chosen on one trial's speed each (31.6,
   29.6 and 31.2 tok/s). Among kept limits with the same expert cache the lowest is now chosen, and the result says
-  that the higher ones add nothing.
+  that the higher ones add nothing. The search also stops there: once two limits are kept with the same cache, the
+  higher ones are not loaded ("not tried: the lower limits hold every expert in memory").
 - `origami report` and `/v1/status` say `null` for a learned-memory ceiling that is not set, instead of the largest
   64-bit number.
 - The README says what to do when `swift build` stops with "Could not initialize build system" (reported with the

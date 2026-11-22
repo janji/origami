@@ -227,6 +227,11 @@ extension Tuning {
                     trials.append(.init(limit: limit, excluded: "not tried: a lower limit was cut or swapped"))
                     continue
                 }
+                // Two limits kept with the same experts in memory: every expert is there, and a higher limit adds nothing.
+                if SelfTuning.memoryHoldsAll(trials) {
+                    trials.append(.init(limit: limit, excluded: "not tried: the lower limits hold every expert in memory"))
+                    continue
+                }
                 trials.append(try await measure(limit))
             }
             // The lowest limit cut or swapped: other apps hold memory, so go on downwards from the level the governor settled

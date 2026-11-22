@@ -198,6 +198,8 @@ def run(binary, scenario):
             # the lowest limit tried is chosen and the result says why, instead of the highest by one trial's speed.
             assert "Chosen: " + f"{min(limits) // GB}.{min(limits) // (GB // 10) % 10}GB" in outcomes[0]["reason"], prefix + output
             assert "hold the same experts in memory, so they add nothing" in outcomes[0]["reason"], prefix + output
+            # Two limits with every expert in memory are enough: the higher ones are not loaded.
+            assert len(limits) == 2 and "not tried: the lower limits hold every expert in memory" in output, prefix + output
             entries = json.loads(tuning.read_text())["entries"]
             assert "memory@" + KEY in entries and entries["memory@" + KEY]["trials"], prefix + "result not stored"
             aside = [p for p in fixture.data.iterdir() if p.name.startswith("tuning.json.unreadable-")]
