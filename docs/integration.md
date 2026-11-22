@@ -18,7 +18,7 @@ One request runs at a time; the others wait in a queue.
 | `GET /api/tags`, `POST /api/show`, `GET /api/ps`, `GET /api/version` | Ollama model list and details |
 | `GET /v1/models`, `GET /v1/models/<id>` | the model list (`?all` lists every model) |
 | `GET /health` | `loading` (with `loading.seconds` and the model's last log line, `loading.line`), `ready`, `degraded` (the model's drive went away: `degraded` says what to do; it clears by itself when the drive is back) or `failed`, the queue and the server defaults; `stopping` or `stopped` (with a 503) after `origami stop`; `pending` while a reload waits for the current reply; `slowed_by` as in `/v1/status` |
-| `GET /v1/status` | memory (`temporarily_reduced` while a cut holds the budget below `recovery_target_bytes`, in either mode, and `last_cut`: its reason and time), the running request, recent requests, saved prompts, drives and the last 50 log lines (`events`), and `slowed_by`, as JSON |
+| `GET /v1/status` | memory (`temporarily_reduced` while the budget is below `recovery_target_bytes`, the most it may use, which it climbs to, in either mode; `last_cut`: the last cut's reason and time; `learned_start_bytes`: automatic mode's start, learned from this Mac's memory use, which it grows past as memory frees), the running request, recent requests, saved prompts, drives and the last 50 log lines (`events`), and `slowed_by`, as JSON |
 | `GET /v1/plan?context=&memory_limit=&expert_memory=&hot_copy=&context_dir=&quality=` | a preview of the memory plan for those settings |
 | `POST /v1/config` | saves settings for the next start (used by the dashboard) |
 | `POST /v1/stop`, `POST /v1/start` | the same as `origami stop` and `origami start` |

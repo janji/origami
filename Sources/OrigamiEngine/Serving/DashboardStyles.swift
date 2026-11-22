@@ -120,6 +120,8 @@ enum DashboardStyles {
         .slowed { padding-bottom: 16px; }
         .slowed .notice-box { padding: 10px 14px; }
         .slowed h2 { font-size: 13px; }
+        .slowed[data-calm="1"] .notice-box { border-color: var(--line); }
+        .slowed[data-calm="1"] h2, .slowed[data-calm="1"] li { color: var(--dim); }
         .slowed ul { margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; max-width: 120ch; }
         .slowed li { padding: 2px 0; color: var(--ink-2); overflow-wrap: anywhere; }
         .slowed li b { color: var(--ink); font-weight: 600; }

@@ -831,6 +831,7 @@ let tests: [(String, () throws -> Void)] =
         ("usage_counts_decay", usageCountsDecay),
         ("slow_reason_rules", slowReasonRules),
         ("slowed_by_rules", slowedByRules),
+        ("memory_grows_past_learned", memoryGrowsPastLearned),
         ("process_memory_names", processMemoryNames),
         ("permission_subject_name", permissionSubjectName),
         ("hot_copy_automatic_size", hotCopyAutomaticSize),

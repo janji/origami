@@ -44,9 +44,12 @@ public final class MemoryGovernor: @unchecked Sendable {
         let value = lowestCutTo.load(ordering: .relaxed)
         return value == .max ? nil : value
     }
-    /// What the budget climbs back to: the learned budget in automatic mode when there is one, else the cap. A budget
-    /// below it is temporarily reduced, in either mode.
-    public var target: UInt64 { learned.map { min($0, budgetCap) } ?? budgetCap }
+    /// What the budget climbs to: the cap, in either mode (in automatic mode past a learned start too, more carefully:
+    /// `MemoryGovernorPolicy.pastLearned`). A budget below it is temporarily reduced.
+    public var target: UInt64 { budgetCap }
+    /// What a cut is counted against (`budgetDeficitGBSeconds`, a request's "memory was cut"): the learned start in
+    /// automatic mode when there is one, else the cap; a budget still growing past its learned start was not cut.
+    private var deficitLevel: UInt64 { learned.map { min($0, budgetCap) } ?? budgetCap }
     private let cutLock = NSLock()
     private var lastCutSaid: (reason: String, at: Date)?
     /// The last cut's reason and time, or nil (none since load), for `/v1/status`.
@@ -56,7 +59,7 @@ public final class MemoryGovernor: @unchecked Sendable {
     private let deficitLock = NSLock()
     private var deficitMarks: [(at: TimeInterval, total: Double, gap: Double)] = []
     package func markDeficit(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
-        let target = self.target
+        let target = deficitLevel
         let gap = Double(target - min(target, ledger.usableBytes)) / 1e9
         deficitLock.withLock {
             guard deficitMarks.last?.gap != gap else { return }
@@ -196,6 +199,12 @@ public final class MemoryGovernor: @unchecked Sendable {
             grow()
             return
         }
+        apply(change, usable: usable, available: available, footprint: footprint)
+    }
+
+    /// A policy decision carried out: the budget set, a cut recorded in the history (the learned start learns from it,
+    /// also after growth past it) and trimmed, a growth handed to the engine; each logged.
+    package func apply(_ change: MemoryGovernorPolicy.Decision, usable: UInt64, available: UInt64, footprint: UInt64) {
         ledger.setUsable(change.target)
         if change.target < usable {
             history?.trimmed(to: change.target, limit: memory.cap)
@@ -223,7 +232,10 @@ public final class MemoryGovernor: @unchecked Sendable {
             history?.grew()
             grow()
             note(
-                ledger.budgetMode == .explicit ? "memory pressure is clear; recovering toward the requested limit" : "memory is free again",
+                ledger.budgetMode == .explicit
+                    ? "memory pressure is clear; recovering toward the requested limit"
+                    : learned.map { change.target > $0 } == true
+                        ? "memory has stayed free; growing past the learned start" : "memory is free again",
                 from: usable, to: change.target)
         }
     }

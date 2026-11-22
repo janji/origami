@@ -520,7 +520,9 @@ func memoryDeficitAgainstLearnedTarget() throws {
     let governor = MemoryGovernor(
         ledger: ledger, memory: OrigamiMemory(cap: 29 * gb, start: 29 * gb, floor: 4 * gb, minimum: 8 * gb),
         trim: { 0 }, log: { _ in }, history: history, learns: true, initialSwapouts: 0)
-    try memoryPolicyRequire(governor.target == 22 * gb, "No learned target below the cap: \(governor.target)")
+    try memoryPolicyRequire(
+        governor.learned == 22 * gb && governor.target == 29 * gb,
+        "No learned start below the cap, or the cap is not the target: \(governor.target)")
     let uptime = ProcessInfo.processInfo.systemUptime
     ledger.setUsable(22 * gb)
     governor.markDeficit(now: uptime - 20)

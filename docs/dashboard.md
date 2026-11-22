@@ -23,8 +23,8 @@ waits for it, and a banner says so; the same banner says when conversation saves
 - **Now.** What is happening, and the one next action when something is needed.
   - **Slowed by**, at the top while something slows Origami down now, also while a request runs: one line per
     condition, what and then the fix, the costliest first and settings advice last. Memory 1 GB or more under what Origami may
-    use says why (cut by macOS, held at the budget learned from this Mac's memory use, or started small), names the three
-    apps that hold the most and what brings it back (by itself, or Reset on the Memory limit line for a learned budget);
+    use says why (cut by macOS, started at the budget learned from this Mac's memory use, or started small), names the three
+    apps that hold the most and that it grows back by itself as memory frees;
     the others are a drive reading slowly or due for `origami refresh`, gone or not allowed, the hot copy building, without room or failed, heat, Low Power Mode,
     conversation saves paused, a prompt read again (and why), a job, waiting requests, a memory limit this Mac does not
     keep or one under the measured limit, and never tuned. `origami status` prints the same lines; apps read
@@ -35,14 +35,20 @@ waits for it, and a banner says so; the same banner says when conversation saves
   - The speed (median of the last replies, one mark per reply), the first-word time, how fast prompts are read and
     how much of them was reused. **Measure** sends a short test reply.
   - Three bars: where the last request's time went (waiting, setting up, reading the prompt, writing, saving), where
-    the experts were read from (memory, hot copy, the model drive), and this Mac's memory. Under the first, the
-    last request in two lines (its first word: prompt tokens read and restored, and why fewer were restored than
-    could have been; its writing: GPU time and the wait on each drive) and one verdict, the same `origami status`
-    gives: memory cut by macOS, a prompt read again (and why its saved copy was not used), a drive the reply waited
-    on (with the hot copy's swaps still waiting), or nothing unusual.
-  - **Health**, one line each: the memory limit in force (automatic, yours, the measured one, or a limit under test
-    while the memory search runs), whether macOS cut it, and the result of the memory search with **Use …** to set
-    it; each model drive, what was read from it since its files were last written, with a warning and the
+    the experts were read from (memory, hot copy, the model drive), and this Mac's memory ("Origami uses 14.9 GB · may
+    still grow by 7.7 GB · left to macOS and other apps 11.8 GB"). Under the first, the last request in two lines (its
+    first word: prompt tokens read and reused from a saved copy, and why fewer were reused than could have been; its
+    writing: GPU time and the wait on each drive) and one line, the same `origami status` gives, in the words the
+    Slowed-by box uses: "Slower than usual: macOS took back about 1.8 GB of Origami's memory during this reply, so more
+    of the model had to be read from the drive", tokens of the prompt read again (and why, in a sentence), a drive the
+    reply waited on, or "Nothing unusual".
+  - **Health**, one line each. **Memory** says how much Origami uses of what it may use, who decided that figure (you,
+    a measurement Origami made on a given day, which finds the most memory this Mac keeps for Origami without macOS
+    taking any back, Origami's own estimate, or a memory search running now), and only then what to know or do: macOS
+    took memory back (when and why, and that it grows back by itself), Origami started lower and grows, your limit is
+    more than this Mac keeps or less than a measurement found (with **Use 25.5 GB**). Its buttons: **Measure the best
+    limit** (or **Measure again**), **Measure by itself when idle** / **Stop measuring by itself**, **Change the
+    limit…**. Then each model drive, what was read from it since its files were last written, with a warning and the
     `origami refresh` command when it reads far below its own speed; the hot copy (size, share of expert uses it
     holds, build progress); tuning; who can reach Origami.
   - **Requests**: the last ten, each with its time bar. **Saved prompts**: open, rename, keep, edit or delete.
@@ -171,7 +177,7 @@ settings (`--quality-floor <level>` compares down to that level).
 
 ### The fastest memory limit
 
-`origami tune --memory` (or **Find the fastest** on the dashboard's Memory line, or **The fastest memory limit** in
+`origami tune --memory` (or **Measure the best limit** on the dashboard's Memory line, or **The fastest memory limit** in
 Setup) finds the `memory_limit` that writes fastest on this
 Mac for the running model and context. Too low a limit starves the expert cache; too high a one makes macOS swap.
 
@@ -202,6 +208,6 @@ Mac for the running model and context. Too low a limit starves the expert cache;
   changes the setting itself; the dashboard's **Use …** sets it and reloads, after asking. Without a `memory_limit`
   the automatic budget uses the result at the next start, until it goes stale (see
   [settings.md](settings.md#memory)), and the memory line says so.
-- **Measure when idle** on the Memory line (`memory_auto_measure`) lets the server run this search by itself after
+- **Measure by itself when idle** on the Memory line (`memory_auto_measure`) lets the server run this search by itself after
   half an hour without requests, while no limit of yours is set and none measured is current; the line then says what
   it found or why it stopped ([settings.md](settings.md#memory)).

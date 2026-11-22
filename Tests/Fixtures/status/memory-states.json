@@ -1,0 +1,574 @@
+[
+ {
+  "state": "the measured limit, calm (3.1.5's own row)",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 21600000000,
+    "budget_mode": "explicit",
+    "cap_bytes": 22600000000,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 14914629560,
+    "last_cut": {
+     "at": "-23m",
+     "reason": "the system swap counter increased"
+    },
+    "recovery_target_bytes": 21600000000,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 21600000000,
+    "temporarily_reduced": false
+   },
+   "memory_learned": {
+    "applied": false,
+    "auto_measure": "memory: measured automatically while idle: 22.6 GB",
+    "bytes": 14679362304,
+    "cap_bytes": 22600000000,
+    "days": 12.340277777777779,
+    "in_force": "memory: automatic, using the measured 22.6 GB",
+    "limit_advice": {
+     "applied": true,
+     "limit_bytes": null,
+     "measured": "2026-11-22T12:00:00Z",
+     "stale": null,
+     "suggested_bytes": 22600000000,
+     "text": "Chosen: 22.6GB — 7.5 tok/s on a repeat (highest limit this Mac kept); the automatic budget 24.0GB — cut 1 time; automatic mode uses it"
+    },
+    "minimum_bytes": 15679362304,
+    "regrowths": 297,
+    "trims": 131
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "default",
+    "value": "(fitted to this Mac)"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "true"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "ok",
+   "title": "Origami uses 14.9 GB of the 22.6 GB it may use.",
+   "text": "Origami measured this limit on 22 Nov by itself while the Mac was idle. It is the most memory this Mac kept for Origami without macOS taking any back. macOS took memory back 23 min ago because the Mac had started to use swap (memory written to disk). Origami has grown back since.",
+   "buttons": [
+    "Stop measuring by itself",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "your limit, macOS took memory back now, a measurement found more",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 14700000000,
+    "budget_mode": "explicit",
+    "cap_bytes": 25000000000,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 13700000000,
+    "last_cut": {
+     "at": "-22m",
+     "reason": "macOS reports memory pressure"
+    },
+    "recovery_target_bytes": 24000000000,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 24000000000,
+    "temporarily_reduced": true
+   },
+   "memory_learned": {
+    "applied": false,
+    "auto_measure": null,
+    "bytes": 14679362304,
+    "cap_bytes": 22600000000,
+    "days": 12.340277777777779,
+    "in_force": "memory: your limit 25.0 GB (ceiling)",
+    "limit_advice": {
+     "applied": false,
+     "limit_bytes": 25000000000,
+     "measured": "2026-11-18T12:00:00Z",
+     "stale": null,
+     "suggested_bytes": 25500000000,
+     "text": "Chosen: …"
+    },
+    "minimum_bytes": 15679362304,
+    "regrowths": 297,
+    "trims": 131
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "file",
+    "value": "25GB"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "false"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "warn",
+   "title": "Origami uses 13.7 GB. It may use up to 25.0 GB but holds itself to 14.7 GB for now.",
+   "text": "You set this limit yourself. macOS took memory back 22 min ago because it was running short of memory. Origami grows back by itself once memory is free again. A measurement on 18 Nov found this Mac keeps up to 25.5 GB for Origami without taking memory back.",
+   "buttons": [
+    "Use 25.5 GB",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "automatic, started at the learned start and growing, measurement stale",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 14679362304,
+    "budget_mode": "automatic",
+    "cap_bytes": 24051816858,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 11620984456,
+    "last_cut": null,
+    "recovery_target_bytes": 24051816858,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 24051816858,
+    "temporarily_reduced": true,
+    "learned_start_bytes": 14679362304
+   },
+   "memory_learned": {
+    "applied": true,
+    "auto_measure": "memory: not measured yet: a request came within 30 minutes since 2:31",
+    "bytes": 14679362304,
+    "cap_bytes": 22600000000,
+    "days": 12.340277777777779,
+    "in_force": "memory: automatic; this Mac's memory use has changed since the memory limit was measured (cut on 3 days since): run `origami tune --memory`",
+    "limit_advice": {
+     "applied": false,
+     "limit_bytes": null,
+     "measured": "2026-11-16T12:00:00Z",
+     "stale": "cut on 3 days since",
+     "suggested_bytes": 25500000000,
+     "text": "Chosen: …"
+    },
+    "minimum_bytes": 15679362304,
+    "regrowths": 297,
+    "trims": 131
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "default",
+    "value": "(fitted to this Mac)"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "true"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "warn",
+   "title": "Origami uses 11.6 GB. It may use up to 24.1 GB but holds itself to 14.7 GB for now.",
+   "text": "Origami chose this limit from this Mac's memory size, because its measurement from 16 Nov no longer counts (macOS took memory back on 3 days since then). Origami started at 14.7 GB, what this Mac usually had free over the last 12 days. It grows by itself while memory stays free.",
+   "buttons": [
+    "Measure again",
+    "Stop measuring by itself",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "your limit, which this Mac does not keep",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 29000000000,
+    "budget_mode": "explicit",
+    "cap_bytes": 30000000000,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 22000000000,
+    "last_cut": {
+     "at": "-3000m",
+     "reason": "macOS reports memory pressure"
+    },
+    "recovery_target_bytes": 29000000000,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 29000000000,
+    "temporarily_reduced": false
+   },
+   "memory_learned": {
+    "applied": false,
+    "auto_measure": null,
+    "bytes": 14679362304,
+    "cap_bytes": 22600000000,
+    "days": 12.340277777777779,
+    "in_force": "memory: your limit 30.0 GB (ceiling)",
+    "limit_advice": {
+     "limit_bytes": 30000000000,
+     "suggested_bytes": 25500000000,
+     "cuts": 4,
+     "text": "memory_limit 30.0 GB could not be held on this Mac (cut 4 times); about 25.5GB is the most it kept: set memory_limit to 25.5GB (`origami config set memory_limit 25.5GB`) or remove it to let Origami choose (`origami config unset memory_limit`)"
+    },
+    "minimum_bytes": 15679362304,
+    "regrowths": 297,
+    "trims": 131
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "file",
+    "value": "30GB"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "false"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "warn",
+   "title": "Origami uses 22.0 GB of the 30.0 GB it may use.",
+   "text": "You set this limit yourself. macOS took memory back from this limit 4 times on several days. About 25.5 GB is the most this Mac kept.",
+   "buttons": [
+    "Use 25.5 GB",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "your limit, under the measured one",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 19000000000,
+    "budget_mode": "explicit",
+    "cap_bytes": 20000000000,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 17000000000,
+    "last_cut": null,
+    "recovery_target_bytes": 19000000000,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 19000000000,
+    "temporarily_reduced": false
+   },
+   "memory_learned": {
+    "applied": false,
+    "auto_measure": null,
+    "bytes": 14679362304,
+    "cap_bytes": 22600000000,
+    "days": 12.340277777777779,
+    "in_force": "memory: your limit 20.0 GB (ceiling)",
+    "limit_advice": {
+     "applied": false,
+     "limit_bytes": 20000000000,
+     "measured": "2026-11-18T12:00:00Z",
+     "stale": null,
+     "suggested_bytes": 25500000000,
+     "text": "Chosen: …"
+    },
+    "minimum_bytes": 15679362304,
+    "regrowths": 297,
+    "trims": 131
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "file",
+    "value": "20GB"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "false"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "warn",
+   "title": "Origami uses 17.0 GB of the 20.0 GB it may use.",
+   "text": "You set this limit yourself. A measurement on 18 Nov found this Mac keeps up to 25.5 GB for Origami without taking memory back.",
+   "buttons": [
+    "Use 25.5 GB",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "the memory search running",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 20000000000,
+    "budget_mode": "explicit",
+    "cap_bytes": 21000000000,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 15000000000,
+    "last_cut": null,
+    "recovery_target_bytes": 20000000000,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 20000000000,
+    "temporarily_reduced": false
+   },
+   "memory_learned": {
+    "applied": false,
+    "auto_measure": "memory: measuring automatically while idle; a request stops it",
+    "bytes": 14679362304,
+    "cap_bytes": 22600000000,
+    "days": 12.340277777777779,
+    "in_force": "memory: automatic, using the measured 22.6 GB",
+    "limit_advice": null,
+    "minimum_bytes": 15679362304,
+    "regrowths": 297,
+    "trims": 131
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "default",
+    "value": "(fitted to this Mac)"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "true"
+   }
+  },
+  "job": {
+   "kind": "tune",
+   "title": "Finding the fastest memory limit",
+   "state": "running",
+   "stage": "Loading at 21.0GB",
+   "lines": [],
+   "seconds": 5,
+   "started": 77
+  },
+  "words": {
+   "mark": "ok",
+   "title": "Origami uses 15.0 GB of the 21.0 GB it may use.",
+   "text": "A memory search is running. Origami reloads the model at a few limits to find the most memory this Mac keeps, so these figures change until it ends. Origami is measuring the best limit by itself now. A request from an app stops it.",
+   "buttons": [
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "automatic, not measured",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 24051816858,
+    "budget_mode": "automatic",
+    "cap_bytes": 24051816858,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 20000000000,
+    "last_cut": null,
+    "recovery_target_bytes": 24051816858,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 24051816858,
+    "temporarily_reduced": false,
+    "learned_start_bytes": null
+   },
+   "memory_learned": {
+    "applied": false,
+    "bytes": null,
+    "days": 0.2,
+    "trims": 0,
+    "regrowths": 0,
+    "cap_bytes": 24051816858,
+    "minimum_bytes": 15679362304,
+    "limit_advice": null,
+    "in_force": "memory: automatic (not measured: run `origami tune --memory`)",
+    "auto_measure": null
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "default",
+    "value": "(fitted to this Mac)"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "false"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "ok",
+   "title": "Origami uses 20.0 GB of the 24.1 GB it may use.",
+   "text": "Origami chose this limit from this Mac's memory size, leaving room for macOS and other apps.",
+   "buttons": [
+    "Measure the best limit",
+    "Measure by itself when idle",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "automatic, started small, nothing learned",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 12000000000,
+    "budget_mode": "automatic",
+    "cap_bytes": 24051816858,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 11000000000,
+    "last_cut": null,
+    "recovery_target_bytes": 24051816858,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 24051816858,
+    "temporarily_reduced": true,
+    "learned_start_bytes": null
+   },
+   "memory_learned": {
+    "applied": false,
+    "bytes": null,
+    "days": 0.2,
+    "trims": 0,
+    "regrowths": 0,
+    "cap_bytes": 24051816858,
+    "minimum_bytes": 15679362304,
+    "limit_advice": null,
+    "in_force": "memory: automatic (not measured: run `origami tune --memory`)",
+    "auto_measure": null
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "default",
+    "value": "(fitted to this Mac)"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "false"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "warn",
+   "title": "Origami uses 11.0 GB. It may use up to 24.1 GB but holds itself to 12.0 GB for now.",
+   "text": "Origami chose this limit from this Mac's memory size, leaving room for macOS and other apps. Little memory was free when the model loaded, so Origami started lower. It grows by itself while memory stays free.",
+   "buttons": [
+    "Measure the best limit",
+    "Measure by itself when idle",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "a measurement that kept no limit",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 24051816858,
+    "budget_mode": "automatic",
+    "cap_bytes": 24051816858,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 20000000000,
+    "last_cut": null,
+    "recovery_target_bytes": 24051816858,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 24051816858,
+    "temporarily_reduced": false,
+    "learned_start_bytes": null
+   },
+   "memory_learned": {
+    "applied": false,
+    "bytes": null,
+    "days": 0.2,
+    "trims": 0,
+    "regrowths": 0,
+    "cap_bytes": 24051816858,
+    "minimum_bytes": 15679362304,
+    "limit_advice": {
+     "applied": false,
+     "limit_bytes": null,
+     "measured": "2026-11-20T12:00:00Z",
+     "stale": null,
+     "suggested_bytes": null,
+     "text": "No memory limit measured ran without cuts or swap on this Mac; nothing to suggest"
+    },
+    "in_force": "memory: automatic (not measured: run `origami tune --memory`)",
+    "auto_measure": "memory: automatic measurement found no limit this Mac kept; will try again tomorrow"
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "default",
+    "value": "(fitted to this Mac)"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "true"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "ok",
+   "title": "Origami uses 20.0 GB of the 24.1 GB it may use.",
+   "text": "Origami chose this limit from this Mac's memory size, leaving room for macOS and other apps. A measurement on 20 Nov found no limit this Mac kept without taking memory back.",
+   "buttons": [
+    "Stop measuring by itself",
+    "Change the limit…"
+   ]
+  }
+ },
+ {
+  "state": "your limit, started lower under pressure",
+  "status": {
+   "memory": {
+    "available_bytes": 5840519168,
+    "budget_bytes": 15000000000,
+    "budget_mode": "explicit",
+    "cap_bytes": 22000000000,
+    "floor_bytes": 4294967296,
+    "footprint_bytes": 14000000000,
+    "last_cut": null,
+    "recovery_target_bytes": 21000000000,
+    "reserved_bytes": 15860526304,
+    "start_bytes": 21600000000,
+    "target_bytes": 21000000000,
+    "temporarily_reduced": true
+   },
+   "memory_learned": {
+    "applied": false,
+    "bytes": null,
+    "days": 0.2,
+    "trims": 0,
+    "regrowths": 0,
+    "cap_bytes": 24051816858,
+    "minimum_bytes": 15679362304,
+    "limit_advice": null,
+    "in_force": "memory: your limit 22.0 GB (ceiling)",
+    "auto_measure": null
+   }
+  },
+  "saved_settings": {
+   "memory_limit": {
+    "source": "file",
+    "value": "22GB"
+   },
+   "memory_auto_measure": {
+    "source": "file",
+    "value": "false"
+   }
+  },
+  "job": null,
+  "words": {
+   "mark": "warn",
+   "title": "Origami uses 14.0 GB. It may use up to 22.0 GB but holds itself to 15.0 GB for now.",
+   "text": "You set this limit yourself. macOS was short of memory when the model loaded, so Origami started lower. It grows back to your limit by itself.",
+   "buttons": [
+    "Change the limit…"
+   ]
+  }
+ }
+]

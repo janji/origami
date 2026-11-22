@@ -49,9 +49,10 @@ public enum SlowedBy {
         (
             "memory_low",
             [
-                "memory.budget_bytes", "memory.target_bytes", "memory.recovery_target_bytes", "memory.budget_mode", "memory.last_cut",
+                "memory.budget_bytes", "memory.cap_bytes", "memory.target_bytes", "memory.recovery_target_bytes", "memory.budget_mode",
+                "memory.last_cut",
                 "memory.last_cut.reason", "memory.last_cut.at", "memory_learned.applied", "memory_learned.bytes",
-                "memory_learned.days", "memory_learned.trims", "memory_holders[].name", "memory_holders[].bytes",
+                "memory_learned.days", "memory_holders[].name", "memory_holders[].bytes",
             ], memoryLow
         ),
         (
@@ -124,9 +125,9 @@ public enum SlowedBy {
     }
 
     /// The budget at least 1 GB under what Origami may use, in one of three cases (`MemoryGovernor`): cut below what it
-    /// climbs back to (`last_cut`, `recovery_target_bytes`), which it regains by itself; held at the budget learned from
-    /// this Mac's memory use (`memory_learned`; automatic mode), which caps the start and every regrowth, so it does not
-    /// grow past it by itself; or started small because little memory was free, which it grows out of as memory frees.
+    /// climbs back to (`last_cut`, `recovery_target_bytes`), which it regains by itself; started at the budget learned
+    /// from this Mac's memory use (`memory_learned`; automatic mode), which it grows past by itself as memory frees; or
+    /// started small because little memory was free, which it grows out of too.
     static func memoryLow(_ s: [String: Any]) -> Found? {
         guard memoryShort(s), let m = s["memory"] as? [String: Any], let budget = number(m["budget_bytes"]),
             let may = number(m["target_bytes"])
@@ -136,29 +137,28 @@ public enum SlowedBy {
             return "\(name) \(size(bytes))"
         }
         let apps = holders.isEmpty ? "" : "Other apps hold " + holders.joined(separator: ", ") + ". "
-        let have = "Memory: Origami has \(size(budget)) of the \(size(may)) it may use"
+        let have = "Memory: Origami holds itself to \(size(budget)) of the \(size(number(m["cap_bytes"]) ?? may)) it may use"
         let back = number(m["recovery_target_bytes"]) ?? may
         let cut = m["last_cut"] as? [String: Any]
         let learned = s["memory_learned"] as? [String: Any]
         let explicit = m["budget_mode"] as? String == "explicit"
-        let toLimit = "it climbs back to your limit by itself, half the way every 20 s without memory pressure; no reload needed"
+        let toLimit =
+            "it climbs back to your limit by itself, half the remaining way every 20 s while macOS is not short of memory; no reload needed"
         if let cut, back - budget >= 1e9 {
-            let grows =
-                explicit
-                ? toLimit : "it climbs back to \(size(back)) by itself, a step about every 40 s that memory stays free; no reload needed"
+            let grows = explicit ? toLimit : "it grows back by itself as memory stays free, a step every 20 to 60 s; no reload needed"
             return (
-                have + ": macOS cut it" + ((cut["reason"] as? String).map { " (\($0))" } ?? ""),
+                have + ": macOS took memory back" + ((cut["reason"] as? String).map { " because " + SlowReason.cutWhy($0) } ?? ""),
                 apps + "Quit what you do not need: " + grows + ".", cut["at"] as? String
             )
         }
-        if learned?["applied"] as? Bool == true, let bytes = number(learned?["bytes"]), bytes + 1e9 <= may, budget <= bytes + 2.5e8 {
+        // Started at the budget learned from this Mac's memory use, at or past it: it grows past it by itself as memory
+        // stays free (`MemoryGovernorPolicy.pastLearned`: a minute quiet before each step of up to 2 GB).
+        if learned?["applied"] as? Bool == true, let bytes = number(learned?["bytes"]), bytes + 1e9 <= may, budget + 2.5e8 >= bytes {
             let days = Int((number(learned?["days"]) ?? 0).rounded())
-            let cuts = (learned?["trims"] as? Int).map { " and \($0) cuts" } ?? ""
             return (
-                have + ": it holds itself to a budget learned from \(days) days of this Mac's memory use\(cuts)",
-                apps + "It will not grow past that by itself: free memory, then press Reset on Setup's Memory limit line"
-                    + " (it grows about 20 s later, no reload), run `origami tune --memory`, or set a memory_limit and reload.",
-                nil
+                have + ": it started at what this Mac usually had free over the last \(days) days and grows as memory frees",
+                apps + "Quitting them helps: once memory stays free for a minute it grows by up to 2 GB a step, a minute or more apart;"
+                    + " no reload needed.", nil
             )
         }
         return (
@@ -341,18 +341,16 @@ public enum SlowedBy {
         case "entry_evicted":
             fix = "Keep the conversation (Saved prompts › Keep) so newer ones do not replace it, or give saved prompts more disk."
         case "save_failed": fix = "The server log says why the save failed; later turns are saved again."
-        case "saved_by_other_build": fix = "Nothing to do: this build saves it again, and later turns reuse it."
+        case "saved_by_other_build": fix = "Nothing to do: this version saves it again, and later turns reuse it."
         case _ where reason.hasPrefix("prefix_differs_at="):
             fix =
                 "Nothing Origami can change: the app changed the start of the prompt (a date or tool list in the system prompt often does)."
         default: fix = "Nothing to do: later turns of the conversation reuse what this one saved."
         }
-        // A reason this build has no words for (a newer one) shows as its code.
-        let words = SlowReason.why(reason)
-        let why = reason.isEmpty ? "" : ": " + (words == reason ? "the saved copy was not used (\(reason))" : words)
+        // As the last request's line says it (`SlowReason`); a reason this build has no words for, as the general case.
+        let why = reason.isEmpty ? "" : " because " + SlowReason.why(reason)
         return (
-            "The last prompt read \(SlowReason.grouped(lost)) tokens again that a saved prompt should have given\(why)", fix,
-            last["time"] as? String
+            "\(SlowReason.grouped(lost)) tokens of the last prompt had to be read again\(why)", fix, last["time"] as? String
         )
     }
 
@@ -370,8 +368,8 @@ public enum SlowedBy {
         guard let (limit, suggested, advice) = limitAdvice(s), suggested >= limit + 5e8, !(advice["stale"] is String) else { return nil }
         let value = String(format: "%.1fGB", suggested / 1e9)
         return (
-            "Your memory limit of \(size(limit)) is under the \(size(suggested)) this Mac measured as fastest",
-            "Use \(value) on the Memory line, or `origami config set memory_limit \(value)`.", nil
+            "Your memory limit of \(size(limit)) is under the \(size(suggested)) a measurement found this Mac keeps for Origami",
+            "Use \(size(suggested)) on the Memory line, or `origami config set memory_limit \(value)`.", nil
         )
     }
 

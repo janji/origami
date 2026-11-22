@@ -2781,8 +2781,17 @@ memory size): the least `reserved + free − floor` per 10 minutes, and every tr
 regrowth overstates what fits (reserved bytes not yet resident), so the 10-minute minima and the trims, taken when the
 cache is full, are what count: with six buckets or more the learned budget is the 10th percentile of the minima of the
 last 14 days and, with three trims or more, at most the 20th percentile of their targets, at least the minimum to run
-and only when 0.25 GB or more under the cap. Unless `memory_limit` is set it caps the start (Qwen: the governor's first
-trim; the family engines: the pool before its warm-up) and every regrowth. A limit (`memory_limit` or measured)
+and only when 0.25 GB or more under the cap. Unless `memory_limit` is set it is the start (Qwen: the governor's first
+trim; the family engines: the pool before its warm-up) and caps the regrowth after a cut below it; it is not a
+ceiling. At or past it, with nothing below it left to regain, `MemoryGovernorPolicy.pastLearned` grows the budget
+toward the cap (`target`, and `recovery_target_bytes`) more carefully than below it: 60 s with no pressure, fresh swap
+or overrun and with free memory that keeps the floor + 1 GB after the step, then a step of at most 2 GB or half the
+gap to the cap (at least 0.5 GB or the rest of the gap), the next after another 60 s (14.7 → 24 GB: seven steps,
+about seven minutes). A cut within 600 s of such a step doubles that wait (`pastBackoff`, at most four times), and
+3,600 s without a cut restore it. The history is the worst tenth of two weeks, not now, so growing past it when memory
+is really free is right; the cuts that follow are recorded as before (`MemoryGovernor.apply`), so the learned start
+stays honest. The deficit a request reports ("memory was cut by …") still counts against the learned start, so a
+budget growing past it was not cut; `memory.learned_start_bytes` gives the start. A limit (`memory_limit` or measured)
 always starts at itself: history never lowers it, so one evening of pressure (other jobs at once) cannot slow the
 next two weeks. Within a session it keeps its ceiling, the level that held after a cut and the 1 GB raises back up.
 Trims are written to the file at once, each with the

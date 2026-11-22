@@ -69,6 +69,13 @@ package struct MemoryGovernorPolicy: Sendable {
     private var growthQuietSince: TimeInterval?
     private static let gb: UInt64 = 1_000_000_000
     package static let recoveryInterval: TimeInterval = 20
+    /// Growth past the learned start (`pastLearned`): the quiet spell before each step, the largest step, how soon after
+    /// a step a cut counts against it, and the calm that forgives it.
+    package static let pastLearnedQuiet: TimeInterval = 60, pastLearnedStep: UInt64 = 2 * gb
+    package static let pastLearnedRegret: TimeInterval = 600, pastLearnedCalm: TimeInterval = 3_600
+    /// The doubling of `pastLearnedQuiet` (0 to 2) after cuts that followed a step past the learned start, and that step.
+    package private(set) var pastBackoff = 0
+    private var lastPastGrowth: TimeInterval?
     // A global counter cannot attribute a small isolated write to this process. Two
     // distinct increases within ten seconds, or a 64 MiB burst, warrant swap relief.
     private static let swapWindow: TimeInterval = 10
@@ -220,6 +227,10 @@ package struct MemoryGovernorPolicy: Sendable {
             pendingSwapRelief = false
         }
         if target < usable, overrun > 0 || usable - target > Self.gb / 4, !settling {
+            if let grew = lastPastGrowth, now - grew <= Self.pastLearnedRegret {
+                pastBackoff = min(2, pastBackoff + 1)
+                lastPastGrowth = nil
+            }
             lastShrink = now
             lastShrinkWasUrgent = urgent
             settleUntil = now + interval
@@ -262,6 +273,11 @@ package struct MemoryGovernorPolicy: Sendable {
         // lowers its allowance. Retry that unfinished growth even if the allowance is
         // already at target; otherwise no later budget increase would wake the owner.
         let retriesGrowth = mode == .explicit && usable >= grown
+        // At or past the learned start, with nothing left below it to regain: grow past it, carefully (`pastLearned`).
+        if mode == .automatic, let learned, !(grown > usable && grown - usable > Self.gb / 2), Self.add(usable, Self.gb / 4) >= learned {
+            return pastLearned(
+                now: now, usable: usable, free: Self.fit(reserved: reserved, available: available, floor: floor, slack: Self.gb))
+        }
         // Explicit targets include the final partial step; automatic retains its existing
         // hysteresis so harmless fluctuations in estimated headroom do not resize caches.
         guard retriesGrowth || (grown > usable && (mode == .explicit || grown - usable > Self.gb / 2)) else {
@@ -283,5 +299,29 @@ package struct MemoryGovernorPolicy: Sendable {
         quietSince = mode == .explicit ? now : nil
         lastGrowth = now
         return Decision(target: recovered, reason: .recovery, freshSwap: 0)
+    }
+
+    /// Automatic mode past the learned start. The learned budget is the worst tenth of two weeks of this Mac's memory
+    /// use, not what is free now: it sets where the budget starts, never where it must stay. When memory is really free
+    /// (the step keeps the floor and 1 GB free, no pressure, no fresh swap: `step` returns before this otherwise) for
+    /// `pastLearnedQuiet` seconds, the budget grows by at most `pastLearnedStep` or half its gap to the cap, whichever
+    /// is smaller; a cut within `pastLearnedRegret` seconds of such a step doubles the next wait (up to four times), and
+    /// `pastLearnedCalm` seconds without a cut restore it. Cuts are taken and recorded as before, so the learned start
+    /// stays honest.
+    private mutating func pastLearned(now: TimeInterval, usable: UInt64, free: UInt64) -> Decision? {
+        if pastBackoff > 0, now - lastShrink >= Self.pastLearnedCalm { pastBackoff = 0 }
+        let gap = Self.subtract(cap, usable)
+        let least = min(gap, Self.gb / 2)
+        let step = min(Self.pastLearnedStep, max(gap / 2, least), Self.subtract(free, usable))
+        guard least > 0, step >= least else {
+            quietSince = nil
+            return nil
+        }
+        let since = quietSince ?? now
+        quietSince = since
+        guard now - since >= Self.pastLearnedQuiet * Double(1 << pastBackoff) else { return nil }
+        quietSince = nil
+        lastPastGrowth = now
+        return Decision(target: usable + step, reason: .recovery, freshSwap: 0)
     }
 }

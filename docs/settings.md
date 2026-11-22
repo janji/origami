@@ -136,7 +136,14 @@ The dashboard's **Setup** tab shows these as dials, with this Mac's memory answe
 
 Origami sizes itself from the memory that is free when it starts, leaves room for your other apps, and gives memory
 back when macOS runs short: it shrinks its expert cache instead of letting the Mac swap, and grows again when memory
-frees up, one step every few minutes once the squeeze has gone.
+frees up, one step every few minutes once the squeeze has gone. Without `memory_limit` it also learns from two
+weeks of this Mac's memory use where to start (the dashboard's Setup shows "Starts at … learned from this Mac's
+memory use", `memory.learned_start_bytes` in `/v1/status`): a start, not a ceiling. Once memory has stayed free for
+a minute (no pressure, no fresh swap, and the step leaves macOS its share and 1 GB), the budget grows past it by at
+most 2 GB or half the way to the ceiling, whichever is smaller, another minute later the next step, up to what
+Origami may use (`memory.target_bytes`). A cut within 10 minutes of such a step doubles the next wait (up to four
+minutes); an hour without a cut restores the minute. Cuts are recorded as always, so the learned start stays honest.
+**Forget the learned start** on Setup's Memory limit line, `origami tune --memory` and `memory_limit` change where it starts.
 
 Without `memory_limit`, a limit measured by `origami tune --memory`
 ([dashboard.md](dashboard.md#the-fastest-memory-limit)) for this model and context on this Mac is used
@@ -144,7 +151,7 @@ as the ceiling and start, until it goes stale: cut on three different days since
 90 days old. The startup log, `origami status` and the dashboard say which is in force ("memory: automatic, using the
 measured 22.5 GB", "memory: your limit 24.0 GB (ceiling)", or "not measured: run `origami tune --memory`").
 
-With `origami config set memory_auto_measure true` (or **Measure when idle** on the dashboard's Memory line), a
+With `origami config set memory_auto_measure true` (or **Measure by itself when idle** on the dashboard's Memory line), a
 running server does that measurement itself when no limit is measured for the loaded model and context, or the one
 measured went stale or kept none. It starts only when all hold: no `memory_limit` is set; no request for 30 minutes;
 no other dashboard job runs; the Mac is on power and not in low power mode; and no automatic try in the last day,

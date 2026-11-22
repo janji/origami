@@ -150,7 +150,7 @@ public enum DashboardPage {
             <div class="readout" aria-live="polite">
               <div class="effects" id="effects" hidden><p class="overall" id="overall"></p><div id="effect-rows"></div></div>
               <div class="mem" id="mem"><span class="label" id="mem-label">This Mac's memory</span><canvas id="memstrip" role="img" aria-label="This Mac's memory"></canvas><div class="keys" id="keys"></div></div>
-              <p class="basis" id="ml" hidden><span id="ml-text"></span> <button type="button" class="measure" id="ml-reset">Reset</button></p>
+              <p class="basis" id="ml" hidden><span id="ml-text"></span> <button type="button" class="measure" id="ml-reset">Forget the learned start</button></p>
               <p class="fits" id="fits"></p>
             </div>
           </section>

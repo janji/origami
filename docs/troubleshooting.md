@@ -22,7 +22,9 @@ line each, the costliest first, and what to do (or that it recovers by itself, a
 same as "Slowed by" lines, and apps read it as `slowed_by` in `/v1/status` and `/health`. It covers memory below its
 target (with the apps that hold the most), a drive that reads slowly or is gone or not allowed, the hot copy (building,
 no room, failed), heat and Low Power Mode, conversation saves paused, a prompt read again, a job or waiting requests,
-and, last, settings this Mac measured could be better. Under the last request's bar, **Slow because** says the same
+and, last, settings this Mac measured could be better. Memory under what Origami may use right after a start is
+usually the start it learned from this Mac's memory use: it grows past it by itself, a step of up to 2 GB a minute,
+while memory stays free; quitting the apps the notice names makes room. Under the last request's bar, a line ("Slower than usual: …") says the same
 for that request alone.
 
 ## Common problems

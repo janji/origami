@@ -365,6 +365,14 @@ enum DashboardScript {
         }
         const changed = () => Object.keys(changes()).length > 0;
         const dirty = () => changed() || Object.keys(samplingChanges()).length > 0;
+        // A page left open across an upgrade runs the old page's code: it reloads once when the server's version changes,
+        // not over unsaved settings (the next status tries again).
+        let pageVersion = null;
+        function versionSeen(v) {
+          if (!v) return;
+          if (!pageVersion) pageVersion = v;
+          else if (v !== pageVersion && !dirty()) { pageVersion = v; location.reload(); }
+        }
         let planTimer = null, planSeq = 0, storedMemory = null;
         // A dial names itself when the user moves it; a call without a name takes every dial that differs as moved.
         function dialMoved(id) {
@@ -433,16 +441,80 @@ enum DashboardScript {
             }).join("") + '</tbody></table>';
           }
         }
-        // The memory budget learned from this Mac's other apps (`memory_learned`), and its Reset.
+        // Memory in plain words, for Health > Memory and Setup's Memory limit line: how much Origami uses and may use (the
+        // title), who decided that figure (`who`), and what to know or do (`lines`), with the limit a button can set (`use`)
+        // and the measurement a button can start (`measure`). Every state is in Tests/dashboard-checks.mjs.
+        const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const onDay = (iso) => { const d = new Date(iso); return isNaN(d) ? "an earlier day" : d.getDate() + " " + MONTHS[d.getMonth()]; };
+        // `MemoryGovernor.lastCut`'s reason as what happened (`SlowReason.cutWhy` says the same for the Slowed-by box).
+        const cutWhy = (r) => /^macOS reports critical/.test(r) ? "it was very short of memory" : /^macOS reports/.test(r) ? "it was running short of memory"
+          : /^the system swap/.test(r) ? "the Mac had started to use swap (memory written to disk)" : /^process memory exceeds/.test(r) ? "Origami had gone over its own limit" : "free memory had run low";
+        // `SelfTuning.memoryStaleness` as why a measurement no longer counts.
+        const staleWhy = (r) => /^cut on (\d+) days/.test(r) ? "macOS took memory back on " + /^cut on (\d+)/.exec(r)[1] + " days since then"
+          : /^another /.test(r) ? "it was made for " + r : /^over (\d+) days old/.test(r) ? "it is " + r : r;
+        // `AutoMeasure`'s lines, other than its result, as what Origami's own measurement is doing.
+        const autoWords = (line) => {
+          const t = String(line || "").replace(/^memory: /, ""), m = (re) => re.exec(t);
+          let x;
+          if ((x = m(/^not measured yet: (.*)$/))) return "Origami will measure the best limit by itself while the Mac is idle. It has not yet, because " + x[1].replace(/ since /, " (since ") + (/ since /.test(x[1]) ? ")" : "") + ".";
+          if (/^measuring automatically/.test(t)) return "Origami is measuring the best limit by itself now. A request from an app stops it.";
+          if ((x = m(/^automatic measurement (stopped|did not finish)[:(]? ?(.*?)\)?; will try again tomorrow$/))) return "Origami's own measurement " + (x[1] === "stopped" ? "stopped" : "did not finish") + (x[2] ? " (" + x[2] + ")" : "") + ". It tries again tomorrow.";
+          if (/^automatic measurement found no limit/.test(t)) return "Origami's own measurement found no limit this Mac kept. It tries again tomorrow.";
+          if ((x = m(/^automatic measurement (cancelled|ended); restoring/))) return "Origami's own measurement " + x[1] + ". The model reloads with your saved limit.";
+          return "";
+        };
+        function memoryWords(s) {
+          const m = s.memory || {}, ml = s.memory_learned || {}, a = ml.limit_advice || null, may = m.cap_bytes || 0;
+          const saved = dashboard && dashboard.saved_settings || {}, explicit = m.budget_mode === "explicit";
+          const testing = running() && job.kind === "tune" && /memory limit/.test(job.title || "");
+          const measuredKind = !!a && "measured" in a, sugg = a && a.suggested_bytes || 0, near = (x) => Math.abs(may - x) < 3e8;
+          const inForce = measuredKind && a.applied === true && !!sugg && near(sugg);
+          const yours = saved.memory_limit ? /^\d/.test(saved.memory_limit.value || "") : explicit && !inForce;
+          const byItself = /measured automatically while idle/.test(ml.auto_measure || "");
+          const lower = m.temporarily_reduced && m.budget_bytes + 5e8 < may;
+          const w = { mark: "ok", lines: [], use: 0, measure: "", yours, testing };
+          w.title = lower ? "Origami uses <b>" + gb(m.footprint_bytes || 0) + "</b>. It may use up to " + gb(may) + " but holds itself to " + gb(m.budget_bytes) + " for now."
+            : "Origami uses <b>" + gb(m.footprint_bytes || 0) + "</b> of the " + gb(may) + " it may use.";
+          w.who = testing ? "A memory search is running. Origami reloads the model at a few limits to find the most memory this Mac keeps, so these figures change until it ends."
+            : inForce ? "Origami measured this limit on " + onDay(a.measured) + (byItself ? " by itself while the Mac was idle" : "") + ". It is the most memory this Mac kept for Origami without macOS taking any back."
+            : yours ? "You set this limit yourself."
+            : measuredKind && a.stale ? "Origami chose this limit from this Mac's memory size, because its measurement from " + onDay(a.measured) + " no longer counts (" + staleWhy(a.stale) + ")."
+            : "Origami chose this limit from this Mac's memory size, leaving room for macOS and other apps.";
+          w.lines.push(w.who);
+          const cutAgo = m.last_cut ? (Date.now() - new Date(m.last_cut.at).getTime()) / 1000 : Infinity;
+          if (lower && m.last_cut) w.lines.push("macOS took memory back " + ago(m.last_cut.at) + " because " + cutWhy(m.last_cut.reason) + ". Origami grows back by itself once memory is free again.");
+          else if (lower && m.learned_start_bytes && !explicit) w.lines.push("Origami started at " + gb(m.learned_start_bytes) + ", what this Mac usually had free over the last " + Math.max(1, Math.round(ml.days || 0)) + " days. It grows by itself while memory stays free.");
+          else if (lower) w.lines.push(explicit ? "macOS was short of memory when the model loaded, so Origami started lower. It grows back to your limit by itself." : "Little memory was free when the model loaded, so Origami started lower. It grows by itself while memory stays free.");
+          else if (cutAgo < 3600) w.lines.push("macOS took memory back " + ago(m.last_cut.at) + " because " + cutWhy(m.last_cut.reason) + ". Origami has grown back since.");
+          if (a && !testing) {
+            if (!measuredKind && sugg && yours) {
+              w.lines.push("macOS took memory back from this limit " + (a.cuts || 0) + " times on several days. About " + gb(sugg) + " is the most this Mac kept.");
+              w.use = sugg;
+            } else if (measuredKind && a.stale) {
+              if (!yours) w.measure = "Measure again";
+            } else if (measuredKind && !sugg) {
+              w.lines.push("A measurement on " + onDay(a.measured) + " found no limit this Mac kept without taking memory back.");
+            } else if (measuredKind && yours && !near(sugg)) {
+              w.lines.push("A measurement on " + onDay(a.measured) + " found this Mac keeps " + (sugg > may ? "up to " : "only ") + gb(sugg) + " for Origami without taking memory back.");
+              w.use = sugg;
+            }
+          }
+          if (!a && !yours && !testing) w.measure = "Measure the best limit";
+          // What Origami's own measurement is doing, only when nothing more pressing is said.
+          if (!yours && !byItself && ml.auto_measure && w.lines.length === 1) { const said = autoWords(ml.auto_measure); if (said) w.lines.push(said); }
+          if (lower || w.use) w.mark = "warn";
+          return w;
+        }
+        // Setup's Memory limit line: who decided the limit, and the start Origami learned from this Mac's memory use with
+        // the button that forgets it (`memory_learned`).
         function showLearned(s) {
           const m = s.memory_learned, advice = m && m.limit_advice;
-          // `in_force`: which memory rule is in force (the measured limit, the user's own, or automatic), first.
           $("ml").hidden = !(m && m.in_force) && !advice && (!m || !m.days || !m.applied);
           if ($("ml").hidden) return;
-          const said = advice ? memoryText(advice.text).replace(/[;,]? set it with `[^`]*`\.?$/, ".") : !m.days || !m.applied ? "" : m.bytes == null ? "Learning the available memory…" : "Automatic budget · " + gb(m.bytes);
-          const rule = memoryText(m.in_force).replace(/^memory: /, "").replace(/ \(not measured: run `origami tune --memory`\)/, " · not measured yet").replace(/^./, (c) => c.toUpperCase());
-          $("ml-text").textContent = [rule && "Memory limit: " + rule, said].filter(Boolean).join(" · ");
-          $("ml-reset").hidden = !advice && !(m.days && m.applied);
+          const start = !m.days || !m.applied ? "" : m.bytes == null ? "Origami is still learning how much memory this Mac usually has free."
+            : "Origami starts at " + gb(m.bytes) + ", what this Mac usually had free over the last " + Math.max(1, Math.round(m.days)) + " days, and grows while memory stays free.";
+          $("ml-text").textContent = ["Memory limit: " + memoryWords(s).who, start].filter(Boolean).join(" ");
+          $("ml-reset").hidden = !(m.days && m.applied);
         }
         let tuneBy = null;
         // What a moved dial does to speed here, as a step from much slower (-3) to much faster (+3), judged from this Mac's
@@ -970,9 +1042,11 @@ enum DashboardScript {
             if (reused) { keyed = esc(text) + ' · <i class="key" aria-hidden="true"></i>' + share + "% reused"; text += " · " + share + "% reused"; }
           }
           // Slowed by: what slows Origami down now, the costliest first, each with its fix (`SlowedBy` on the server, also
-          // during a request); hidden when nothing does.
-          const slowed = (Array.isArray(s.slowed_by) ? s.slowed_by : []).map((c) => "<li><b>" + esc(c.text) + ".</b> " + esc(c.fix).replace(/`([^`]+)`/g, "<code>$1</code>") + "</li>").join("");
-          $("slowed").hidden = !slowed;
+          // during a request). With a model loaded and nothing slowing it, one quiet line says so: the box is where a
+          // person looks for it either way.
+          const slowing = (Array.isArray(s.slowed_by) ? s.slowed_by : []).map((c) => "<li><b>" + esc(c.text) + ".</b> " + esc(c.fix).replace(/`([^`]+)`/g, "<code>$1</code>") + "</li>").join("");
+          const slowed = slowing || (s.status === "ready" ? "<li>Nothing is slowing Origami down right now.</li>" : "");
+          $("slowed").hidden = !slowed; $("slowed").dataset.calm = slowing ? "" : "1";
           if ($("slowed-list").innerHTML !== slowed) $("slowed-list").innerHTML = slowed;
           $("chip").dataset.state = state; $("chip-text").textContent = chip; $("page").dataset.state = state;
           if (live.chip !== chip) { live.chip = chip; modelList(); }
@@ -1476,10 +1550,11 @@ enum DashboardScript {
         // Why the last request was slow: its first word split into the prompt read (new, restored, and why fewer were restored
         // than wanted), its writing into the GPU and each drive's wait, and one verdict by the rules `SlowReason` (the engine)
         // applies for `origami status`; both are checked against one fixture.
-        const RESTORE_WHY = { save_skipped_disk: "the saved copy was skipped for disk space", save_failed: "saving it had failed", save_not_finished: "its save had not finished",
-          entry_evicted: "its saved copy had been replaced by newer ones", entry_not_used: "the saved copy was not used", no_entry: "it had not been saved",
-          saved_by_other_build: "it was saved by another Origami build" };
-        const restoreWhy = (why) => /^prefix_differs_at=/.test(why) ? "the prompt differed from the saved one at token " + why.slice(18) : RESTORE_WHY[why] || why;
+        const RESTORE_WHY = { save_skipped_disk: "there was too little free disk space to save it last time", save_failed: "saving it last time failed",
+          save_not_finished: "it was sent before the last reply had finished saving", entry_evicted: "its saved copy had been replaced by newer conversations",
+          entry_not_used: "its saved copy could not be used", no_entry: "it had not been saved before", saved_by_other_build: "its saved copy was made by another version of Origami" };
+        const restoreWhy = (why) => /^prefix_differs_at=/.test(why) ? "the app changed the start of the conversation (after " + fmt.format(+why.slice(18) || 0) + " tokens it no longer matched the saved copy)"
+          : RESTORE_WHY[why] || "its saved copy could not be used";
         function slowParts(r) {
           const pc = r.phase_counters || {}, st = r.stage_seconds || {}, v = (k) => +pc[k] || 0, waits = [];
           for (const k in pc) { const m = /^decode\.drive_activity\.(model_drive|copy_place_(\d+))\.busy_seconds\.reads$/.exec(k); if (m) waits.push([m[2] == null ? "the model's drive" : "copy " + (+m[2] + 1), +pc[k] || 0]); }
@@ -1496,20 +1571,22 @@ enum DashboardScript {
           const p = slowParts(r), t = +r.seconds || 0;
           if (!(t > 0)) return "nothing unusual";
           const short = (+r.memory_budget_deficit_gb_seconds || 0) / t;
-          if (short >= 1) return "slow because: memory was cut by about " + short.toFixed(1) + " GB for this request's " + Math.round(t) + " s";
+          if (short >= 1) return "slower than usual: macOS took back about " + short.toFixed(1) + " GB of Origami's memory during this reply, so more of the model had to be read from the drive";
           const reread = p.lost >= 1000 && p.fresh > 0 ? p.read * Math.min(1, p.lost / p.fresh) : 0, wait = p.waits[0], enough = (cost) => cost >= 2 && cost >= 0.2 * t;
-          if (enough(reread) && reread >= (wait ? wait[1] : 0)) return "slow because: " + fmt.format(p.lost) + " prompt tokens were read again" + (p.why ? " — " + restoreWhy(p.why) : "");
+          if (enough(reread) && reread >= (wait ? wait[1] : 0)) return "slower than usual: " + fmt.format(p.lost) + " tokens of the prompt had to be read again" + (p.why ? " because " + restoreWhy(p.why) : "");
           if (wait && enough(wait[1])) {
             const backlog = (((s || {}).experts_from || {}).sources || []).filter((x) => x.role === "hot").reduce((n, x) => n + (x.backlog_records || 0), 0);
-            return "slow because: " + wait[0] + " kept the reply waiting for " + Math.round(wait[1]) + " s" + (wait[0] === "the model's drive" && backlog > 0 ? " — the hot copy has " + fmt.format(backlog) + " swaps waiting" : "");
+            const drive = /^copy /.test(wait[0]) ? "the drive of " + wait[0] : wait[0] === "the hot copy" ? "the hot copy's drive" : wait[0];
+            return "slower than usual: the reply waited " + Math.round(wait[1]) + " s for " + drive + " to read the parts of the model it needed" +
+              (wait[0] === "the model's drive" && backlog > 0 ? ", and the hot copy still has " + fmt.format(backlog) + " of them waiting to be added" : "");
           }
           return "nothing unusual";
         }
         // The breakdown under the last request's bar: two lines of figures and the verdict.
         function whyHtml(r, s) {
           const p = slowParts(r), verdict = slowReason(r, s), slow = verdict !== "nothing unusual";
-          const first = r.ttft_s != null ? "<b>First word " + secs(r.ttft_s) + "</b> · " + fmt.format(p.fresh) + " prompt tokens read, " + fmt.format(p.restored) + " restored" +
-            (p.lost > 0 && p.why ? " (" + fmt.format(p.wanted) + " wanted" + (verdict.includes(restoreWhy(p.why)) ? "" : ": " + esc(restoreWhy(p.why))) + ")" : "") : "";
+          const first = r.ttft_s != null ? "<b>First word " + secs(r.ttft_s) + "</b> · " + fmt.format(p.fresh) + " prompt tokens read, " + fmt.format(p.restored) + " reused from a saved copy" +
+            (p.lost > 0 && p.why ? " (" + fmt.format(p.wanted) + " could have been reused" + (verdict.includes(restoreWhy(p.why)) ? "" : ", but " + esc(restoreWhy(p.why))) + ")" : "") : "";
           const waits = p.waits.filter((w) => w[1] >= 0.05).map((w) => esc(w[0]) + " " + secs(w[1]));
           const write = p.write > 0 ? "<b>Writing " + secs(p.write) + "</b>" + (p.gpu > 0 ? " · GPU " + secs(p.gpu) : "") + (waits.length ? " · waiting on " + waits.join(", ") : "") : "";
           return '<div class="why">' + [first, write].filter(Boolean).map((l) => "<p>" + l + "</p>").join("") +
@@ -1545,8 +1622,8 @@ enum DashboardScript {
           flow("flow-reads", sp && sp.reads ? ["Expert reads", fmt.format(sp.reads), abar([["@", "b", sp.memory || 0, "from memory", pct(sp.memory)],
             ["#", "a", sp.hot_copy || 0, "from the hot copy", pct(sp.hot_copy)], [":", "c", sp.model_drive || 0, "from the model's drive", pct(sp.model_drive)]], "Expert reads")] : null);
           const m = ready && s.memory, ram = ready && s.mac && s.mac.memory_bytes, room = m ? Math.max(0, m.cap_bytes - m.footprint_bytes) : 0;
-          flow("flow-mem", m && ram && m.footprint_bytes ? ["Memory", "this Mac has " + macGB(ram), abar([["#", "a", m.footprint_bytes, "Origami", gb(m.footprint_bytes)], ["-", "c", room, "room in its limit", gb(room)],
-            [".", "d", Math.max(0, ram - m.footprint_bytes - room), "left to macOS and apps", gb(Math.max(0, ram - m.footprint_bytes - room))]], "Memory")] : null);
+          flow("flow-mem", m && ram && m.footprint_bytes ? ["Memory", "this Mac has " + macGB(ram), abar([["#", "a", m.footprint_bytes, "Origami uses", gb(m.footprint_bytes)], ["-", "c", room, "may still grow by", gb(room)],
+            [".", "d", Math.max(0, ram - m.footprint_bytes - room), "left to macOS and other apps", gb(Math.max(0, ram - m.footprint_bytes - room))]], "Memory")] : null);
           // What the model runs as: its context, and whether its replies are the model's own.
           const about = ready && s.model && typeof s.model === "object" ? s.model : {}, set = (ready && s.settings) || {}, q = set.quality && LEVEL_LABELS[set.quality.value] ? set.quality.value : null;
           const variant = /low-bit/.test(about.experts || ""), context = ready && (s.context || about.context);
@@ -1561,22 +1638,12 @@ enum DashboardScript {
           const go = (view, label, at) => '<button type="button" class="small" data-key="go:' + (at || view) + '" data-go="' + view + '"' + (at ? ' data-at="' + at + '"' : "") + ">" + label + "</button>";
           const act = (name, label, extra = "") => '<button type="button" class="small" data-key="' + name + '" data-hact="' + name + '"' + extra + ">" + label + "</button>";
           if (m && m.cap_bytes) {
-            // The limit in force: automatic, yours, or the one the memory search measured; the search's result, with the
-            // value its own advice names, one press away.
-            const advice = s.memory_learned && s.memory_learned.limit_advice, command = advice && /`origami config set memory_limit ([^` ]+)`/.exec(advice.text || "");
-            const held = advice && advice.suggested_bytes && Math.abs(m.cap_bytes - advice.suggested_bytes) < 3e8;
-            const testing = running() && job.kind === "tune" && /memory limit/.test(job.title || "");
-            const which = testing ? "a limit under test" : held ? "the measured limit" : m.budget_mode === "explicit" ? "your limit" : "automatic";
-            // `memory_auto_measure`: what the search while idle last did, and its switch while no limit of yours is set.
-            const auto = s.memory_learned && s.memory_learned.auto_measure, saved = dashboard && dashboard.saved_settings || {}, autoOn = (saved.memory_auto_measure || {}).value === "true";
-            const yours = saved.memory_limit ? /^\d/.test(saved.memory_limit.value || "") : which === "your limit";
-            // A cut, in either mode: the budget below what it climbs back to, with the last cut's reason and when.
-            const cut = m.last_cut ? " (" + m.last_cut.reason + ", " + ago(m.last_cut.at) + ")" : "";
-            const sub = [m.temporarily_reduced ? "Origami is held to " + gb(m.budget_bytes) + " for now" + cut + "; it climbs back when memory is free." : "", advice ? memoryText(advice.text).replace(/[;,]? set it with `[^`]*`\.?$/, ".") : "",
-              auto ? auto.replace(/^memory: /, "").replace(/^./, (c) => c.toUpperCase()) + "." : ""].filter(Boolean).map(esc).join(" ");
-            rows.push(row(m.temporarily_reduced ? "warn" : "ok", "Memory", "<b>" + gb(m.footprint_bytes || 0) + "</b> of " + gb(m.cap_bytes) + " · " + which, sub,
-              (command && !held ? act("use-limit", "Use " + esc(memoryText(command[1])), ' data-value="' + esc(command[1]) + '"') : "") + (advice ? "" : act("tune-memory", "Find the fastest", ' title="Times a few memory limits on this Mac and names the fastest one it keeps: about 4 minutes for Qwen, 6 for GLM, 10 for DeepSeek"')) +
-              (yours || testing ? "" : act("auto-measure", autoOn ? "Stop measuring when idle" : "Measure when idle", ' data-value="' + !autoOn + '" title="Find the fastest limit by itself after half an hour without requests, on power, at most once a day; a request stops it"')) + go("setup", "Change…")));
+            const w = memoryWords(s), autoOn = ((dashboard && dashboard.saved_settings || {}).memory_auto_measure || {}).value === "true";
+            rows.push(row(w.mark, "Memory", w.title, w.lines.map(esc).join(" "),
+              (w.use ? act("use-limit", "Use " + gb(w.use), ' data-value="' + (w.use / 1e9).toFixed(1) + 'GB" title="Sets the limit to ' + gb(w.use) + ' and reloads the model"') : "") +
+              (w.measure ? act("tune-memory", w.measure, ' title="Origami reloads the model at a few limits and keeps the highest one macOS does not take memory back from: about 4 minutes for Qwen, 6 for GLM, 10 for DeepSeek. Requests wait meanwhile."') : "") +
+              (w.yours || w.testing ? "" : act("auto-measure", autoOn ? "Stop measuring by itself" : "Measure by itself when idle", ' data-value="' + !autoOn + '" title="Origami finds the best limit by itself after half an hour without requests, on power, at most once a day. A request stops it."')) +
+              go("setup", "Change the limit…")));
           }
           // The drives the experts are read from: one that reads far below its own speed says so, with the cure.
           const sources = from.sources || [], speeds2 = s.drive_speeds || [], drives = new Set();
@@ -1760,7 +1827,7 @@ enum DashboardScript {
             $("apply-note").textContent = ""; if ($("sm-note").textContent !== SM_HELD) $("sm-note").textContent = "";
             $("experts").hidden = true; xFrom = xHot = null;
             status = s; live(s); hotChip(null); showNow(s);
-            $("version").textContent = s.version ? "v" + s.version : "";
+            $("version").textContent = s.version ? "v" + s.version : ""; versionSeen(s.version);
             if (s.status === "stopped" && setupFor !== "stopped") {
               // Dials this page never drew (it opened on a stopped Origami) stay out of sight until Start.
               const drawn = !!initial;
@@ -1786,12 +1853,12 @@ enum DashboardScript {
                 $("tune").hidden = false; $("setup-empty").hidden = true;
               }
             }
-            $("version").textContent = s.version ? "v" + s.version : "";
+            $("version").textContent = s.version ? "v" + s.version : ""; versionSeen(s.version);
             return;
           }
           // Between two model processes the front answers alone: only the live strip changes.
           if (s.status !== "ready" && (!s.model || typeof s.model !== "object")) { live(s); return; }
-          $("version").textContent = s.version ? "v" + s.version : "";
+          $("version").textContent = s.version ? "v" + s.version : ""; versionSeen(s.version);
           const mac = s.mac;
           $("title").textContent = dashboard && dashboard.active_model || s.model && s.model.name || "Origami";
           $("lede").textContent = dashboard ? dashboard.host : "";

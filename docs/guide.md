@@ -99,7 +99,7 @@ stopped model, and `idle_unload_minutes 30` unloads it after 30 idle minutes.
 
 - **Now:** live status; the last request and why it was slow, if it was (memory cut, a prompt read again, a drive it
   waited on); where experts came from; one health line each for memory, each drive, the hot copy, tuning and access.
-  The memory line has **Find the fastest** and **Measure when idle**.
+  The memory line has **Measure the best limit** and **Measure by itself when idle**.
 - **Setup:** context, quality, thinking and memory as dials, with this Mac's memory answering each move;
   **Tune for this Mac**; sampling. **Save** keeps a draft; **Save & reload** applies it.
 - **Models:** load, add or remove models; add low-bit experts; where experts are read from, with the hot copy control;
@@ -130,15 +130,16 @@ llama-swap, API keys and other devices on your network: [integration.md](integra
 
 Memory is automatic: with no `memory_limit` set, Origami sizes itself to this Mac and leaves room for your other apps.
 
-- **Measured.** `origami tune --memory` (or **Find the fastest** on the dashboard) reloads the running model at a few
+- **Measured.** `origami tune --memory` (or **Measure the best limit** on the dashboard) reloads the running model at a few
   limits and suggests the highest one macOS kept without cuts or swap: about 4 minutes for Qwen, 6 for GLM, 10 for
   DeepSeek. It changes no setting, but automatic memory then starts from that limit until the measurement goes stale.
   `memory_auto_measure true` lets an idle server measure by itself (30 minutes without requests, on power, at most
   once a day).
 - **A cut.** When macOS runs short of memory, Origami shrinks its expert cache instead of letting the Mac swap. Replies
-  slow down but stay the same. The dashboard's memory line says "held to … for now" and why.
+  slow down but stay the same. The dashboard's memory line says "macOS took memory back … because …" and that it grows back by itself.
 - **Recovery.** Once memory is free again, the budget climbs back by half the gap (at least 1 GB) every 40 s, up to
-  the limit. A limit cut on three different days gets a suggestion of the level this Mac kept.
+  the limit. Past where it learned to start (two weeks of this Mac's memory use) it keeps growing while memory stays
+  free: up to 2 GB a step, a minute apart. A limit cut on three different days gets a suggestion of the level this Mac kept.
 
 `origami config set memory_limit 24GB` sets your own ceiling. Details: [settings.md](settings.md#memory).
 

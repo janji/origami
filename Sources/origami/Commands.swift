@@ -1239,6 +1239,8 @@ enum Commands {
         guard let governor, let usable else { return [:] }
         return [
             "recovery_target_bytes": governor.target, "temporarily_reduced": usable < governor.target,
+            // Automatic mode: where the budget started, learned from this Mac's memory use (it grows past it as memory frees).
+            "learned_start_bytes": governor.learned.map { $0 as Any } ?? NSNull(),
             "last_cut": governor.lastCut.map { ["reason": $0.reason, "at": ISO8601DateFormatter().string(from: $0.at)] } ?? NSNull(),
         ]
     }
@@ -1278,10 +1280,17 @@ enum Commands {
             let cut = memory["last_cut"] as? [String: Any]
             let since = (cut?["at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
             lines.append(
-                "memory \(size(budget)) of \(size(memory["recovery_target_bytes"] ?? memory["target_bytes"]))"
-                    + (memory["temporarily_reduced"] as? Bool == true ? " (cut for now)" : "") + "; "
-                    + (cuts == 0 ? "no cuts since load" : "\(cuts) cut\(cuts == 1 ? "" : "s") since load")
-                    + ((cut?["reason"] as? String).map { ", the last \(since.map { AutoMeasure.shown($0) } ?? ""): \($0)" } ?? ""))
+                "memory: may use \(size(budget)) of \(size(memory["recovery_target_bytes"] ?? memory["target_bytes"])) now"
+                    + (memory["temporarily_reduced"] as? Bool != true
+                        ? ""
+                        : memory["last_cut"] is [String: Any] ? " (lower for now: macOS took memory back)" : " (growing as memory frees)")
+                    + "; "
+                    + (cuts == 0
+                        ? "macOS has not taken memory back since the model loaded"
+                        : "macOS took memory back \(cuts) time\(cuts == 1 ? "" : "s") since the model loaded")
+                    + ((cut?["reason"] as? String).map {
+                        ", the last at \(since.map { AutoMeasure.shown($0) } ?? "?") because " + SlowReason.cutWhy($0)
+                    } ?? ""))
         }
         let from = live["experts_from"] as? [String: Any] ?? [:]
         let split = from["split"] as? [String: Any] ?? [:]
@@ -1309,7 +1318,9 @@ enum Commands {
         {
             let restored = restore["restored"] as? Int ?? 0
             lines.append(
-                "last request: \(restored) of \(wanted) prompt tokens restored" + ((restore["reason"] as? String).map { " (\($0))" } ?? ""))
+                "last request: \(restored) of \(wanted) prompt tokens reused from a saved copy"
+                    + (restored < wanted
+                        ? (restore["reason"] as? String).map { ", the rest read again because " + SlowReason.why($0) } ?? "" : ""))
         }
         if let last = ((live["requests"] as? [String: Any])?["recent"] as? [[String: Any]])?.last {
             let verdict = SlowReason.verdict(request: last, status: live)

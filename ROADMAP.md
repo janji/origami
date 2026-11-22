@@ -119,6 +119,8 @@ Three upgrades in three days each emptied the saved prompts: the owner's next tu
 - **A build replaced before its first two idle minutes** leaves saves no later build can check (they stay in its folder and go by the usual rules).
 - **`origami cache` and the storage map** say "usable by this build" for a folder that still waits for its canary check; `PromptCanary.notCheckedYet` has the words.
 - **"Slowed by":** helper programs show under their process names ("node", "python3.14"), and the memory line is long with three apps named.
+- **`origami refresh` drops the model's saved prompts** ("they cannot be re-stamped"): the key holds the model files' identity, which a rewrite changes. Seen on 2026-11-22 (nothing of value lost that day). Key them on the weights' content so a refresh carries them over, as it does the hot copy and the usage counts.
+- **Memory that grows past the learned start** (3.1.6): on the real model, watch whether the budget climbs when memory frees, whether macOS cuts it back, and whether the learned start keeps learning from those cuts.
 - **The launcher** is described for this Mac only; `origami service install` still installs `origami` itself as the job's program, so an upgrade there asks for the permission again.
 
 ## 1. Phase 0: done

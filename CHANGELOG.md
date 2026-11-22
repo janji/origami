@@ -4,6 +4,31 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.6 (2026-11-22)
+
+**Replies:** unchanged.
+
+- **Automatic memory grows past the budget it learned.** Origami learns from this Mac's memory history how much its
+  other apps leave it (the worst tenth of two weeks) and starts there. Until now that figure also capped every
+  regrowth, so a Mac whose apps had since freed their memory kept Origami at its smallest cache until a Reset, a
+  memory search or a `memory_limit`. The learned budget now sets only the start: once memory has stayed free for a
+  minute (no pressure, no fresh swap, macOS's share and 1 GB still free after the step) the budget grows by up to
+  2 GB a step, a minute apart, up to what Origami may use; a cut within ten minutes of a step doubles the next wait
+  (up to four minutes; an hour of calm restores it). Cuts are recorded as before, so the learned start stays honest.
+  `/v1/status` has `learned_start_bytes`, and `recovery_target_bytes` is now what the budget climbs to. "Slowed by",
+  the dashboard and `origami status` say it grows by itself and which apps hold the memory.
+- **The dashboard reloads itself after an upgrade.** A page left open across an upgrade kept the old page's code, so
+  what the new version added (Slowed by, the saved prompts' rows) was not there until a manual reload. The page now
+  reloads once when the server's version changes (not while settings are being edited).
+- **The Memory line and the last request's line are in plain words.** They said, for instance, "Slow because: memory
+  was cut by about 1.8 GB for this request's 13 s" and "14.9 GB of 22.6 GB · the measured limit — Chosen: 22.6 GB —
+  7.5 tok/s on a repeat…". They now say how much memory Origami uses and may use, who decided that (you, a measurement
+  Origami made on a date, or its own estimate), what happened ("macOS took back about 1.8 GB of Origami's memory during
+  this reply, so more of the model had to be read from the drive") and what to do, if anything. The buttons and the
+  legend under the memory bar use the same words; "Slowed by" and `origami status` too.
+- **"Slowed by" is always on the Now tab**: when nothing slows Origami down it says so in one quiet line, instead of
+  not being there.
+
 ## 3.1.5 (2026-11-22)
 
 **Replies:** unchanged.

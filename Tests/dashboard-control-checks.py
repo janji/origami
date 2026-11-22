@@ -756,10 +756,11 @@ with tempfile.TemporaryDirectory(prefix='origami-memory-') as temporary:
               'a terminal search an app interrupted is refused its next trial; once it ended, a new search loads one: ' + repr((first, loaded, refused, again)))
         # J67: `origami status` with a server answering: what runs now, from its status.
         said = subprocess.run([binary, 'status', '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30).stdout
-        wanted = ['Live      Stub-35B loaded, ready', 'Live      memory 18.0 GB of 22.0 GB (cut for now); 2 cuts since load, the last',
-                  ': the system swap counter increased', 'Live      expert reads: memory 60% · Fast copy 30% · model drive 10%',
-                  'Live      copies: Fast ready 8.0 GB', 'Live      last request: 6912 of 7403 prompt tokens restored',
-                  "Live      last request: slow because: memory was cut by about 2.5 GB for this request's 40 s"]
+        wanted = ['Live      Stub-35B loaded, ready',
+                  'Live      memory: may use 18.0 GB of 22.0 GB now (lower for now: macOS took memory back); macOS took memory back 2 times since the model loaded, the last at ',
+                  ' because the Mac had started to use swap (memory written to disk)', 'Live      expert reads: memory 60% · Fast copy 30% · model drive 10%',
+                  'Live      copies: Fast ready 8.0 GB', 'Live      last request: 6912 of 7403 prompt tokens reused from a saved copy',
+                  "Live      last request: slower than usual: macOS took back about 2.5 GB of Origami's memory during this reply, so more of the model had to be read from the drive"]
         check(all(w in said for w in wanted), 'origami status shows what runs now: ' + said)
     except Exception:
         log.flush(); print((root / 'server.log').read_text(), file=sys.stderr); raise
@@ -822,13 +823,13 @@ with tempfile.TemporaryDirectory(prefix='origami-drive-') as temporary:
             log.close()
             detach()
 
-# Slowed by: a stub model whose status says (in a 3.1.5 server's own fields) memory is held at a learned budget, its drive reads slowly and the hot copy is being built;
+# Slowed by: a stub model whose status says (in a server's own fields) memory started at a learned budget, its drive reads slowly and the hot copy is being built;
 # the front turns that into `slowed_by` (with this Mac's largest apps), in /v1/status, /health and the dashboard, and
 # `origami status` prints each with its fix, the costliest first.
 SLOW = WORKER.replace("{'status': 'ready', 'queue': {'busy': False, 'queued': 0}}", """{'status': 'ready', 'queue': {'busy': False, 'queued': 0},
     'memory': {'available_bytes': 10121428992, 'budget_bytes': 14679362304, 'budget_mode': 'automatic', 'cap_bytes': 24051816858, 'floor_bytes': 4294967296,
-        'footprint_bytes': 11620984456, 'last_cut': None, 'recovery_target_bytes': 14679362304, 'reserved_bytes': 12565218464, 'start_bytes': 17589764720,
-        'target_bytes': 24051816858, 'temporarily_reduced': False},
+        'footprint_bytes': 11620984456, 'last_cut': None, 'recovery_target_bytes': 24051816858, 'learned_start_bytes': 14679362304, 'reserved_bytes': 12565218464, 'start_bytes': 17589764720,
+        'target_bytes': 24051816858, 'temporarily_reduced': True},
     'memory_learned': {'applied': True, 'bytes': 14679362304, 'cap_bytes': 24051816858, 'days': 12.28, 'minimum_bytes': 15679362304, 'regrowths': 292, 'trims': 129,
         'in_force': 'memory: automatic; this Mac has changed since the memory limit was measured (cut on 3 days since): run `origami tune --memory`',
         'limit_advice': {'applied': False, 'limit_bytes': None, 'measured': '2026-11-16T23:29:01Z', 'stale': 'cut on 3 days since', 'suggested_bytes': 25500000000, 'text': 'Chosen: 25.5GB'}},
@@ -864,17 +865,17 @@ with tempfile.TemporaryDirectory(prefix='origami-slowed-') as temporary:
         check(ids == ['memory_low', 'model_drive_slow', 'hot_copy_building'] and all(item.get('since') for item in status['slowed_by']),
               'the status lists memory, the slow drive and the hot copy, costliest first, each with since: ' + repr(status.get('slowed_by')))
         memory = status['slowed_by'][0]
-        check(memory['text'] == "Memory: Origami has 14.7 GB of the 24.1 GB it may use: it holds itself to a budget learned from 12 days of this Mac's memory use and 129 cuts"
-              and memory['fix'].startswith('Other apps hold ') and 'press Reset' in memory['fix'] and len(status.get('memory_holders') or []) >= 1
+        check(memory['text'] == "Memory: Origami holds itself to 14.7 GB of the 24.1 GB it may use: it started at what this Mac usually had free over the last 12 days and grows as memory frees"
+              and memory['fix'].startswith('Other apps hold ') and 'grows by up to 2 GB a step' in memory['fix'] and len(status.get('memory_holders') or []) >= 1
               and isinstance(status.get('mac_now', {}).get('low_power'), bool),
-              'memory held at a learned budget says so, names the apps that hold the most and what raises it; the status keeps memory_holders and mac_now: ' + repr(memory))
+              'memory started at a learned budget says it grows as memory frees and names the apps that hold the most; the status keeps memory_holders and mac_now: ' + repr(memory))
         check([item['id'] for item in get('health').get('slowed_by', [])] == [item['id'] for item in status['slowed_by']]
               and [item['id'] for item in get('v1/dashboard').get('slowed_by', [])] == [item['id'] for item in status['slowed_by']],
               '/health and the dashboard carry the same list')
         cli = subprocess.run([binary, 'status', '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60).stdout
         lines = cli.splitlines()
         slowed = [i for i, line in enumerate(lines) if line.startswith('Slowed by ')]
-        check(len(slowed) >= 3 and lines[slowed[0]].startswith('Slowed by Memory: Origami has 14.7 GB of the 24.1 GB') and lines[slowed[0] + 1].startswith('          Other apps hold ')
+        check(len(slowed) >= 3 and lines[slowed[0]].startswith('Slowed by Memory: Origami holds itself to 14.7 GB of the 24.1 GB') and lines[slowed[0] + 1].startswith('          Other apps hold ')
               and any(lines[i].startswith("Slowed by The model's drive reads slowly: 31%") and 'run `origami refresh`' in lines[i + 1] and '(at least 25 min)' in lines[i + 1] for i in slowed)
               and any(lines[i].startswith('Slowed by The hot copy is still being built (12.0 GB of 40.0 GB)') and 'in about 10 min' in lines[i + 1] for i in slowed)
               and slowed[0] < min(i for i, line in enumerate(lines) if line.startswith('Live')),

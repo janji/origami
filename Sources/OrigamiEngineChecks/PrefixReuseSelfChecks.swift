@@ -934,7 +934,7 @@ package enum PrefixReuseSelfChecks {
 
     private static func idleCanary(_ cache: PromptCache, _ probe: @escaping () throws -> String = { canary() }) {
         cache.canaryIdle = 0
-        cache.canaryWhenIdle(idle: true, blocked: false, wait: true, probe: probe)
+        cache.canaryWhenIdle(idle: true, blocked: false, wait: true, critical: { false }, probe: probe)
     }
 
     /// Two builds (other executables) of one arithmetic share saved prompts once the second's canary matches the first's.
@@ -981,8 +981,10 @@ package enum PrefixReuseSelfChecks {
         try autoreleasepool {
             let first = try canaryCache(root, ledger, build: a)
             first.canaryIdle = 0
-            first.canaryWhenIdle(idle: false, blocked: false, wait: true, probe: noProbe)
-            first.canaryWhenIdle(idle: true, blocked: true, wait: true, probe: noProbe)
+            // Not while busy, blocked by other work, or under critical memory pressure (the Mac's own level plays no part).
+            first.canaryWhenIdle(idle: false, blocked: false, wait: true, critical: { false }, probe: noProbe)
+            first.canaryWhenIdle(idle: true, blocked: true, wait: true, critical: { false }, probe: noProbe)
+            first.canaryWhenIdle(idle: true, blocked: false, wait: true, critical: { true }, probe: noProbe)
             idleCanary(first) { throw IOOperationCancelled() }
             try require(PromptCanary.marker(root)?.canary == nil, "A cancelled idle probe wrote a canary")
             idleCanary(first)

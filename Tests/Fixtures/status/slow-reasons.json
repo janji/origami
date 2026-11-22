@@ -1,61 +1,12 @@
 [
-  {
-    "rule": "a prompt read again, its save skipped for disk space",
-    "request": { "seconds": 41, "ttft_s": 31, "prompt_tokens": 8100, "cached_tokens": 2000, "completion_tokens": 120,
-      "stage_seconds": { "prefill_and_save": 30, "generation": 10 },
-      "prompt_restore": { "wanted": 8100, "restored": 2000, "reason": "save_skipped_disk" } },
-    "status": {},
-    "verdict": "slow because: 6,100 prompt tokens were read again — the saved copy was skipped for disk space"
-  },
-  {
-    "rule": "a prompt read again, saved by another Origami build",
-    "request": { "seconds": 60, "ttft_s": 50, "prompt_tokens": 50392, "cached_tokens": 0, "completion_tokens": 100,
-      "stage_seconds": { "prefill_and_save": 49, "generation": 10 },
-      "prompt_restore": { "wanted": 50392, "restored": 0, "reason": "saved_by_other_build" } },
-    "status": {},
-    "verdict": "slow because: 50,392 prompt tokens were read again — it was saved by another Origami build"
-  },
-  {
-    "rule": "a prompt read again, it differed from the saved one",
-    "request": { "seconds": 20, "ttft_s": 15, "prompt_tokens": 5000, "cached_tokens": 500, "completion_tokens": 40,
-      "stage_seconds": { "prefill_and_capture": 14, "generation": 5 },
-      "prompt_restore": { "wanted": 4000, "restored": 500, "reason": "prefix_differs_at=500" } },
-    "status": {},
-    "verdict": "slow because: 3,500 prompt tokens were read again — the prompt differed from the saved one at token 500"
-  },
-  {
-    "rule": "GLM or DeepSeek waiting on the model's drive",
-    "request": { "seconds": 30, "ttft_s": 2, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 200,
-      "stage_seconds": { "prefill_and_save": 1, "generation": 28 },
-      "phase_counters": { "decode.drive_activity.model_drive.busy_seconds.reads": 12.4, "decode.drive_activity.copy_place_0.busy_seconds.reads": 3,
-        "decode.drive_activity.wall_seconds.gpu": 9 } },
-    "status": {},
-    "verdict": "slow because: the model's drive kept the reply waiting for 12 s"
-  },
-  {
-    "rule": "Qwen waiting on the model's drive, with swaps waiting for the hot copy",
-    "request": { "seconds": 40, "ttft_s": 3, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 300,
-      "stage_seconds": { "prefill_and_capture": 2, "generation": 36 },
-      "phase_counters": { "generation.decode_late_wait_seconds": 20, "generation.reads_internal_seconds": 30, "generation.reads_hot_seconds": 10,
-        "generation.decode_gpu_seconds": 14 } },
-    "status": { "experts_from": { "sources": [ { "role": "hot", "backlog_records": 120, "backlog_bytes": 1900000000, "backlog_uses": 3400 } ] } },
-    "verdict": "slow because: the model's drive kept the reply waiting for 15 s — the hot copy has 120 swaps waiting"
-  },
-  {
-    "rule": "memory cut by macOS",
-    "request": { "seconds": 40, "ttft_s": 4, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 200,
-      "stage_seconds": { "prefill_and_save": 3, "generation": 36 }, "memory_budget_deficit_gb_seconds": 128,
-      "phase_counters": { "decode.drive_activity.model_drive.busy_seconds.reads": 20 } },
-    "status": {},
-    "verdict": "slow because: memory was cut by about 3.2 GB for this request's 40 s"
-  },
-  {
-    "rule": "nothing unusual",
-    "request": { "seconds": 12, "ttft_s": 1.5, "prompt_tokens": 2000, "cached_tokens": 1900, "completion_tokens": 100,
-      "stage_seconds": { "prefill_and_capture": 1, "generation": 10.5 },
-      "prompt_restore": { "wanted": 1950, "restored": 1900, "reason": "entry_evicted" },
-      "phase_counters": { "generation.decode_late_wait_seconds": 1, "generation.reads_internal_seconds": 3, "generation.decode_gpu_seconds": 8 } },
-    "status": {},
-    "verdict": "nothing unusual"
-  }
+  {"rule": "a prompt read again, its save skipped for disk space", "request": {"seconds": 41, "ttft_s": 31, "prompt_tokens": 8100, "cached_tokens": 2000, "completion_tokens": 120, "stage_seconds": {"prefill_and_save": 30, "generation": 10}, "prompt_restore": {"wanted": 8100, "restored": 2000, "reason": "save_skipped_disk"}}, "status": {}, "verdict": "slower than usual: 6,100 tokens of the prompt had to be read again because there was too little free disk space to save it last time"},
+  {"rule": "a prompt read again, saved by another Origami build", "request": {"seconds": 60, "ttft_s": 50, "prompt_tokens": 50392, "cached_tokens": 0, "completion_tokens": 100, "stage_seconds": {"prefill_and_save": 49, "generation": 10}, "prompt_restore": {"wanted": 50392, "restored": 0, "reason": "saved_by_other_build"}}, "status": {}, "verdict": "slower than usual: 50,392 tokens of the prompt had to be read again because its saved copy was made by another version of Origami"},
+  {"rule": "a prompt read again, it differed from the saved one", "request": {"seconds": 20, "ttft_s": 15, "prompt_tokens": 5000, "cached_tokens": 500, "completion_tokens": 40, "stage_seconds": {"prefill_and_capture": 14, "generation": 5}, "prompt_restore": {"wanted": 4000, "restored": 500, "reason": "prefix_differs_at=500"}}, "status": {}, "verdict": "slower than usual: 3,500 tokens of the prompt had to be read again because the app changed the start of the conversation (after 500 tokens it no longer matched the saved copy)"},
+  {"rule": "GLM or DeepSeek waiting on the model's drive", "request": {"seconds": 30, "ttft_s": 2, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 200, "stage_seconds": {"prefill_and_save": 1, "generation": 28}, "phase_counters": {"decode.drive_activity.model_drive.busy_seconds.reads": 12.4, "decode.drive_activity.copy_place_0.busy_seconds.reads": 3, "decode.drive_activity.wall_seconds.gpu": 9}}, "status": {}, "verdict": "slower than usual: the reply waited 12 s for the model's drive to read the parts of the model it needed"},
+  {"rule": "Qwen waiting on the model's drive, with swaps waiting for the hot copy", "request": {"seconds": 40, "ttft_s": 3, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 300, "stage_seconds": {"prefill_and_capture": 2, "generation": 36}, "phase_counters": {"generation.decode_late_wait_seconds": 20, "generation.reads_internal_seconds": 30, "generation.reads_hot_seconds": 10, "generation.decode_gpu_seconds": 14}}, "status": {"experts_from": {"sources": [{"role": "hot", "backlog_records": 120, "backlog_bytes": 1900000000, "backlog_uses": 3400}]}}, "verdict": "slower than usual: the reply waited 15 s for the model's drive to read the parts of the model it needed, and the hot copy still has 120 of them waiting to be added"},
+  {"rule": "memory cut by macOS", "request": {"seconds": 40, "ttft_s": 4, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 200, "stage_seconds": {"prefill_and_save": 3, "generation": 36}, "memory_budget_deficit_gb_seconds": 128, "phase_counters": {"decode.drive_activity.model_drive.busy_seconds.reads": 20}}, "status": {}, "verdict": "slower than usual: macOS took back about 3.2 GB of Origami's memory during this reply, so more of the model had to be read from the drive"},
+  {"rule": "memory taken back, as a 3.1.5 server recorded it (13 s, 23.9 GB-seconds)", "request": {"seconds": 13.326987981796265, "ttft_s": 7.1682199239730835, "prompt_tokens": 59, "cached_tokens": 0, "completion_tokens": 40, "memory_budget_deficit_gb_seconds": 23.892893179311795, "prompt_restore": {"reason": null, "restored": 0, "wanted": 0}}, "status": {}, "verdict": "slower than usual: macOS took back about 1.8 GB of Origami's memory during this reply, so more of the model had to be read from the drive"},
+  {"rule": "a prompt read again for a reason this build has no words for", "request": {"seconds": 20, "ttft_s": 15, "prompt_tokens": 5000, "cached_tokens": 0, "completion_tokens": 40, "stage_seconds": {"prefill_and_capture": 14, "generation": 5}, "prompt_restore": {"wanted": 5000, "restored": 0, "reason": "some_future_reason"}}, "status": {}, "verdict": "slower than usual: 5,000 tokens of the prompt had to be read again because its saved copy could not be used"},
+  {"rule": "GLM or DeepSeek waiting on a copy's drive", "request": {"seconds": 30, "ttft_s": 2, "prompt_tokens": 300, "cached_tokens": 280, "completion_tokens": 200, "stage_seconds": {"prefill_and_save": 1, "generation": 28}, "phase_counters": {"decode.drive_activity.model_drive.busy_seconds.reads": 2, "decode.drive_activity.copy_place_0.busy_seconds.reads": 9.6}}, "status": {}, "verdict": "slower than usual: the reply waited 10 s for the drive of copy 1 to read the parts of the model it needed"},
+  {"rule": "nothing unusual", "request": {"seconds": 12, "ttft_s": 1.5, "prompt_tokens": 2000, "cached_tokens": 1900, "completion_tokens": 100, "stage_seconds": {"prefill_and_capture": 1, "generation": 10.5}, "prompt_restore": {"wanted": 1950, "restored": 1900, "reason": "entry_evicted"}, "phase_counters": {"generation.decode_late_wait_seconds": 1, "generation.reads_internal_seconds": 3, "generation.decode_gpu_seconds": 8}}, "status": {}, "verdict": "nothing unusual"}
 ]

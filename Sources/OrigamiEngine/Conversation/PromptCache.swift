@@ -303,10 +303,15 @@ public final class PromptCache {
 
     /// Writes the canary of the folder this build made (its marker lists only this build and has none), once something
     /// is saved there and the server has had no request for `canaryIdle`. Called at each look of the server's loop with
-    /// whether the engine is idle and whether other work blocks it (a hot copy being built); never under memory pressure.
+    /// whether the engine is idle and whether other work blocks it (a hot copy being built); never while macOS reports
+    /// critical memory pressure (`critical`; the warning level is this Mac's ordinary state on a busy day, and the probe
+    /// reads into the caches the model already has).
     /// `probe` runs as a request any arriving request cancels (it then throws): tried again at the next idle spell. `wait`
     /// runs it on the caller's thread.
-    package func canaryWhenIdle(idle: Bool, blocked: Bool, wait: Bool = false, probe: @escaping () throws -> String) {
+    package func canaryWhenIdle(
+        idle: Bool, blocked: Bool, wait: Bool = false, critical: () -> Bool = { MemoryPressureLevel.current() == .critical },
+        probe: @escaping () throws -> String
+    ) {
         let now = Date()
         let start: Bool = lock.withLock {
             if !idle { quietSince = now }
@@ -318,7 +323,7 @@ public final class PromptCache {
         }
         guard start else { return }
         let finish = { (done: Bool) in self.lock.withLock { (self.canaryRunning, self.canaryDone) = (false, done) } }
-        guard let build, MemoryPressureLevel.current().map({ $0 == .normal }) ?? true else { return finish(false) }
+        guard let build, !critical() else { return finish(false) }
         guard let marker = PromptCanary.marker(root), marker.canary == nil, marker.refused == nil, marker.builds == [build] else {
             return finish(true)
         }

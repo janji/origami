@@ -31,7 +31,7 @@ let confirmAnswer = false, confirmed = [];
 const context = vm.createContext({
   document: { getElementById: element, documentElement: {}, querySelectorAll: () => [], addEventListener: noop, hidden: false, body: {}, activeElement: null },
   MutationObserver: class { observe() {} },
-  window: { addEventListener: noop, devicePixelRatio: 2, innerWidth: 375 }, location: { hash: "", pathname: "/dashboard", hostname: "127.0.0.1", origin: "http://127.0.0.1" },
+  window: { addEventListener: noop, devicePixelRatio: 2, innerWidth: 375 }, location: { hash: "", pathname: "/dashboard", hostname: "127.0.0.1", origin: "http://127.0.0.1", reloads: 0, reload() { this.reloads += 1; } },
   history: { replaceState: noop }, sessionStorage: { getItem: () => null, setItem: noop }, localStorage: { items: {}, getItem(k) { return this.items[k] ?? null; }, setItem(k, v) { this.items[k] = String(v); } }, matchMedia: () => ({ matches: false, addEventListener: noop }),
   getComputedStyle: () => ({ getPropertyValue: () => "0, 0, 0" }), requestAnimationFrame: noop, cancelAnimationFrame: noop, setTimeout: () => 0, clearTimeout: noop,
   setInterval: () => 0, clearInterval: noop, performance: { now: () => 0 }, URLSearchParams, CSS: { escape: (s) => s }, fetch,
@@ -751,17 +751,23 @@ const learned = (m) => { run(`showLearned(${JSON.stringify({ memory_learned: m }
 check(learned({ bytes: null, days: 0, trims: 0, applied: false }) === "" || element("ml").hidden, "nothing recorded yet: no line");
 learned({ bytes: null, days: 0.125, trims: 2, applied: false });
 check(element("ml").hidden, "unused learned memory does not crowd the dashboard");
-check(learned({ bytes: 21474836480, days: 2.5, trims: 205, applied: true }) === "Automatic budget · 21.5 GB", "the active automatic memory budget is concise");
 learned({ bytes: 21474836480, days: 2.5, trims: 205, applied: false });
 check(element("ml").hidden, "an explicit memory limit hides the unused learned budget");
-check(learned({ bytes: null, days: 0, trims: 3, applied: false, limit_advice: { text: "memory_limit 30.1 GB could not be held on this Mac" } })
-  === "memory_limit 30.1 GB could not be held on this Mac" && !element("ml").hidden, "a memory_limit this Mac could not hold shows its suggestion");
-check(learned({ bytes: null, days: 0, trims: 0, applied: false, in_force: "memory: automatic, using the measured 22.5 GB" })
-  === "Memory limit: Automatic, using the measured 22.5 GB" && !element("ml").hidden, "the memory rule in force always shows, in the page's own GB");
-check(learned({ bytes: null, days: 0, trims: 0, applied: false, in_force: "memory: automatic (not measured: run `origami tune --memory`)", limit_advice: { text: "Fastest that this Mac kept: 22.5GB" } })
-  === "Memory limit: Automatic · not measured yet · Fastest that this Mac kept: 22.5 GB", "the rule in force comes before the suggestion");
+// Setup's Memory limit line says who decided the limit as Health > Memory does, and the learned start as a start.
+const memStates = JSON.parse(readFileSync(new URL("Fixtures/status/memory-states.json", import.meta.url), "utf8")), keptDashboard = run("JSON.stringify(dashboard)");
+const setupLine = (name) => {
+  const st = memStates.find((x) => x.state.startsWith(name));
+  run("dashboard = { ...(dashboard || {}), saved_settings: " + JSON.stringify(st.saved_settings) + " }; showLearned(" + JSON.stringify(st.status) + ")");
+  return element("ml").hidden ? null : element("ml-text").textContent;
+};
+check(setupLine("automatic, started at the learned start") === "Memory limit: Origami chose this limit from this Mac's memory size, because its measurement from 16 Nov no longer counts (macOS took memory back on 3 days since then). Origami starts at 14.7 GB, what this Mac usually had free over the last 12 days, and grows while memory stays free."
+  && !element("ml-reset").hidden && element("ml-reset").textContent !== "Reset", "Setup: automatic, a stale measurement, and the learned start as a start, with the button that forgets it");
+check(setupLine("the measured limit") === "Memory limit: Origami measured this limit on 22 Nov by itself while the Mac was idle. It is the most memory this Mac kept for Origami without macOS taking any back."
+  && element("ml-reset").hidden, "Setup: the measured limit says what measured means");
+check(setupLine("your limit, which this Mac does not keep") === "Memory limit: You set this limit yourself.", "Setup: your own limit");
+run("dashboard = " + keptDashboard);
 routes["v1/memory/learned"] = { reset: true }; await fire("ml-reset"); await settle();
-check(sent.some((r) => r.path === "v1/memory/learned" && r.method === "POST") && /^Forgotten/.test(element("ml-text").textContent), "Reset forgets the learned budget");
+check(sent.some((r) => r.path === "v1/memory/learned" && r.method === "POST") && /^Forgotten/.test(element("ml-text").textContent), "Forget the learned start forgets it");
 // The page itself: Storage and folders is one closed section; the drive buttons the card replaced are gone.
 const html = readFileSync(process.argv[2], "utf8");
 // A tuning run needs about five minutes on the slowest model to compare anything: no shorter limit is offered, and the
@@ -927,14 +933,27 @@ const nowStatus = { status: "ready", model: { name: "q2", experts: "low-bit expe
     { role: "hot", state: "building", drive: "internal drive", bytes: 1e10, budget_bytes: 4e10, progress: { done_bytes: 1e10, total_bytes: 4e10, seconds_left: 300 } }] } };
 run("access = null; showNow(" + JSON.stringify(nowStatus) + ")");
 const health = element("health").innerHTML;
-check(/data-m="warn"[^>]*><\/i><span class="label">Memory/.test(health) && /your limit/.test(health) && /held to 24\.0 GB/.test(health)
-  && /data-hact="use-limit" data-value="25\.5GB">Use 25\.5 GB/.test(health) && !/origami config set/.test(health), "Health shows the limit in force, that macOS cut it, and the measured limit one press away");
-// In automatic mode too: a cut shows, with its reason and how long ago.
-const cutAuto = JSON.parse(JSON.stringify(nowStatus));
-Object.assign(cutAuto.memory, { budget_mode: "automatic", last_cut: { reason: "the system swap counter increased", at: new Date(Date.now() - 300e3).toISOString() } });
-run("showNow(" + JSON.stringify(cutAuto) + ")");
-check(/data-m="warn"[^>]*><\/i><span class="label">Memory/.test(element("health").innerHTML) && /held to 24\.0 GB for now \(the system swap counter increased, 5 min ago\)/.test(element("health").innerHTML),
-  "an automatic-mode cut shows on the Memory line with its reason and age");
+// Health > Memory in plain words: each state in Tests/Fixtures/status/memory-states.json (built from a 3.1.5 server's
+// own fields and the shapes the code emits) shows its title, its sentences and its buttons exactly; a `last_cut.at` of
+// "-22m" is that long before now.
+{
+  const states = JSON.parse(readFileSync(new URL("Fixtures/status/memory-states.json", import.meta.url), "utf8"));
+  const kept = run("JSON.stringify(dashboard)");
+  const strip = (x) => x.replace(/<[^>]+>/g, "").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  for (const st of states) {
+    const status = { ...JSON.parse(JSON.stringify(nowStatus)), memory: JSON.parse(JSON.stringify(st.status.memory)), memory_learned: st.status.memory_learned };
+    const cut = status.memory.last_cut;
+    if (cut && /^-\d+m$/.test(cut.at)) cut.at = new Date(Date.now() - parseInt(cut.at.slice(1), 10) * 60e3 - 20e3).toISOString();
+    run("dashboard = { ...(dashboard || {}), saved_settings: " + JSON.stringify(st.saved_settings) + " }; job = " + JSON.stringify(st.job) + "; showNow(" + JSON.stringify(status) + ")");
+    const h = element("health").innerHTML, row = /data-m="(\w+)"[^>]*><\/i><span class="label">Memory<\/span><div>([\s\S]*?)<\/div><div class="hact">([\s\S]*?)<\/div><\/div>/.exec(h);
+    const [title, sub] = row ? row[2].split('<span class="sub">') : ["", ""];
+    const got = row ? { mark: row[1], title: strip(title), text: strip(sub || ""), buttons: [...row[3].matchAll(/>([^<>]+)<\/button>/g)].map((x) => x[1]) } : null;
+    check(!!st.words && JSON.stringify(got) === JSON.stringify(st.words), "Health > Memory, " + st.state + (st.words && JSON.stringify(got) === JSON.stringify(st.words) ? "" : ": " + JSON.stringify(got)));
+  }
+  run("dashboard = " + kept + "; job = null");
+  const legend = element("flow-mem").innerHTML;
+  check(/Origami uses/.test(legend) && /may still grow by/.test(legend) && /left to macOS and other apps/.test(legend) && !/room in its limit/.test(legend), "the memory bar's legend says what Origami uses, what it may still grow by and what is left to macOS and other apps");
+}
 run("showNow(" + JSON.stringify(nowStatus) + ")");
 run('live({ status: "loading", model: "first", loading: { seconds: 42, line: "reading the dense weights" } })');
 check(/Loading the model · 42 s · reading the dense weights/.test(element("live-text").textContent), "loading shows its seconds and the model's last line in the header");
@@ -958,7 +977,7 @@ run("showNow(" + JSON.stringify(nowStatus) + ")");
 check(/data-b="differs"[^>]*><b>Low-bit experts<\/b> · replies differ from exact/.test(element("badges").innerHTML) && !/Exact/.test(element("badges").innerHTML),
   "a low-bit variant says its replies differ from exact, beside the model's name");
 check(/First word<\/dt><dd>12\.0/.test(element("figures").innerHTML) && /Prompt reused<\/dt><dd>25/.test(element("figures").innerHTML) && /reading the prompt 10\.0 s/.test(element("flow-time").innerHTML)
-  && /from the hot copy 30%/.test(element("flow-reads").innerHTML) && /Origami 16\.0 GB/.test(element("flow-mem").innerHTML), "Now shows the first word, the reuse, and where time, reads and memory went");
+  && /from the hot copy 30%/.test(element("flow-reads").innerHTML) && /Origami uses 16\.0 GB/.test(element("flow-mem").innerHTML), "Now shows the first word, the reuse, and where time, reads and memory went");
 run('showNow({ status: "stopped" })');
 check(element("health").innerHTML === "" && element("health-block").hidden && element("figures").innerHTML === "" && element("badges").innerHTML === "", "stopped, Now keeps none of the last model's numbers");
 // The measured limit is saved as its advice names it, after a confirm, then the model reloads.
@@ -1076,7 +1095,7 @@ searching.memory.budget_mode = "explicit";
 run('dashboard = { ...(dashboard || {}), reload_required: true }; initial = current(); modelChoice = modelInitial');
 run('showJob(' + JSON.stringify({ kind: "tune", title: "Finding the fastest memory limit", state: "running", stage: "Loading at 21.0GB", lines: [], seconds: 5, started: 77 }) + ')');
 run("showNow(" + JSON.stringify(searching) + "); gate()");
-check(element("savebar").hidden && /a limit under test/.test(element("health").innerHTML) && !/data-hact="auto-measure"/.test(element("health").innerHTML)
+check(element("savebar").hidden && /A memory search is running/.test(element("health").innerHTML) && !/data-hact="auto-measure"/.test(element("health").innerHTML)
   && /Loading at 21\.0 GB/.test(element("job-stage").textContent), "a memory search shows its limit as under test, in the page's GB, and no reload bar");
 run('showJob(null); gate()');
 check(!element("savebar").hidden && !element("reload-saved").hidden && element("save").hidden && element("apply").hidden, "a saved draft shows Reload alone");
@@ -1228,10 +1247,10 @@ check(element("notice-title").textContent === "The model did not start", "a new 
     check(got === c.verdict, "slow reason, " + c.rule + (got === c.verdict ? "" : ": " + got));
   }
   const html = run("whyHtml(" + JSON.stringify(cases[0].request) + ", {})");
-  check(/First word 31\.0 s<\/b> · 6,100 prompt tokens read, 2,000 restored \(8,100 wanted\)/.test(html)
-    && /Writing 10\.0 s/.test(html) && /data-slow="">Slow because: 6,100 prompt tokens/.test(html), "the breakdown names the prompt read, the restore's reason and the verdict");
+  check(/First word 31\.0 s<\/b> · 6,100 prompt tokens read, 2,000 reused from a saved copy \(8,100 could have been reused\)/.test(html)
+    && /Writing 10\.0 s/.test(html) && /data-slow="">Slower than usual: 6,100 tokens of the prompt had to be read again because there was too little free disk space/.test(html), "the breakdown names the prompt read, the restore's reason and the verdict");
   const calm = run("whyHtml(" + JSON.stringify(cases[cases.length - 1].request) + ", {})");
-  check(/GPU 8\.0 s · waiting on the model&#39;s drive 1\.0 s/.test(calm) && /\(1,950 wanted: its saved copy had been replaced by newer ones\)/.test(calm) && /<p class="verdict">Nothing unusual<\/p>/.test(calm), "an ordinary request: GPU, waits, and nothing unusual" + (/Nothing unusual/.test(calm) ? "" : ": " + calm));
+  check(/GPU 8\.0 s · waiting on the model&#39;s drive 1\.0 s/.test(calm) && /\(1,950 could have been reused, but its saved copy had been replaced by newer conversations\)/.test(calm) && /<p class="verdict">Nothing unusual<\/p>/.test(calm), "an ordinary request: GPU, waits, and nothing unusual" + (/Nothing unusual/.test(calm) ? "" : ": " + calm));
 }
 
 // Slowed by: the notice at the top of Now shows the status's list (each fixture case's `slowed_by`, the lists the engine's
@@ -1246,13 +1265,20 @@ check(element("notice-title").textContent === "The model did not start", "a new 
   check(!element("slowed").hidden && /^Reading a 50,392-token prompt/.test(element("live-text").textContent) && items.length === order.length && order.length >= 3
     && items.every((line, i) => line.startsWith("<b>" + run("esc(" + JSON.stringify(order[i].text) + ")") + ".</b> ")),
     "while a 50,392-token prompt is read, the notice lists each condition in the status's order, what first" + (items.length ? "" : ": " + html));
-  check(cases.every((c) => { run("live(" + JSON.stringify({ ...reading, slowed_by: c.slowed_by }) + ")"); return element("slowed").hidden === !c.slowed_by.length && element("slowed-list").innerHTML.split("<li>").length - 1 === c.slowed_by.length; }),
-    "every fixture case shows one line per condition, and none when its list is empty");
+  check(cases.every((c) => { run("live(" + JSON.stringify({ ...reading, slowed_by: c.slowed_by }) + ")"); return !element("slowed").hidden && (c.slowed_by.length ? element("slowed-list").innerHTML.split("<li>").length - 1 === c.slowed_by.length && element("slowed").dataset.calm === "" : /Nothing is slowing Origami down right now/.test(element("slowed-list").innerHTML) && element("slowed").dataset.calm === "1"); }),
+    "every fixture case shows one line per condition, and the quiet line when its list is empty");
   const drive = cases.find((c) => /drive reads slowly/.test(c.rule)).slowed_by;
   run("live(" + JSON.stringify({ status: "ready", requests: { recent: [] }, slowed_by: drive }) + ")");
   check(/run <code>origami refresh<\/code>: it rewrites/.test(element("slowed-list").innerHTML) && !element("slowed").hidden, "a fix's command shows as code, also when idle");
   run('live({ status: "ready", requests: { recent: [] }, slowed_by: [] })');
-  check(element("slowed").hidden && element("slowed-list").innerHTML === "", "nothing slowing it: no notice");
+  check(!element("slowed").hidden && element("slowed").dataset.calm === "1" && /Nothing is slowing Origami down right now/.test(element("slowed-list").innerHTML), "nothing slowing a loaded model: the quiet line, not an empty page");
+  run('live({ status: "stopped", slowed_by: [] })');
+  check(element("slowed").hidden, "no model loaded: no notice");
+  // A page left open across an upgrade reloads once, and not over unsaved settings.
+  run('versionSeen("9.9.8"); versionSeen("9.9.8")');
+  const before = context.location.reloads;
+  run('versionSeen("9.9.8"); versionSeen("9.9.9"); versionSeen("9.9.9")');
+  check(context.location.reloads - before === 1, "the page reloads once when the server's version changes: " + (context.location.reloads - before));
 }
 
 // The copy control lists every model's copies on a shared drive, each with its own keep box, and the swap backlog and the
