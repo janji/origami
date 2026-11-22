@@ -32,8 +32,8 @@ links to.
 
 Which Macs:
 
-- Apple Silicon, macOS 15 or later. Origami has run on two Macs so far: an M2 Pro with 32 GB on macOS 26 and an M1
-  MacBook Air with 16 GB on macOS 27 ([which others should work](../README.md#will-it-run-on-my-mac)).
+- Apple Silicon, macOS 15 or later. Origami has run on three Macs so far: an M2 Pro with 32 GB on macOS 26, an
+  M1 MacBook Air with 16 GB on macOS 27 and, at a user's, an M4 Max with 128 GB ([which others should work](../README.md#will-it-run-on-my-mac)).
 - 24 GB of memory or more, 32 GB recommended. `origami setup` checks the Mac first: under 16 GB it refuses, and
   under 24 GB it warns that only an 8K context fits.
 - A fast SSD with room for the model: about 110 GB for Qwen, 199.7 GB for GLM-5.3-Flash and 500.7 GB for

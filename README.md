@@ -59,16 +59,18 @@ license ([below](#model-licenses)).
 
 ## Will it run on my Mac?
 
-Origami has been run on two Macs so far: an M2 Pro with 32 GB of memory on macOS 26, and an M1 MacBook Air with
-16 GB on macOS 27.
+Origami has been run on three Macs so far: an M2 Pro with 32 GB of memory on macOS 26, an M1 MacBook Air with 16 GB on
+macOS 27, and a Mac Studio M4 Max with 128 GB that a user built it on and reported
+([issue #1](https://github.com/janji/origami/issues/1)).
 
 | Mac | Status |
 |---|---|
 | M2 Pro, 32 GB | Tested. |
+| M4 Max, 128 GB | Tested by a user: every one of Qwen's experts stays in memory, about 30 tok/s once warm ([its numbers](#on-an-m4-max-with-128-gb)). |
 | Other M2, M3 and M4 Macs, 24 GB or more | Expected to work (same kernels). Never run. |
 | M1 family, 24 GB or more | Expected to work, with slower prompt reading (no bfloat16 matrix units). Its kernels, forced on the M2 Pro, gave the same replies with prompt reading about 10% slower. Run on an M1 with 16 GB only (last row). |
 | M5 family, 24 GB or more | Expected to work. Long prompts use the M5's matrix units, so replies may differ slightly from other Macs. Never run. |
-| 64 GB or more | Expected to be faster: more experts stay in memory (all of Qwen's from 128 GB). Planned by simulation, never run. |
+| 64 GB or more | Faster: more experts stay in memory (all of Qwen's from 128 GB, as the M4 Max showed). 64 and 96 GB are planned by simulation, never run. |
 | 16 GB | Not recommended: the always-resident part of Qwen needs about 11 GB, so only an 8K context fits; `origami setup` warns. Under 16 GB it refuses. Tested on an M1 MacBook Air: it works and is slow ([its numbers](#on-a-16-gb-m1-macbook-air)). |
 
 **If you run Origami on any other Mac, please help:** start the server, run `origami report`, and paste its output
@@ -102,6 +104,9 @@ sudo mkdir -p /usr/local/bin && sudo ln -sf "$PWD/.build/release/origami" /usr/l
 The program is `.build/release/origami`; the link puts it on your `PATH` while it stays beside its
 `swift-transformers_Hub.bundle` (copy the binary elsewhere only together with that bundle), and a rebuild updates
 it.
+
+If the build stops with `Could not initialize build system` (reported with the Command Line Tools 27.2), build with
+`swift build -c release --build-system native` instead.
 
 ## Run
 
@@ -217,6 +222,24 @@ the dashboard and the logs say so. Same Mac ([docs/models.md](docs/models.md#low
 | GLM with lte-ai's Strata Q2_K/Q3_K experts file, 20 GB hot copy | 1.73–1.88 tok/s; 39 s to the first token | 12 of 14 (10) | 92% |
 
 DeepSeek variants are not measured yet.
+
+### On an M4 Max with 128 GB
+
+A user's report ([issue #1](https://github.com/janji/origami/issues/1)), not measured by us: a Mac Studio with
+Origami 3.1.3 built there (Swift 6.4.2, macOS 27.2), Qwen3.8-Flash-Next converted from Unsloth's UD-Q4_K_XL GGUF to
+Origami's 4-bit format, on a Thunderbolt SSD that reads 3.3–4.4 GB/s, an 8K context, exact mode. Every expert stays in
+memory once it is read (24,576 of them, 68 GB), so the drive matters only until then.
+
+| Request | First word | Speed |
+|---|---|---|
+| First reply after a start | 7.3 s | 14.7 tok/s writing |
+| Short question (23 tokens) | 1.0 s | 16.9–30.7 tok/s writing |
+| Story (31 tokens) | 0.1 s with its prompt reused | 29.9–36.8 tok/s writing |
+| 4,650-token document | 11.2–13.6 s | 343–416 tok/s reading |
+
+The lower figures are from the first `origami bench` after the start, the higher ones from a later run. A warm-up of
+four replies wrote 10, 18, 27 and 28 tok/s as the experts came into memory, and `origami tune --memory` wrote
+29.6–31.6 tok/s on its repeats.
 
 ### Next to Strata, on the same file
 

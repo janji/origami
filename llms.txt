@@ -3,8 +3,8 @@
 > A local server for large mixture-of-experts models on Apple Silicon Macs: Qwen3.8-Flash-Next (the main, most
 > tested path; text and images), GLM-5.3-Flash and DeepSeek-V4.1-Flash (text only). The model stays on disk; Origami
 > keeps the always-used weights in memory and reads the experts each token needs from the SSD. One native Swift/Metal
-> binary (`origami`) that speaks the OpenAI, Anthropic and Ollama APIs. Tested on two Macs so far: an M2 Pro with
-> 32 GB on macOS 26 and an M1 MacBook Air with 16 GB on macOS 27 (slow). Needs macOS 15+ and 24 GB of memory or more (`origami setup` refuses under 16 GB).
+> binary (`origami`) that speaks the OpenAI, Anthropic and Ollama APIs. Tested on three Macs so far: an M2 Pro with
+> 32 GB on macOS 26, an M1 MacBook Air with 16 GB on macOS 27 (slow) and a user's M4 Max with 128 GB (about 30 tok/s). Needs macOS 15+ and 24 GB of memory or more (`origami setup` refuses under 16 GB).
 
 ## Docs
 
