@@ -1274,6 +1274,26 @@ check(element("notice-title").textContent === "The model did not start", "a new 
   check(!element("slowed").hidden && element("slowed").dataset.calm === "1" && /Nothing is slowing Origami down right now/.test(element("slowed-list").innerHTML), "nothing slowing a loaded model: the quiet line, not an empty page");
   run('live({ status: "stopped", slowed_by: [] })');
   check(element("slowed").hidden, "no model loaded: no notice");
+  // The quiet line does not contradict a last reply that waited on a drive: it says the delay was that reply's own.
+  const waited = JSON.parse(readFileSync(new URL("Fixtures/status/slow-reasons.json", import.meta.url), "utf8")).find((c) => /^GLM or DeepSeek waiting on the model/.test(c.rule)).request;
+  run("live(" + JSON.stringify({ status: "ready", requests: { recent: [waited] }, slowed_by: [] }) + ")");
+  check(/Nothing is slowing Origami down right now\. The last reply was slower for a reason of its own/.test(element("slowed-list").innerHTML), "the quiet line owns up to a slow last reply");
+  // The headline speed: the last replies' tokens over their writing time (two short slow replies do not halve it), the
+  // reply being written while there is one, and warm-up named beside it.
+  const reply = (tokens, tps) => ({ decode_tps: tps, completion_tokens: tokens, mode: "exact" });
+  const speedOf = (extra) => { run("base = null; status = " + JSON.stringify({ status: "ready", settings: { quality: { value: "exact" } }, slowed_by: [], ...extra, requests: { recent: [reply(120, 5), reply(150, 6), reply(1500, 11)], ...(extra.requests || {}) } }) + "; showSpeed()"); return element("speed").textContent + " | " + element("basis").textContent; };
+  const idle = speedOf({}), warm = speedOf({ slowed_by: [{ id: "warming_up", text: "", fix: "" }] }), busy = speedOf({ requests: { current: { phase: "decode", completion_tokens: 182, decode_tps: 10.3 } } });
+  check(idle === "9.5 | Writing speed · average of the last 3 replies" && warm === "9.5 | Writing speed · average of the last 3 replies · warming up, so slower than usual at first"
+    && busy === "10.3 | Writing speed right now · the last 3 replies averaged 9.5", "the headline speed weighs replies by their tokens, follows the reply being written and names warm-up: " + [idle, warm, busy].join(" / "));
+  // Health > Memory says first whether the limit is what slows replies: not while warming up, yes when replies wait
+  // on drives at full memory (the server's finding and its fix), else that it is enough.
+  const calm = { ...JSON.parse(JSON.stringify(nowStatus)), memory: { cap_bytes: 22.6e9, budget_bytes: 22.6e9, footprint_bytes: 18.3e9, budget_mode: "explicit" }, memory_learned: {} };
+  const memoryLine = (slowed) => { run("showNow(" + JSON.stringify({ ...calm, slowed_by: slowed }) + ")"); return element("health").innerHTML; };
+  const full = cases.find((c) => /more of the model than fits/.test(c.rule)).slowed_by.find((c) => c.id === "memory_full");
+  check(/warming up, so the limit is not what slows it now/.test(memoryLine([{ id: "warming_up", text: "", fix: "" }]))
+    && /The limit is holding Origami back: the last replies spent about \d+% of their writing time[^<]*\. Nothing to change: /.test(memoryLine([full]))
+    && /The limit is enough right now: replies hardly wait for the drive\./.test(memoryLine([])), "Health > Memory says whether the limit holds Origami back");
+  run("showNow(" + JSON.stringify(nowStatus) + ")");
   // A page left open across an upgrade reloads once, and not over unsaved settings.
   run('versionSeen("9.9.8"); versionSeen("9.9.8")');
   const before = context.location.reloads;

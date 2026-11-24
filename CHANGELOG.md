@@ -4,6 +4,25 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.7.1 (2026-11-24)
+
+**Replies:** unchanged.
+
+The Now tab answers "is it slow, why, and should I do anything" by itself:
+
+- **The big number is the writing speed a person means.** While a reply is written it is that reply's speed, the one
+  the header shows. Otherwise it is all the tokens of the last five replies over the time they took to write, so two
+  short tool calls no longer halve it (it was the median of the replies). Its label says which.
+- **Slowed by names two more causes**, in `origami status` and `slowed_by` too (`warming_up`, `memory_full`):
+  Qwen just loaded and warming up, over after the first reply (measured: its memory for the model's parts is full
+  after one reply); and replies that spent a fifth or more of their writing time waiting for a drive at full memory,
+  which means the conversation uses more of the model than fits. That line says whether anything can be done: nothing
+  when the limit is already the most this Mac keeps, else what a higher limit costs macOS and other apps.
+- **Health › Memory starts with a verdict**: the limit is not what slows it while warming up; the limit holds Origami
+  back, and whether to change it; or the limit is enough right now.
+- **"Nothing is slowing Origami down" no longer contradicts a slow last reply**: it adds that the reply was slower
+  for a reason of its own and points to Last request.
+
 ## 3.1.7 (2026-11-24)
 
 **Replies:** unchanged.

@@ -19,7 +19,7 @@ func slowedByRules() throws {
     guard cases.count >= 20, wrong.isEmpty else { throw EngineError("slowed by: " + wrong.joined(separator: "\n")) }
     let missing = SlowedBy.ids.filter { !seen.contains($0) }
     guard missing.isEmpty else { throw EngineError("slowed by: no fixture case for \(missing)") }
-    // Every field a rule reads is in some case; and in the live case (a 3.1.5 server's status, trimmed and anonymised,
+    // Every field a rule reads is in some case; and in the live case (a 3.1.7 server's status, trimmed and anonymised,
     // with what the front adds), every object a rule reads from holds the field it reads, unless marked optional (`?`).
     let statuses = cases.map { $0["status"] ?? [:] }
     let real = cases.first { ($0["rule"] as? String ?? "").hasPrefix("the live ") }?["status"]

@@ -7,7 +7,9 @@
 # input named in docs/switches.md. The script checks that need a GPU throughout are skipped there as steps (`GPU`).
 name: CI
 on:
+  # branches only: a release tag points at a commit that has already run
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 # GitHub's named bash shell runs `bash -eo pipefail`: a build piped through `tee` fails its step when the build fails.

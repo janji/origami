@@ -43,6 +43,7 @@ public enum SlowedBy {
 
     private static let source = "experts_from.sources[]."
     private static let advice = "memory_learned.limit_advice."
+    private static let waits = ["requests.recent[].stage_seconds.generation", "requests.recent[].phase_counters"]
     static let rules: [(id: String, reads: [String], test: @Sendable ([String: Any]) -> Found?)] = [
         ("drive_gone", ["status"], driveGone),
         ("job", ["job.state", "job.title", "job.kind", "job.started"], job),
@@ -58,6 +59,15 @@ public enum SlowedBy {
         (
             "memory_limit_not_kept", ["memory.budget_mode", advice + "limit_bytes", advice + "suggested_bytes", advice + "cuts?"],
             limitNotKept
+        ),
+        ("warming_up", ["expert_cache.limit_bytes", "requests.completed"], warmingUp),
+        (
+            "memory_full",
+            [
+                "requests.completed", "memory.cap_bytes", advice + "applied", advice + "limit_bytes", advice + "suggested_bytes",
+                "mac.memory_bytes",
+            ]
+                + waits, memoryFull
         ),
         (
             "model_drive_slow",
@@ -177,6 +187,57 @@ public enum SlowedBy {
             "Your memory limit of \(size(limit)) is more than this Mac keeps free\(cuts): macOS takes it back, and the experts are read again",
             "Set it to \(size(suggested)) (Use \(size(suggested)) on the Memory line, or `origami config set memory_limit \(value)`), or remove it to let Origami choose.",
             nil
+        )
+    }
+
+    /// The share of their writing time the last replies (up to five) waited for drives to read parts of the model
+    /// (`SlowReason.parts`); nil before any timed reply.
+    static func driveWait(_ s: [String: Any]) -> Double? {
+        let recent = ((s["requests"] as? [String: Any])?["recent"] as? [[String: Any]] ?? []).map(SlowReason.parts).filter { $0.write > 0 }
+        let rows = recent.suffix(5)
+        let write = rows.reduce(0) { $0 + $1.write }
+        guard write > 0 else { return nil }
+        return min(1, rows.reduce(0) { $0 + $1.waits.reduce(0) { $0 + $1.seconds } } / write)
+    }
+
+    private static func finished(_ s: [String: Any]) -> Double? { number((s["requests"] as? [String: Any])?["completed"]) }
+
+    /// Qwen just loaded and no reply finished yet: its memory for the model's parts starts empty and fills while the
+    /// first reply is written (measured: full after one reply). GLM and DeepSeek fill theirs while loading and report
+    /// no `limit_bytes`.
+    static func warmingUp(_ s: [String: Any]) -> Found? {
+        guard (s["expert_cache"] as? [String: Any])?["limit_bytes"] != nil, finished(s) == 0 else { return nil }
+        return (
+            "Origami has just loaded the model and is warming up: the first reply starts later and is written slower,"
+                + " while the parts of the model it needs are read into memory",
+            "Nothing to do: it is over after the first reply, when this line is gone.", nil
+        )
+    }
+
+    /// Warmed up, at its full memory, and the last replies still waited on drives for a fifth of their writing time or
+    /// more: the conversation uses more of the model than the memory holds. Whether this Mac can keep more.
+    static func memoryFull(_ s: [String: Any]) -> Found? {
+        guard finished(s) ?? 1 > 0, !memoryShort(s), let wait = driveWait(s), wait >= 0.2, let m = s["memory"] as? [String: Any],
+            let may = number(m["cap_bytes"])
+        else { return nil }
+        let text =
+            "The last replies spent about \(percent(wait)) of their writing time waiting for the drive:"
+            + " this conversation uses more of the model than fits in Origami's memory"
+        let advice = (s["memory_learned"] as? [String: Any])?["limit_advice"] as? [String: Any]
+        let most = advice?["applied"] as? Bool == true || limitAdvice(s).map { $0.1 <= $0.0 + 5e8 } == true
+        if most {
+            return (
+                text,
+                "Nothing to change: \(size(may)) is the most this Mac kept for Origami without macOS taking memory back, which is slower still."
+                    + " It differs from one conversation to the next. Quitting other apps and measuring again (Memory line) may find more.",
+                nil
+            )
+        }
+        let left = number((s["mac"] as? [String: Any])?["memory_bytes"]).map { " (they have \(size(max(0, $0 - may))) now)" } ?? ""
+        return (
+            text,
+            "A higher memory limit helps only while macOS and other apps can spare the memory\(left): when they run short macOS takes it"
+                + " back, and replies get slower. Measure on the Memory line finds the most this Mac keeps.", nil
         )
     }
 
@@ -387,6 +448,7 @@ public enum SlowedBy {
 
     // MARK: helpers
 
+    static func percent(_ share: Double) -> String { "\(Int((100 * share).rounded()))%" }
     static func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue }
     static func amount(_ bytes: Double) -> String { DriveReadHistory.amount(bytes) }
     static func size(_ bytes: Double) -> String { OrigamiPlan.gigabytes(UInt64(max(0, bytes))) }

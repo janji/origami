@@ -25,6 +25,9 @@ waits for it, and a banner says so; the same banner says when conversation saves
     condition, what and then the fix, the costliest first and settings advice last. Memory 1 GB or more under what Origami may
     use says why (cut by macOS, started at the budget learned from this Mac's memory use, or started small), names the three
     apps that hold the most and that it grows back by itself as memory frees;
+    just after Qwen loads, that it is warming up and that the first reply ends it; replies that waited on a drive for a
+    fifth of their writing time or more at full memory, that the conversation uses more of the model than fits and
+    whether this Mac can keep more;
     the others are a drive reading slowly or due for `origami refresh`, gone or not allowed, the hot copy building, without room or failed, heat, Low Power Mode,
     conversation saves paused, a prompt read again (and why), a job, waiting requests, a memory limit this Mac does not
     keep or one under the measured limit, and never tuned. `origami status` prints the same lines; apps read
@@ -32,7 +35,8 @@ waits for it, and a banner says so; the same banner says when conversation saves
   - On a first run: the models Origami found on this Mac (**Add**), the download it is made for, or your own file.
     A model added but not loaded: **Load**. Stopped: **Start**. A model that did not start: why (a memory limit of
     yours that is too small is named), **Try again** and **Change the setup**.
-  - The speed (median of the last replies, one mark per reply), the first-word time, how fast prompts are read and
+  - The speed (the reply being written; otherwise all the tokens of the last five replies over the time they took to
+    write, one mark per reply), the first-word time, how fast prompts are read and
     how much of them was reused. **Measure** sends a short test reply.
   - Three bars: where the last request's time went (waiting, setting up, reading the prompt, writing, saving), where
     the experts were read from (memory, hot copy, the model drive), and this Mac's memory ("Origami uses 14.9 GB · may

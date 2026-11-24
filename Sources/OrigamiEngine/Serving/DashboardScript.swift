@@ -399,20 +399,26 @@ enum DashboardScript {
             lastPlan = plan; readout(plan); drawDials(plan); gate();
           } catch (error) { if (seq === planSeq) { $("fits").dataset.state = "warn"; $("fits").textContent = "Could not reach Origami."; } }
         }
-        // This Mac's own speed: the middle of its last replies at the current setup. Nothing here is predicted.
+        // This Mac's own speed: the tokens its last replies wrote over the time they took to write, at the current setup (so
+        // a short reply, which writes slower, weighs as little as it is). Nothing here is predicted.
         function nowSpeed() {
           // The level replies run at: the plan's, else the server's setting (a level name; a custom mix counts every reply).
           const setting = status && status.settings && status.settings.quality ? status.settings.quality.value : null;
           const quality = base ? base.settings.quality : LEVELS.some((l) => l[0] === setting) ? setting : null;
-          const values = ((status && status.requests && status.requests.recent) || []).filter((r) => measured(r) && (!quality || (r.mode || "exact") === quality)).slice(-5).map((r) => r.decode_tps).sort((a, b) => a - b);
-          const n = values.length, middle = n % 2 ? values[(n - 1) / 2] : (values[n / 2 - 1] + values[n / 2]) / 2;
-          return n ? { tps: middle, count: n } : null;
+          const values = ((status && status.requests && status.requests.recent) || []).filter((r) => measured(r) && (!quality || (r.mode || "exact") === quality)).slice(-5);
+          const n = values.length, tokens = values.reduce((sum, r) => sum + r.completion_tokens, 0), time = values.reduce((sum, r) => sum + r.completion_tokens / r.decode_tps, 0);
+          return n ? { tps: tokens / time, count: n } : null;
         }
         function showSpeed() {
-          const now = status && status.status === "ready" && !reloading ? nowSpeed() : null;
-          $("speed").textContent = now ? one.format(now.tps) : status && status.status === "stopped" ? "Stopped" : status && status.status === "ready" && !reloading ? "No replies yet" : "—";
-          $("speed-line").classList.toggle("none", !now);
-          if (!measuring) $("basis").textContent = now ? "Median · " + now.count + (now.count === 1 ? " reply" : " replies") : status && status.status === "ready" && !reloading ? "A test reply takes a few seconds:" : "No current measurement";
+          const up = status && status.status === "ready" && !reloading, now = up ? nowSpeed() : null, replies = now ? "last " + (now.count === 1 ? "reply" : now.count + " replies") : "";
+          // While a reply is written the headline is its speed, as the header says it; else the last replies' own.
+          const current = up && status.requests && status.requests.current, writing = current && current.completion_tokens >= 16 && current.decode_tps > 0 ? current.decode_tps : 0;
+          const warming = up && (status.slowed_by || []).some((c) => c.id === "warming_up");
+          $("speed-line").title = "Tokens written per second. While a reply is written: that reply, right now. Otherwise: all the tokens of the last replies over the time they took to write. Short replies usually write slower than long ones.";
+          $("speed").textContent = writing ? one.format(writing) : now ? one.format(now.tps) : status && status.status === "stopped" ? "Stopped" : status && status.status === "ready" && !reloading ? "No replies yet" : "—";
+          $("speed-line").classList.toggle("none", !now && !writing);
+          if (!measuring) $("basis").textContent = writing ? "Writing speed right now" + (now ? " · the " + replies + " averaged " + one.format(now.tps) : "") + (warming ? " · warming up" : "")
+            : now ? "Writing speed · average of the " + replies + (warming ? " · warming up, so slower than usual at first" : "") : status && status.status === "ready" && !reloading ? "A test reply takes a few seconds:" : "No current measurement";
           $("measure").textContent = "Measure";
         }
         // The self-tuner (`origami tune`, run as a job): what the running model's `tuning` says, and Tune, Re-check and Undo.
@@ -480,6 +486,14 @@ enum DashboardScript {
             : yours ? "You set this limit yourself."
             : measuredKind && a.stale ? "Origami chose this limit from this Mac's memory size, because its measurement from " + onDay(a.measured) + " no longer counts (" + staleWhy(a.stale) + ")."
             : "Origami chose this limit from this Mac's memory size, leaving room for macOS and other apps.";
+          // Whether the limit is what slows replies now, first: the server's own findings (`SlowedBy`), so the page and
+          // `origami status` cannot disagree.
+          const found = Array.isArray(s.slowed_by) ? s.slowed_by : null, full = found && found.find((c) => c.id === "memory_full");
+          const timed = ((s.requests && s.requests.recent) || []).some((r) => r.stage_seconds && r.stage_seconds.generation > 0);
+          if (testing || lower || !found) { }
+          else if (found.some((c) => c.id === "warming_up")) w.lines.push("Origami has just loaded the model and is warming up, so the limit is not what slows it now. Wait for the first reply before changing it.");
+          else if (full) { if (!/^Nothing to change/.test(full.fix)) w.mark = "warn"; w.lines.push("The limit is holding Origami back: " + full.text.replace(/^The/, "the") + ". " + full.fix); }
+          else if (timed) w.lines.push("The limit is enough right now: replies hardly wait for the drive.");
           w.lines.push(w.who);
           const cutAgo = m.last_cut ? (Date.now() - new Date(m.last_cut.at).getTime()) / 1000 : Infinity;
           if (lower && m.last_cut) w.lines.push("macOS took memory back " + ago(m.last_cut.at) + " because " + cutWhy(m.last_cut.reason) + ". Origami grows back by itself once memory is free again.");
@@ -1045,7 +1059,8 @@ enum DashboardScript {
           // during a request). With a model loaded and nothing slowing it, one quiet line says so: the box is where a
           // person looks for it either way.
           const slowing = (Array.isArray(s.slowed_by) ? s.slowed_by : []).map((c) => "<li><b>" + esc(c.text) + ".</b> " + esc(c.fix).replace(/`([^`]+)`/g, "<code>$1</code>") + "</li>").join("");
-          const slowed = slowing || (s.status === "ready" ? "<li>Nothing is slowing Origami down right now.</li>" : "");
+          const lastTimed = ((s.requests && s.requests.recent) || []).filter(timeParts).slice(-1)[0], oneOff = lastTimed && slowReason(lastTimed, s) !== "nothing unusual";
+          const slowed = slowing || (s.status === "ready" ? "<li>Nothing is slowing Origami down right now." + (oneOff ? " The last reply was slower for a reason of its own: see Last request below." : "") + "</li>" : "");
           $("slowed").hidden = !slowed; $("slowed").dataset.calm = slowing ? "" : "1";
           if ($("slowed-list").innerHTML !== slowed) $("slowed-list").innerHTML = slowed;
           $("chip").dataset.state = state; $("chip-text").textContent = chip; $("page").dataset.state = state;
