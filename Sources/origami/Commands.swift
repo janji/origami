@@ -1245,6 +1245,12 @@ enum Commands {
         ]
     }
 
+    /// The memory a start now could count on besides the free memory: the loaded model's own, which a restart gets
+    /// back (without it the plan calls the Mac full while Origami itself holds the memory); this process's otherwise.
+    static func loadedFootprint(_ live: [String: Any]) -> UInt64 {
+        ((live["memory"] as? [String: Any])?["footprint_bytes"] as? NSNumber)?.uint64Value ?? processFootprintBytes()
+    }
+
     /// What runs now, from a server's `/v1/status` (`live`): the loaded model and its queue, memory now against its
     /// target with the cuts since load, the expert cache's hits and where misses were read, each copy's state, and the
     /// last request's prompt restore. None when no server answers.
@@ -1502,7 +1508,7 @@ enum Commands {
                 let curve = HotCopyCurve(
                     uses: counts.uses, order: RoutingProfile.hotCopyChoice(counts, budget: .max, record: model.expertRecordBytes),
                     size: { UInt64(((model.hotCopyRecordBytes($0) ?? 0) + 16383) / 16384 * 16384) })
-                let sizes = Set([UInt64(copy?.bytes ?? 0), 20_000_000_000, 40_000_000_000, 80_000_000_000]).filter { $0 > 0 }.sorted()
+                let sizes = HotCopyCurve.quoted(copy: UInt64(copy?.bytes ?? 0))
                 let shares = sizes.map { ["bytes": $0, "share": curve.coverage($0)] as [String: Any] }
                 lines.append(
                     "          a copy of "
@@ -1526,7 +1532,7 @@ enum Commands {
                 try OrigamiPlan.make(
                     model: model, host: $0, context: settings.context, memoryLimit: settings.memoryLimit,
                     expertMemory: settings.expertMemory,
-                    storage: storage, promptCache: settings.promptCacheRoot)
+                    storage: storage, promptCache: settings.promptCacheRoot, footprintNow: loadedFootprint(live))
             }
         } catch {
             plan = nil

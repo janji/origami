@@ -84,6 +84,7 @@ check 0 "port = 1   (set by an ORIGAMI_ environment variable)" "$bin" config
 "$bin" stop --help | grep -q -- "--context" && { echo "FAIL  stop --help lists serve's options"; failures=$((failures + 1)); }
 check 2 "stop does not take --context" "$bin" stop --context 8k
 check 1 "No model to refresh" "$bin" refresh --model /nonexistent/model --yes
+check 1 "No model to refresh" "$bin" refresh --copy --model /nonexistent/model --yes
 check 0 "Usage: origami serve" "$bin" help serve
 check 0 "--single-model" "$bin" help serve
 check 0 "(Qwen3.8-Flash-Next: faster, fastest; GLM-5.3-Flash: faster; DeepSeek-V4.1-Flash: dynamic-fastest)" "$bin" help serve

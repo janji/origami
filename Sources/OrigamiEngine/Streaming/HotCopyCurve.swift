@@ -35,6 +35,12 @@ package struct HotCopyCurve: Sendable {
             size: { HotCopy.size($0, source: source) ?? 0 })
     }
 
+    /// The sizes `origami status` quotes coverage for: the copy's own, and the round ones that do not print the same.
+    package static func quoted(copy: UInt64) -> [UInt64] {
+        let round: [UInt64] = [20_000_000_000, 40_000_000_000, 80_000_000_000]
+        return ([copy] + round.filter { OrigamiPlan.gigabytes($0) != OrigamiPlan.gigabytes(copy) }).filter { $0 > 0 }.sorted()
+    }
+
     /// The share (0...1) of counted uses a copy of `budget` bytes holds; 0 with none counted.
     package func coverage(_ budget: UInt64) -> Double {
         guard counted > 0 else { return 0 }

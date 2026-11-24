@@ -913,6 +913,18 @@ public final class LocalHTTPServer: @unchecked Sendable {
         }
     }
 
+    /// The server log's line for a finished request: /v1/status forgets its rows when the model is unloaded.
+    package static func summary(_ row: [String: Any]) -> String {
+        func number(_ key: String) -> Double? { (row[key] as? NSNumber)?.doubleValue }
+        var text = String(
+            format: "request: %@ in %.0f s: %.0f prompt tokens (%.0f restored)", row["finish"] as? String ?? "unknown",
+            number("seconds") ?? 0, number("prompt_tokens") ?? 0, number("cached_tokens") ?? 0)
+        if let first = number("ttft_s") { text += String(format: ", first word after %.1f s", first) }
+        if let count = number("completion_tokens") { text += String(format: ", %.0f tokens written", count) }
+        if let speed = number("decode_tps") { text += String(format: " at %.1f tok/s", speed) }
+        return text
+    }
+
     /// Records a finished (or failed) request in the ring buffer.
     private func finishRequest(
         _ client: Client, _ stats: GenerationStatistics?, error: String? = nil, record: [String: Any] = [:], units: [String: String] = [:]
@@ -969,6 +981,7 @@ public final class LocalHTTPServer: @unchecked Sendable {
         completedRequests &+= 1
         if recent.count > 50 { recent.removeFirst(recent.count - 50) }
         lock.unlock()
+        configuration.log?(Self.summary(row))
         client.lifecycle.mark("service_end")
         client.lifecycle.fields(row.merging(record) { $1 })
         if configuration.recordRequestTextUnits, !units.isEmpty {

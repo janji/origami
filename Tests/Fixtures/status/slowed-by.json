@@ -74,7 +74,7 @@
     "status": {"status": "ready", "experts_from": {"sources": [{"role": "hot", "drive": "internal drive", "state": "ready", "bytes": 30000000000, "budget_bytes": 40000000000, "since_rewrite": {"high": true, "share": 0.4}}]}},
     "slowed_by": [
       {"fix": "Nothing to do: it adds the rest by itself after replies.", "id": "hot_copy_short", "since": null, "text": "The hot copy holds 30.0 GB of its 40.0 GB"},
-      {"fix": "Rebuild the copy: delete it under Models, then run `origami config unset hot_copy` and reload; it is written again on fresh blocks.", "id": "hot_copy_drive_slow", "since": null, "text": "The hot copy's drive reads it slowly: 40% of its reading time"}
+      {"fix": "Quit `origami serve` and run `origami refresh --copy`: it rewrites the copy in place, on fresh blocks.", "id": "hot_copy_drive_slow", "since": null, "text": "The hot copy's drive reads it slowly: 40% of its reading time"}
     ] },
   { "rule": "a copy on the model's own drive is no condition",
     "status": {"status": "ready", "experts_from": {"sources": [{"role": "hot", "state": "not_possible", "detail": "A copy on the model's own drive is disabled by default."}]}},

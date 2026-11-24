@@ -194,7 +194,7 @@ extension FamilySetup {
         let misses = OrigamiEngine.HotCopy.loadUses(counted.appendingPathComponent("misses.json"))
         if !uses.isEmpty || !misses.isEmpty {
             let curve = HotCopyCurve(uses: uses, misses: misses, source: sizes)
-            let candidates = Set([UInt64(copy?.bytes ?? 0), 20_000_000_000, 40_000_000_000, 80_000_000_000]).filter { $0 > 0 }.sorted()
+            let candidates = HotCopyCurve.quoted(copy: UInt64(copy?.bytes ?? 0))
             hot.more.append(
                 "a copy of "
                     + candidates.map { "\(Commands.gigabytes($0)) would cover \(Int((curve.coverage($0) * 100).rounded()))%" }

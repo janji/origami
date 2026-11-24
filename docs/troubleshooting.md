@@ -9,7 +9,7 @@
 | `origami inspect <folder or file>` | what a model folder or GGUF holds (weights, sizes, quantization) and whether Origami runs it; `--family` for GLM and DeepSeek |
 | `origami bench` | times a short question, a story and a long document against the running server |
 | `origami verify` | re-reads the expert copies and checks every expert's checksum (`--deep` also compares them with the model) |
-| `origami refresh` | rewrites the model's files in place when their drive reads them far below its own speed (below) |
+| `origami refresh` | rewrites the model's files in place when their drive reads them far below its own speed (below); `--copy` does the same for its hot copy |
 | `origami report` | prints the Mac, the memory plan, the stores and a short benchmark, ready to paste into a GitHub issue (home-folder paths shortened to `~`) |
 
 The server's log goes to the terminal or launcher that runs `origami serve`; the last 50 lines are also in
@@ -124,11 +124,16 @@ row's `since_rewrite`. `origami refresh` starts the count again.
 
 The hot copy (on the Mac's internal drive by default) is read the same way, and the internal drive cannot be
 swapped, so its reads are counted too: the dashboard's Hot copy line warns when its drive reads it slowly, or when
-it nears the amount at which it slowed down before. The copy holds nothing that is not in the model's files, so the
-cure is to write it again rather than refresh it: delete it in the dashboard's **Models** tab (that turns the copy
-off), then turn it back on with `origami config unset hot_copy` (with `--model <name>` for a model other than the default,
-or set the size you had) and reload. The server
-writes a new copy, on fresh blocks, while it serves, and its count starts again.
+it nears the amount at which it slowed down before. The cure is the same as for the model's files. Quit
+`origami serve`, then:
+
+```sh
+origami refresh --copy     # --model <name> for another model; --yes skips the question
+```
+
+It writes the copy's own bytes back where they are, flushes them, reads the copy again and compares the two SHA-256
+digests. Nothing else changes: the copy keeps its experts, the server uses it as before, and its count starts again.
+It takes about as long as reading the copy twice, needs no free space, and is safe to stop and run again.
 
 ## After upgrading from 2.x
 

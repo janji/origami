@@ -220,7 +220,7 @@ package struct DriveReadHistory: Codable, Equatable, Sendable {
         if let last = earlier.last { text += " Last time the slowdown began after about \(Self.amount(last))." }
         let cure =
             hot
-            ? "rebuild the copy (delete it in the dashboard's Models view, then `origami config unset hot_copy` and reload; the server writes it again on fresh blocks)"
+            ? "stop the server and run `origami refresh --copy`"
             : "stop the server and run `origami refresh`"
         if high && settled {
             text += " The drive reads these files slowly now: \(cure)."

@@ -736,8 +736,9 @@ acted on automatically. Check: `slow_drive_reads_share`.
 attached copy's counted since their last record to `<data_dir>/drive-reads.json`, keyed by folder (links resolved):
 bytes, busy and slow seconds since the files were last written, and the bytes read when `high` was first seen. A
 counter not seen before (a restart, a new copy) counts from zero. `origami refresh` starts the model folder's count
-again (`DriveReadLog.rewritten`), and a hot copy whose payload has another name or birth time (a rebuild on new
-blocks) starts its own; both keep the bytes the last slowdown began after, and the row's `since_rewrite.due` is set
+again (`DriveReadLog.rewritten`), `origami refresh --copy` the copy's (`HotCopy.rewriteInPlace`: the payload through
+`ModelRefresh.rewrite` while no other process has the copy open; check `hot_copy_inplace_rewrite_keeps_the_copy`), and
+a hot copy whose payload has another name or birth time (a rebuild on new blocks) starts its own; all keep the bytes the last slowdown began after, and the row's `since_rewrite.due` is set
 once 80% of that is read again. `StatusSource.sinceRewrite` puts it on the status rows, the dashboard's Drive and Hot
 copy lines show it, `origami doctor` prints every entry. Check: `drive_read_history`.
 

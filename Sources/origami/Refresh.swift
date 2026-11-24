@@ -4,15 +4,17 @@ import OrigamiEngine
 /// `origami refresh` (ROADMAP R15): rewrites the model's weight files in place (`ModelRefresh.run`) and moves its copies,
 /// usage counts and saved prompts to the identity the files have afterwards. Refused while a server answers on the port
 /// or holds the prompt cache's lock; a server does not start the model while its refresh is unfinished.
+/// `--copy` rewrites the model's hot copies instead (`copies`): nothing is keyed by their bytes, so nothing moves.
 enum Refresh {
-    static func run(flags: [String: [String]], yes: Bool) throws {
+    static func run(flags: [String: [String]], yes: Bool, copy: Bool = false) throws {
         let settings = try Settings.load(flags: flags)
         guard let url = Models.locate(settings.model, settings: settings) else {
             throw CLIError(
                 settings.model.map { "No model to refresh at \($0): check the name (`origami model list`) or the path" }
                     ?? "No model to refresh: pass --model <name>, or set one with `origami model default <name>`")
         }
-        try Commands.requireNoServer(settings, "refresh")
+        try Commands.requireNoServer(settings, copy ? "refresh --copy" : "refresh")
+        if copy { return try copies(url, settings: settings, yes: yes) }
         let (family, files, identity, epochs, related) = try binding(url, settings: settings)
         let bytes = files.reduce(UInt64(0)) {
             $0 + (((try? FileManager.default.attributesOfItem(atPath: $1.path))?[.size] as? NSNumber)?.uint64Value ?? 0)
@@ -48,12 +50,56 @@ enum Refresh {
             })
         // The drive history's count for these files starts again (`origami doctor`, the dashboard's Drive line).
         DriveReadLog.rewritten(family ? url.deletingLastPathComponent() : url, data: settings.dataDir)
+        forgetSpeed(url, settings: settings)
         print("Rewrote \(outcome.rewritten.count) file\(outcome.rewritten.count == 1 ? "" : "s"); every one read back the same bytes.")
         for line in outcome.rebound { print("  " + line) }
         for folder in offline {
             print("  not connected: \(folder.path); copies there keep the old identity and are listed as orphans once it is back")
         }
         print("Identity \(outcome.old.prefix(12)) → \(outcome.new.prefix(12)). Start the server as usual.")
+    }
+
+    /// The drive's saved speed was measured on the files as they read before the rewrite, often slowly (the reason to
+    /// refresh), and slow by less than `DriveSpeedReview` drops: the next start measures the rewritten files.
+    static func forgetSpeed(_ url: URL, settings: Settings) {
+        if let key = DriveSpeeds.key(url) { DriveSpeeds.forget([key], in: settings.driveSpeedsFile) }
+    }
+
+    /// `origami refresh --copy`: rewrites each hot copy of the model at `url` in place (`HotCopy.rewriteInPlace`), for a
+    /// drive that reads the copy slowly (ROADMAP R15: the internal drive cannot be replaced). The copy keeps its
+    /// records, and the model its identity, counts and saved prompts.
+    static func copies(_ url: URL, settings: Settings, yes: Bool) throws {
+        let identity: String
+        let first: URL?
+        if Models.isGGUF(url.path) {
+            let key = FamilySupport.key(try ExpertVariant.source(url, settings: settings))
+            identity = LocalModelIdentity.familyRepresentation(source: key)
+            first = FamilySetup.hotFolder(settings, key: key)
+        } else {
+            let model = try ModelSource(directory: url)
+            identity = Stores.hotCopyIdentity(model)
+            first = Stores.hotCopyFolder(model: model, settings: settings, found: Stores.scan(model: model, settings: settings))
+        }
+        let folders = [first].compactMap { $0 } + settings.hotCopyMore.compactMap { HotCopy.copyFolder(settings, place: $0.folder) }
+        let found = folders.compactMap { OrigamiEngine.HotCopy.open(folder: $0, identity: identity) }
+        guard !found.isEmpty else { throw CLIError("\(url.lastPathComponent) has no hot copy to refresh") }
+        let bytes = found.reduce(Int64(0)) { $0 + $1.bytes }
+        print(
+            "This rewrites the hot cop\(found.count == 1 ? "y" : "ies") of \(url.lastPathComponent) (\(OrigamiPlan.gigabytes(UInt64(bytes)))) in place:"
+                + " each byte is read and written back to the same place, then read again and compared (SHA-256), so the drive stores"
+                + " them on fresh blocks. It is safe to stop and run again. The model's files are not touched.")
+        guard Terminal.confirm("Refresh the hot copy of \(url.lastPathComponent)?", yes: yes) else { throw CLIError("Nothing was changed") }
+        for copy in found {
+            var shown = Date()
+            try copy.rewriteInPlace { done in
+                guard Date().timeIntervalSince(shown) >= 5 else { return }
+                shown = Date()
+                print("refresh: \(OrigamiPlan.gigabytes(UInt64(done))) of \(OrigamiPlan.gigabytes(UInt64(2 * copy.bytes))) swept")
+            }
+            DriveReadLog.rewritten(copy.folder, data: settings.dataDir)
+            forgetSpeed(copy.folder, settings: settings)
+            print("Rewrote \(copy.payload.path); it read back the same bytes.")
+        }
     }
 
     /// What the identity of the model at `url` binds (`ModelRefresh`): whether it is a GGUF, its weight files, its identity

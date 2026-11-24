@@ -4,6 +4,27 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.7 (2026-11-24)
+
+**Replies:** unchanged.
+
+From two days of real agent traffic on one Mac:
+
+- **`origami refresh --copy` rewrites the hot copy in place.** A drive that reads a much-read copy slowly was cured
+  until now by deleting the copy and letting the server build it again. `origami refresh --copy` (server quit) writes
+  the copy's own bytes back where they are, reads them again and compares the SHA-256 of both passes: the copy keeps
+  its experts and needs no free space. The dashboard, "Slowed by" and `origami doctor` name the command.
+- **`origami refresh` forgets the drive's stored speed**, so the next start measures the rewritten files instead of
+  planning with a speed taken while the drive was slow.
+- **The server log has one line per finished request**: how it ended, its time, prompt tokens and how many were
+  restored, the time to the first word, tokens written and their speed. `/v1/status` forgets its request rows when
+  the model is unloaded; the log keeps them.
+- **`origami status` and `origami doctor` no longer call the Mac full while Origami's own model holds the memory.**
+  With a model loaded they said "only 5.9 GB of memory is free… expect slow prefill": the plan they print for a start
+  now counts the loaded model's memory as free again, as a restart would find it.
+- **`origami status` lists each hot-copy size once.** A copy of about 40 GB printed "40 GB" twice in the coverage
+  line.
+
 ## 3.1.6 (2026-11-22)
 
 **Replies:** unchanged.

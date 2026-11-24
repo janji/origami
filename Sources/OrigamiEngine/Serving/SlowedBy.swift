@@ -289,7 +289,7 @@ public enum SlowedBy {
         guard let hot = hot(s), let since = hot["since_rewrite"] as? [String: Any], since["high"] as? Bool == true else { return nil }
         return (
             "The hot copy's drive reads it slowly: \(Int((100 * (number(since["share"]) ?? 0)).rounded()))% of its reading time",
-            "Rebuild the copy: delete it under Models, then run `origami config unset hot_copy` and reload; it is written again on fresh blocks.",
+            "Quit `origami serve` and run `origami refresh --copy`: it rewrites the copy in place, on fresh blocks.",
             nil
         )
     }

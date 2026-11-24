@@ -414,7 +414,7 @@ enum Diagnostics {
                     plan = try OrigamiPlan.make(
                         model: model, host: host, context: settings.context, memoryLimit: settings.memoryLimit,
                         expertMemory: settings.expertMemory,
-                        storage: storage, promptCache: settings.promptCacheRoot)
+                        storage: storage, promptCache: settings.promptCacheRoot, footprintNow: Commands.loadedFootprint(status))
                 } catch { report(false, "memory: \(error)") }
             }
             if storage.packFolder == nil && storage.hotCopyFolder == nil {

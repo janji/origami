@@ -229,7 +229,8 @@ counts, tuning and saved prompts are no longer found. Move it with Origami inste
 - **A drive that slows down.** Some SSDs read often-read parts of a file at a fraction of their speed. The dashboard's
   drive line and `origami doctor` say so, and warn ahead of the next slowdown. Quit `origami serve`, then run
   `origami refresh`: it rewrites the model's files in place, byte for byte and checked, and keeps everything keyed on
-  the model. It is safe to stop and run again.
+  the model. It is safe to stop and run again. `origami refresh --copy` does the same for the hot copy when its
+  drive is the slow one.
 
 Details: [troubleshooting.md](troubleshooting.md#the-model-drive-got-slow).
 

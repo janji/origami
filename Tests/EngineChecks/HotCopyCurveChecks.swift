@@ -27,6 +27,10 @@ func hotCopyCurve() throws {
         try require(curve.coverage(UInt64(budget)) == Double(held) / 46, "\(budget) bytes cover \(curve.coverage(UInt64(budget)))")
     }
     try require(curve.full == 147_456, "full at \(curve.full)")
+    // A 40 GB copy is a few records short of 40 GB: status quotes it once, not beside the round 40 GB.
+    try require(
+        HotCopyCurve.quoted(copy: 39_990_000_000) == [20_000_000_000, 39_990_000_000, 80_000_000_000]
+            && HotCopyCurve.quoted(copy: 0).count == 3 && HotCopyCurve.quoted(copy: 68_000_000_000).count == 4, "quoted sizes")
     // The dashboard's graph (`popularity`): the same order, a bar per record here.
     let graph = curve.popularity()
     let bars = graph["bars"] as? [[Int]] ?? []

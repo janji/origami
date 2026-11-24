@@ -963,12 +963,12 @@ check(/Hot copy<\/span><div><b>Building<\/b>/.test(health) && /width:25\.0%/.tes
 // warning with the command. A hot copy's drive slowing down says to rebuild it.
 const counted = JSON.parse(JSON.stringify(nowStatus)), drive = counted.experts_from.sources[0], copyRow = counted.experts_from.sources[1];
 Object.assign(drive, { detail: null, slow_reads: { high: false, share: 0.01, busy_seconds: 900 }, since_rewrite: { bytes: 4.2e12, due: false, high: false, text: "4.2 TB read since 2026-11-15; slow 1% of the reading time." } });
-Object.assign(copyRow, { state: "ready", progress: null, since_rewrite: { bytes: 9e12, due: false, high: true, text: "9.0 TB read since 2026-11-10; slow 30% of the reading time. The drive reads these files slowly now: rebuild the copy." } });
+Object.assign(copyRow, { state: "ready", progress: null, since_rewrite: { bytes: 9e12, due: false, high: true, text: "9.0 TB read since 2026-11-10; slow 30% of the reading time. The drive reads these files slowly now: stop the server and run `origami refresh --copy`." } });
 run("showNow(" + JSON.stringify(counted) + ")");
 let counting = element("health").innerHTML;
 check(/data-m="ok"[^>]*><\/i><span class="label">Drive<\/span><div><b>[^<]*<\/b> · reads at its own speed · 4\.2 TB read/.test(counting) && /slow 1% of the reading time/.test(counting)
   && !/data-copy-text="origami refresh"/.test(counting), "a healthy drive shows what was read since its files were rewritten, quietly");
-check(/data-m="warn"[^>]*><\/i><span class="label">Hot copy/.test(counting) && /rebuild the copy/.test(counting), "a hot copy read slowly says to rebuild it");
+check(/data-m="warn"[^>]*><\/i><span class="label">Hot copy/.test(counting) && /origami refresh --copy/.test(counting), "a hot copy read slowly says to refresh it");
 drive.since_rewrite = { bytes: 5.1e12, due: true, high: false, text: "5.1 TB read since 2026-11-15; slow 1% of the reading time. Last time the slowdown began after about 6.0 TB. A slowdown is likely soon: stop the server and run `origami refresh`." };
 run("showNow(" + JSON.stringify(counted) + ")");
 counting = element("health").innerHTML;

@@ -14,6 +14,7 @@ func hotCopyInPlaceChecks() -> [(String, () throws -> Void)] {
         ("hot_copy_inplace_give_back_owns_its_slots", hotCopyInPlaceGiveBackOwnsSlots),
         ("hot_copy_inplace_swaps_against_give_backs_hammer", hotCopyInPlaceSwapGiveBackHammer),
         ("hot_copy_inplace_shared_copy_not_changed", hotCopyInPlaceSharedNotChanged),
+        ("hot_copy_inplace_rewrite_keeps_the_copy", hotCopyInPlaceRewriteKeeps),
         ("hot_copy_keeper_give_back_counts_what_was_freed", hotCopyKeeperGiveBackCounts),
     ]
 }
@@ -46,6 +47,39 @@ private final class InPlaceRecords: HotCopySource, @unchecked Sendable {
             try inPlaceRequire(matches(key, UnsafeRawBufferPointer(buffer)), "\(what): key \(key) read other bytes")
         }
     }
+}
+
+/// `origami refresh --copy` (`rewriteInPlace`): refused while another process has the copy open; alone, both passes
+/// run over the whole payload, and the copy is the same afterwards: its bytes, its index, its payload's name, birth and
+/// modification time (the `generation` the drive history counts by), read by the copy that was open and by a fresh one.
+private func hotCopyInPlaceRewriteKeeps() throws {
+    let folder = inPlaceFolder()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let source = InPlaceRecords(0..<6, sizes: [2: 49152])
+    let copy = try HotCopy.write(source: source, keys: [3, 0, 2, 5], folder: folder, identity: "fixture")
+    func facts() throws -> [String] {
+        let attributes = try FileManager.default.attributesOfItem(atPath: copy.payload.path)
+        return [
+            copy.generation, "\(attributes[.modificationDate]!)", "\(attributes[.size]!)",
+            try Data(contentsOf: copy.payload).base64EncodedString(),
+            try Data(contentsOf: folder.appendingPathComponent("index.json")).base64EncodedString(),
+        ]
+    }
+    let before = try facts()
+    do {
+        let other = HotCopy.open(folder: folder, identity: "fixture", source: source)!
+        do {
+            try copy.rewriteInPlace { _ in }
+            throw EngineError("hot copy in place: rewritten while another process has the copy open")
+        } catch is HotCopy.SharedElsewhere {}
+        try source.check(other, "the other process")
+    }
+    var swept: Int64 = 0
+    try copy.rewriteInPlace { swept = $0 }
+    try inPlaceRequire(swept == 2 * copy.bytes, "swept \(swept) of \(2 * copy.bytes)")
+    try inPlaceRequire(try facts() == before, "the copy changed")
+    try source.check(copy, "the open copy")
+    try source.check(HotCopy.open(folder: folder, identity: "fixture", source: source)!, "a fresh open")
 }
 
 private func inPlaceFolder() -> URL {

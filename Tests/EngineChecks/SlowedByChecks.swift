@@ -91,3 +91,16 @@ func permissionSubjectName() throws {
     }
     guard !PermissionSubject.name.isEmpty else { throw EngineError("permission subject: no name for this process") }
 }
+
+/// The server log's line for a finished request names what the dashboard's row does, and leaves out what a failed one lacks.
+func requestLogLine() throws {
+    let done = LocalHTTPServer.summary([
+        "finish": "stop", "seconds": 174.2, "prompt_tokens": 61748, "cached_tokens": 61087, "ttft_s": 22.44, "completion_tokens": 1569,
+        "decode_tps": 10.36,
+    ])
+    let failed = LocalHTTPServer.summary(["finish": "cancelled", "seconds": 9.0, "prompt_tokens": 500, "cached_tokens": 0])
+    guard
+        done == "request: stop in 174 s: 61748 prompt tokens (61087 restored), first word after 22.4 s, 1569 tokens written at 10.4 tok/s",
+        failed == "request: cancelled in 9 s: 500 prompt tokens (0 restored)"
+    else { throw EngineError("request log line: \(done) | \(failed)") }
+}

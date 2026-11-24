@@ -194,7 +194,7 @@ private func driveReadHistory() throws {
     entry = try history(model)
     try slowRequire(
         entry.due && entry.text().contains("likely soon") && entry.text().contains("origami refresh"), "no advice: \(entry.text())")
-    // A hot copy rebuilt (a new payload): counted from zero, its advice a rebuild.
+    // A hot copy rebuilt (a new payload): counted from zero, its advice `refresh --copy`.
     let rebuilt = SlowDriveReads { now }
     read(rebuilt, seconds: 1, slow: false)
     log.record(hot, reads: rebuilt, generation: "b@2", now: day)

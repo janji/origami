@@ -292,6 +292,27 @@ package final class HotCopy: @unchecked Sendable {
         return true
     }
 
+    /// `origami refresh --copy`: writes the payload back in place, byte for byte (`ModelRefresh.rewrite`: read, written
+    /// to the same place, read again, and the SHA-256 of both passes compared), so its drive stores it on fresh blocks
+    /// when it reads the copy slowly (R15) without the copy being built again. The index stays as it is: every write
+    /// repeats the bytes already there, so stopping it part-way leaves the copy as it was. Only while no other process
+    /// has the copy open (`alone`) and no writer owns the folder.
+    package func rewriteInPlace(progress: (Int64) -> Void) throws {
+        try alone {
+            let lock = Darwin.open(folder.appendingPathComponent(".refresh.lock").path, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR)
+            guard lock >= 0 else { throw EngineError("Cannot open the hot-copy lock: errno \(errno)") }
+            defer {
+                _ = flock(lock, LOCK_UN)
+                close(lock)
+            }
+            guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw EngineError("Another hot-copy writer owns this folder") }
+            var info = stat()
+            guard stat(payload.path, &info) == 0 else { throw EngineError("Cannot stat \(payload.path)") }
+            _ = try ModelRefresh.rewrite(
+                payload.path, modified: [Int64(info.st_mtimespec.tv_sec), Int64(info.st_mtimespec.tv_nsec)], hook: nil, progress: progress)
+        }
+    }
+
     /// Step 1 of `replace`, which the keeper takes alone while no request runs (then `drain` with no request held): the
     /// slot (held or empty) becomes the caller's to change, and its key leaves the lookup, so no new read pins it. The
     /// owner it returns (nil: another owner is changing the slot) is the only one that may `restore` it, which puts the

@@ -1,7 +1,7 @@
 import Foundation
 import OrigamiEngine
 
-let version = "3.1.6"
+let version = "3.1.7"
 
 /// Options that set a setting; every command that reads settings accepts them. Help lists them in this order: the
 /// ones people change most first, the quality knobs last.
@@ -16,6 +16,7 @@ let commonSettingOptions = ["model", "context", "port", "memory-limit", "data-di
 /// Options without a value.
 let switchOptions: Set<String> = [
     "yes", "deep", "no-pack", "full-pack", "json", "help", "version", "all", "family", "single-model", "recheck", "undo", "memory",
+    "copy",
 ]
 let optionLines: [String: String] = [
     "model":
@@ -73,6 +74,7 @@ let optionLines: [String: String] = [
     "label": "--label <label>             the service's launchd label (default com.origami.serve)",
     "yes": "-y, --yes                   answer yes to questions (downloads, deletions)",
     "deep": "--deep                      also compare every record with the model's weights",
+    "copy": "--copy                      rewrite the model's hot copy instead of its files",
     "json": "--json                      machine-readable output",
     "single-model":
         "--single-model              serve this one model in this process, without listing or starting the others\n                              (what `serve` starts for each model it runs)",
@@ -232,10 +234,10 @@ let commands: [String: CommandSpec] = [
             "List the saved prompts per model, context and Origami build (Qwen, GLM and DeepSeek), each \"in use\", \"usable by this\nbuild\" or \"unusable: <reason>\". prune lists, with sizes, then removes the unusable ones: older builds', those of model\nfiles no model uses and a GLM or DeepSeek context left on disk. It runs while a model is loaded and never removes a\nfolder a running server holds. A build holding pinned or named conversations is kept unless --yes. --all removes this\nbuild's too, with the server quit or stopped (`origami stop`)",
         options: ["all", "yes"], arguments: 1),
     "refresh": .init(
-        usage: "refresh [--model <name>] [--yes] [options]",
+        usage: "refresh [--copy] [--model <name>] [--yes] [options]",
         summary:
-            "Rewrite the model's files in place, byte for byte and checked, when its drive reads them far below its own speed\n(`origami doctor` says when). Quit `origami serve` first. It takes about as long as reading the model three times,\nis safe to stop and run again, and moves the hot copy and usage counts over to the rewritten files",
-        options: ["yes"]),
+            "Rewrite the model's files in place, byte for byte and checked, when its drive reads them far below its own speed\n(`origami doctor` says when). Quit `origami serve` first. It takes about as long as reading the model three times,\nis safe to stop and run again, and moves the hot copy and usage counts over to the rewritten files.\n--copy rewrites the model's hot copy the same way instead, when its drive reads the copy slowly",
+        options: ["yes", "copy"]),
     "uninstall": .init(
         usage: "uninstall [--yes] [options]",
         summary: "Delete Origami's expert copies, caches and settings. Your models are never deleted", options: ["yes"]),
@@ -360,7 +362,7 @@ do {
     case "tune":
         try await Tuning.run(
             flags: flags, recheck: switches.contains("recheck"), undo: switches.contains("undo"), memory: switches.contains("memory"))
-    case "refresh": try Refresh.run(flags: flags, yes: switches.contains("yes"))
+    case "refresh": try Refresh.run(flags: flags, yes: switches.contains("yes"), copy: switches.contains("copy"))
     case "uninstall": try Commands.uninstall(flags: flags, yes: switches.contains("yes"))
     case "version": print("origami \(version)")
     default:
