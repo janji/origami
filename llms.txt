@@ -33,8 +33,8 @@
   `GET /health`, `GET /v1/status`, `GET /dashboard`.
 - Model name: by default one model, `origami`, and any name gets the model chosen in the dashboard. With
   `list_models true` every model is listed and a request naming another one loads it (one model loaded at a time).
-- Exact by default: replies are the model's own. Fast levels are opt-in and change replies: Qwen `faster`, `fastest`;
-  GLM `faster`; DeepSeek `dynamic-fastest`. Per request `"origami_mode": "<level>"` or `<model>-<level>`;
+- Exact by default: replies are the model's own. Faster levels are opt-in and change replies: `dynamic` and `fast` on
+  every model, and `fastest` on Qwen (`faster` still means `fast`). Per request `"origami_mode": "<level>"` or `<model>-<level>`;
   `allow_fast false` forbids them. An exact request never reuses fast-mode state.
 - One request runs at a time; up to 64 wait. Use streaming: SSE streams send `: keepalive` every 10 s, and a
   non-streamed request whose client closes its sending side is treated as gone. Set client timeouts to 10 minutes or

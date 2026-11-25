@@ -270,7 +270,7 @@ These are ideas waiting for a measurement, not promises. The full list is in [RO
 
 - Testing on other Macs: 16 and 24 GB under real load, M1, M5, 64 GB or more.
 - Mixing exact and low-bit experts in one reply, and speculative decoding, where they pay.
-- Deciding the three remaining experiment switches, and measuring split reads (on since 3.1.8) on more Macs
+- Deciding the three remaining experiment switches, and measuring split reads (opt-in since 3.1.8) on more Macs
   ([switches.md](switches.md)).
 - Smaller speed-ups that still need measuring: kernel fusions, GPU keep-alive power use.
 

@@ -143,13 +143,15 @@ current token in one step; an accepted draft gives two tokens per step (79% were
 
 ### Get the files
 
-Origami has run unsloth's UD-Q4_K_XL builds. Download one with the Hugging Face CLI (`pip install -U huggingface_hub`
+Origami has run unsloth's UD-Q4_K_XL builds and, for DeepSeek, ISTA-DASLab's GSQ-RCO IQ2_XXS build (about 2 bits
+per expert weight, half the size; see [Serving](#serving) for its layout). Download one with the Hugging Face CLI (`pip install -U huggingface_hub`
 gives `hf`) to a drive with room, then register it under a name:
 
 | Model | Repository | Files | Size |
 |---|---|---|---|
 | GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) | `UD-Q4_K_XL/*` (6 files) | 199.7 GB |
 | DeepSeek-V4.1-Flash | [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `UD-Q4_K_XL/*` (9 files) | 500.7 GB |
+| DeepSeek-V4.1-Flash, 2-bit | [ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*IQ2_XXS-0000?-of-00006.gguf` (5 files) and `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` | 248.8 GB |
 
 ```sh
 hf download unsloth/GLM-5.3-Flash-GGUF --include "UD-Q4_K_XL/*" --local-dir /Volumes/MySSD/glm-5.3-flash
@@ -157,7 +159,17 @@ origami model add /Volumes/MySSD/glm-5.3-flash/UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_
 
 hf download unsloth/DeepSeek-V4.1-Flash-1017-GGUF --include "UD-Q4_K_XL/*" --local-dir /Volumes/MySSD/deepseek-v4.1-flash
 origami model add /Volumes/MySSD/deepseek-v4.1-flash/UD-Q4_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf --name deepseek
+
+hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF --include "*IQ2_XXS-0000?-of-00006.gguf" \
+  --include "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf" --local-dir /Volumes/MySSD/deepseek-v4.1-flash-iq2xxs
+origami model add /Volumes/MySSD/deepseek-v4.1-flash-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --name deepseek-2bit
 ```
+
+The 2-bit build's replies are its own, not the UD-Q4_K_XL build's. Its card scores it equal to the original model on
+AIME25, GPQA-Diamond and LiveCodeBench; Origami has not scored it. On one 32 GB Mac it needs 6.2 GB of fixed memory
+(UD-Q4_K_XL: 9.2 GB), each expert takes 7–9 MiB in memory (17 MiB), and its first two replies wrote 5.6 and 5.9 tok/s
+at the `dynamic` level with no hot copy yet. Its chat template takes the thinking levels `low`, `high` and `max`;
+Origami gives it `medium` as 62 on the same scale.
 
 The drive needs the files' size free, and the hot copy 20–40 GB more to start on its drive (best another one; see
 Hot copy below). Then `origami serve --model glm` (or `origami model default glm`). Leave the files where they are: Origami reads

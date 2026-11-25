@@ -84,7 +84,8 @@ into a GitHub issue. It shows the Mac, the memory plan and a short benchmark, wi
   most-used experts (more if it pays) and room for saved prompts. Origami keeps space free on each drive: saved prompts
   and expert copies leave 10 GB, the hot copy 20 GB, and a download needs 5 GB more than its size. GLM and DeepSeek
   are larger: the UD-Q4_K_XL files Origami runs are **199.7 GB** (GLM-5.3-Flash) and **500.7 GB**
-  (DeepSeek-V4.1-Flash), plus 20–40 GB for their hot copy to start, best on another drive
+  (DeepSeek-V4.1-Flash; ISTA-DASLab's 2-bit build is **248.8 GB**), plus 20–40 GB for their hot copy to start, best
+  on another drive
   ([Get the files](docs/models.md#get-the-files)).
 - Optional: a second fast drive (Thunderbolt or USB4 NVMe) for an extra copy of the experts.
 - To build: **Xcode** or the **Command Line Tools**, version 26 or 27 (the macOS 26 SDK or later; built and run with
@@ -222,6 +223,12 @@ the dashboard and the logs say so. Same Mac ([docs/models.md](docs/models.md#low
 | GLM with lte-ai's Strata Q2_K/Q3_K experts file, 20 GB hot copy | 1.73–1.88 tok/s; 39 s to the first token | 12 of 14 (10) | 92% |
 
 DeepSeek variants are not measured yet.
+
+**A smaller DeepSeek build.** ISTA-DASLab's GSQ-RCO IQ2_XXS GGUF of DeepSeek-V4.1-Flash (about 2 bits per expert
+weight, 248.8 GB) runs as its own model from 3.1.8.1. On the same Mac at the `dynamic` level, with no hot copy yet,
+its first two replies wrote 5.6 and 5.9 tok/s (91 and 1,203 tokens) and began after 14 s on a short prompt. Origami
+has not scored its answers; ISTA-DASLab's card reports it equal to the original model on AIME25, GPQA-Diamond and
+LiveCodeBench ([Get the files](docs/models.md#get-the-files)).
 
 ### On an M4 Max with 128 GB
 
@@ -366,7 +373,7 @@ publisher's license: read it before you use the model or share it or its output.
 | [lte-ai/GLM-5.3-Flash-Strata-Q2Q3-Experts](https://huggingface.co/lte-ai/GLM-5.3-Flash-Strata-Q2Q3-Experts) (low-bit experts) | lte-ai | MIT; keep the upstream notices it lists (Z.ai, Unsloth, patrickbdevaney, Strata, ggml) when redistributing |
 | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and [-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) | DeepSeek | MIT (Copyright (c) 2023 DeepSeek) |
 | [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | Unsloth | MIT |
-| [ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) (low-bit experts) | ISTA DASLab | MIT, the base model's |
+| [ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) (a whole model, or low-bit experts) | ISTA DASLab | MIT, the base model's |
 
 Origami makes files from the weights as it runs: converted models (`origami model add`), the hot copy
 and other expert copies in your stores, saved prompts (the model's state after reading
