@@ -208,7 +208,13 @@ enum DashboardScript {
 
         // The dials. Each holds a list of stops; the plan endpoint answers for the stop each one points at.
         // Quality: the levels the running model offers (its plan's or status's list), each with its readout.
-        const LEVEL_LABELS = { exact: "Exact", dynamic: "Dynamic", faster: "Faster", fastest: "Fastest", "dynamic-fastest": "Dynamic fastest" };
+        const LEVEL_LABELS = { exact: "Exact", dynamic: "Dynamic", fast: "Fast", fastest: "Fastest" };
+        // What each level does, in plain words, where the plan has no measured description.
+        const LEVEL_WORDS = {
+          dynamic: "Takes shortcuts only where the model is sure of the next word: between exact and fast.",
+          fast: "Takes the shortcut everywhere: quicker, replies differ slightly.",
+          fastest: "Takes the most shortcuts: quickest, replies differ most.",
+        };
         let LEVELS = [["exact", "Exact"]];
         function setLevels(names) {
           LEVELS = ["exact"].concat((names || []).filter((n) => n !== "exact" && LEVEL_LABELS[n])).map((n) => [n, LEVEL_LABELS[n]]);
@@ -218,8 +224,8 @@ enum DashboardScript {
           if (LEVELS.some((l) => l[0] === floor)) $("st-floor").value = floor;
         }
         const chosenLevel = () => LEVELS[+$("quality").value] || LEVELS[LEVELS.length - 1];
-        // A level the model does not offer runs as its mildest fast one, as the server runs it; anything else shows as exact.
-        const levelAt = (name) => { const at = LEVELS.findIndex((l) => l[0] === name); return at >= 0 ? at : LEVEL_LABELS[name] && name !== "exact" && LEVELS.length > 1 ? 1 : 0; };
+        // A level the model does not offer (fastest on GLM or DeepSeek) shows as its last, as the server runs it; anything else as exact.
+        const levelAt = (name) => { const at = LEVELS.findIndex((l) => l[0] === name); return at >= 0 ? at : LEVEL_LABELS[name] && name !== "exact" ? LEVELS.length - 1 : 0; };
         const CONTEXTS = [[8192, "8K"], [32768, "32K"], [65536, "64K"], [131072, "128K"], [262144, "256K"]];
         let base = null, memoryStops = [], autoMemory = true, ready = false, kind = "qwen", modelChoice = null, modelInitial = null, initial = null, status = null, launched = [];
         // The dashboard's job (preparing smaller experts, adding a model), models found on this Mac, and the model being added.
@@ -327,7 +333,7 @@ enum DashboardScript {
           ticks("t-reasoning", EFFORTS.map((x) => x[1]), +$("reasoning").value);
           $("h-reasoning").textContent = effort[2] + " Apps that ask for a level keep theirs.";
           const level = plan && (plan.quality.levels || []).find((l) => l.name === v.quality);
-          $("h-quality").textContent = v.quality === "exact" ? "The model's own replies." : level && level.quality ? level.quality.split(";")[0].replace(/^./, (c) => c.toUpperCase()) + "." : "Replies can differ slightly from exact.";
+          $("h-quality").textContent = v.quality === "exact" ? "The model's own replies." : level && level.quality ? level.quality.split(";")[0].replace(/^./, (c) => c.toUpperCase()) + "." : LEVEL_WORDS[v.quality] || "Replies can differ slightly from exact.";
           const w = wiredMemory(), m = plan ? plan.memory : w ? { cap_bytes: w.active_budget_bytes || w.configured_budget_bytes || w.safe_max_budget_bytes, ram_bytes: w.physical_memory_bytes } : null;
           if (m) {
             // A saved limit between two stops shows as saved until the dial moves (Apply sends it only then).
@@ -542,7 +548,7 @@ enum DashboardScript {
           const e = base && base.experts;
           return e && e.total ? Math.max(0, 1 - e.cache_experts / e.total) : 0.5;
         }
-        const QUALITY_GAIN = { exact: 0, dynamic: 2, "dynamic-fastest": 2, faster: 3, fastest: 4 };
+        const QUALITY_GAIN = { exact: 0, dynamic: 2, fast: 3, fastest: 4 };
         const contextPace = (c) => c.paged ? 0.35 : c.tier <= 8192 ? 1 : c.tier <= 32768 ? 0.89 : c.tier <= 65536 ? 0.73 : c.tier <= 131072 ? 0.63 : 0.6;
         // Much faster or slower means about twice or half the speed.
         function paceStep(ratio) { return ratio >= 1.8 ? 3 : ratio >= 1.25 ? 2 : ratio >= 1.05 ? 1 : ratio > 0.95 ? 0 : ratio > 0.8 ? -1 : ratio > 0.55 ? -2 : -3; }

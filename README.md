@@ -17,11 +17,11 @@ It is one native binary (Swift and Metal, no Python, no MLX) with a local server
 and Ollama APIs, and a dashboard in the browser.
 
 **New here?** Start with [the guide](docs/guide.md): install, first run, every feature in short, and what is planned.
-The current release is 3.1.7.1 ([what changed](CHANGELOG.md)).
+The current release is 3.1.8 ([what changed](CHANGELOG.md)).
 
 ![The dashboard's Now tab: the model, its speed, where the last request's time went, where experts were read from, memory and health](docs/images/dashboard-now.png)
 
-*The dashboard while Qwen3.8-Flash-Next serves on an M2 Pro with 32 GB (Origami 3.1.0, at the opt-in `faster`
+*The dashboard while Qwen3.8-Flash-Next serves on an M2 Pro with 32 GB (Origami 3.1.0, at the opt-in `fast`
 level). More pictures [below](#the-dashboard).*
 
 ## What it does
@@ -184,7 +184,7 @@ same model on the same Mac writes several times faster or slower from one reques
 
 The picture at the top shows it: the same 25-token request waited 4.9 s for its first word and wrote 8.9 tok/s the
 first time, then 0.1 s and 14.5 tok/s on its repeats, with the prompt reused and the experts in memory (Qwen at the
-opt-in `faster` level). The dashboard's Now tab says for every request where its time went and, when it was slow,
+opt-in `fast` level). The dashboard's Now tab says for every request where its time went and, when it was slow,
 why. `origami bench` measures your own Mac.
 
 ### On an M2 Pro with 32 GB
@@ -295,7 +295,7 @@ origami tune --memory                 # measure this Mac's fastest memory limit 
 origami config set memory_limit 20GB  # or set Origami's memory ceiling yourself (default: fitted to this Mac)
 origami config set hot_copy off       # disk for the copy of the most-used experts: a size, off, or automatic
 origami store add /Volumes/MySSD/Origami --size 150GB   # a second drive for expert copies
-origami config set quality faster     # faster replies that differ slightly from the model's own (default exact)
+origami config set quality fast       # faster replies that differ slightly from the model's own (default exact)
 origami config set reasoning_effort medium   # thinking for requests that do not ask
 origami config set api_key "$(openssl rand -hex 16)"   # require a key on every request
 origami config set listen lan         # let other devices on your network in (they need a key; plain HTTP, see docs/integration.md#tls)
@@ -305,9 +305,9 @@ Every setting is also a flag (`--context 32k`) or an environment variable (`ORIG
 and how memory, context and drives trade against each other: [docs/settings.md](docs/settings.md).
 
 **Exact by default.** At the default `quality exact`, Origami uses every expert the model picks, so replies are the
-model's own. Faster modes that skip experts are opt-in, and each model offers only those that clearly helped it on
-checkable tasks: `faster` and `fastest` for Qwen, `faster` for GLM, `dynamic-fastest` for DeepSeek
-([docs/models.md](docs/models.md#quality-dial)).
+model's own. Faster levels that skip experts are opt-in, and every model offers the same ladder: `dynamic` (shortcuts only where
+the model is sure of the next word), `fast` (the shortcut everywhere), and for Qwen also `fastest`, the only model on
+which it stayed usable on checkable tasks ([docs/models.md](docs/models.md#quality-dial)).
 [docs/settings.md](docs/settings.md#which-settings-change-replies) lists which settings can change replies.
 
 ## Connecting apps

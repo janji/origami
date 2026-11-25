@@ -77,7 +77,7 @@ unless `--yes` is given.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `quality` | `exact` | quality dial for requests that choose none: `exact` or one of the fast modes the served model offers (Qwen: `faster`, `fastest`; GLM: `faster`; DeepSeek: `dynamic-fastest`; see [models.md](models.md#quality-dial)); setting it resets the five knobs |
+| `quality` | `exact` | quality dial for requests that choose none: `exact`, `dynamic`, `fast`, or on Qwen `fastest` (see [models.md](models.md#quality-dial); `faster` is read as `fast`); setting it resets the five knobs |
 | `experts_per_token`, `tail_skip`, `tail_skip_misses_only`, `late_miss`, `confident_above` | the level's | the quality dial's knobs (see [models.md](models.md#knobs)) |
 | `allow_fast` | `true` | allow levels other than exact |
 | `reasoning_effort` | `none` | thinking for requests that ask for none |

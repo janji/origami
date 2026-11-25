@@ -57,7 +57,7 @@ private func delayedExpertPolicyAndModes() throws {
     faster.delayedExperts = policy
     dynamic.delayedExperts = policy
     try delayedRequire(
-        try faster.validated() == faster && faster.name == "faster" && !faster.dropsExperts
+        try faster.validated() == faster && faster.name == "fast" && !faster.dropsExperts
             && faster.keptRanks(gates) == Array(gates.indices), "base mode changed or original gates were dropped")
     try delayedRequire(
         dynamic.step(after: [10, 0]).delayedExperts == policy

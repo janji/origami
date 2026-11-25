@@ -238,7 +238,7 @@ private func httpServe(_ request: BoundedHTTPRequest) throws {
             }
             let (last, reason) = try stream.finish(reason: "stop")
             for delta in deltas + last { _ = try writer.frames(delta) }
-            let usage = try ServingWire.usage(GenerationStatistics(promptTokens: 3, completionTokens: 2))
+            let usage = try ServingWire.usage(GenerationStatistics(promptTokens: 3, completionTokens: 2), family: .qwen)
             _ = try writer.close(reason: reason, usage: usage)
             _ = writer.body(message: ["role": "assistant", "content": text], reason: reason, usage: usage)
         } catch is ServingFailure {} catch is EngineError {}

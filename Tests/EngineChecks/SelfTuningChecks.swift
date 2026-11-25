@@ -189,12 +189,12 @@ func selfTuningStalenessAndPrecedence() throws {
     try require(
         try parse(["origami_tune": ["gpu_keepalive": false]]).tune?.gpuKeepAlive == false && (try parse([:])).tune == nil, "request field")
     var refused = false
-    do { _ = try parse(["origami_tune": ["gpu_keepalive": false], "origami_mode": "faster"]) } catch let failure as ServingFailure {
+    do { _ = try parse(["origami_tune": ["gpu_keepalive": false], "origami_mode": "fast"]) } catch let failure as ServingFailure {
         refused = failure.status == 400
     }
     try require(refused, "origami_tune needs an exact request")
     try require(
-        try parse(["origami_tune": [String: Any](), "origami_mode": "faster"]).tune != nil,
+        try parse(["origami_tune": [String: Any](), "origami_mode": "fast"]).tune != nil,
         "tradeoff benchmark may hold the cache without exact-only overrides")
     // The front's remote refusal sees the key however it is spelled, and only as the key the server reads.
     let escaped = Data(#"{"messages":[{"role":"user","content":"hi"}],"origami\u005ftune":{"gpu_keepalive":false}}"#.utf8)

@@ -45,7 +45,7 @@ const check = (ok, what) => { console.log((ok ? "ok    " : "FAIL  ") + what); if
 
 // GLM runs (its engine has no plan previews); Qwen was added earlier. `v1/jobs` still reports that finished add.
 routes["v1/status"] = { status: "ready", version: "2.3.1-dev", model: { name: "GLM-5.3-Flash", fingerprint: "glm" }, requests: { recent: [] },
-  settings: { context: { value: "32k", source: "config" }, quality: { value: "exact", source: "config" } }, quality_levels: ["exact", "faster"], mac: { gpu: "Apple M2 Pro", memory_bytes: 34359738368 } };
+  settings: { context: { value: "32k", source: "config" }, quality: { value: "exact", source: "config" } }, quality_levels: ["exact", "dynamic", "fast"], mac: { gpu: "Apple M2 Pro", memory_bytes: 34359738368 } };
 routes["v1/models"] = { data: [{ id: "glm-5.3-flash", origami: { model: "glm-5.3-flash", setting: "glm-5.3-flash", default: true } },
   { id: "qwen3.8-flash-next-4bit", origami: { model: "qwen3.8-flash-next-4bit", setting: "qwen3.8-flash-next-4bit" } }] };
 routes["v1/models/found"] = { models: [], unreadable: [] };
@@ -57,14 +57,13 @@ await settle(); await run("refresh()"); await settle();
 check(run("modelChoice") === "glm-5.3-flash", "a job that ended before the page loaded does not choose its model");
 check(/it is in the Model menu\.$/.test(element("job-stage").textContent), "it still shows its result line, without claiming a choice");
 run('$("quality").value = "1"; dialMoved()');
-check(run("JSON.stringify(changes())") === '{"quality":"faster"}', "Apply after a quality move sends only the quality");
+check(run("JSON.stringify(changes())") === '{"quality":"dynamic"}', "Apply after a quality move sends only the quality");
 // The quality dial offers only the running model's levels; a level it does not offer shows as the one it runs.
-check(run("LEVELS.map((l) => l[0]).join()") === "exact,faster" && element("quality").max === "1" && element("st-floor").innerHTML === '<option value="faster">Faster</option>',
-  "GLM's quality dial and comparison floor offer exact and faster only");
-run('setLevels(["exact", "dynamic-fastest"])');
-check(run('LEVELS[1][1] + levelAt("fastest") + levelAt("dynamic") + levelAt("exact") + levelAt("custom")') === "Dynamic fastest1100",
-  "DeepSeek's dial offers dynamic fastest, and shows another fast level as it");
-run('setLevels(["exact", "faster"])');
+check(run("LEVELS.map((l) => l[0]).join()") === "exact,dynamic,fast" && element("quality").max === "2"
+  && element("st-floor").innerHTML === '<option value="dynamic">Dynamic</option><option value="fast">Fast</option>',
+  "GLM's quality dial and comparison floor offer exact, dynamic and fast");
+check(run('levelAt("fastest") + "" + levelAt("dynamic") + levelAt("exact") + levelAt("custom")') === "2100",
+  "fastest, which GLM does not offer, shows as fast, as GLM runs it");
 
 // An add this page sees run and finish chooses the model, and Apply names the switch.
 routes["v1/jobs"] = addJob("running", 2000); await run("refresh()"); await settle();
@@ -82,11 +81,11 @@ confirmAnswer = false; await run("apply()"); await settle();
 check(confirmed.length === 1 && /Model: glm-5.3-flash → qwen3.8-flash-next-4bit/.test(confirmed[0]) && posted() === 0, "a declined confirm saves nothing");
 confirmAnswer = true; routes["v1/config"] = { saved: true }; routes["v1/reload"] = {}; await run("apply()"); await settle();
 const body = JSON.parse((sent.find((r) => r.path === "v1/config") || {}).body || "{}");
-check(body.model === "qwen3.8-flash-next-4bit" && body.quality === "faster", "a confirmed Apply saves both");
+check(body.model === "qwen3.8-flash-next-4bit" && body.quality === "dynamic", "a confirmed Apply saves both");
 // A model the user picks from the menu is their own choice: no extra question.
 confirmed = []; run('modelByJob = false; $("quality").value = "1"'); await run("apply()"); await settle();
 const last = JSON.parse(sent.filter((r) => r.path === "v1/config").pop().body);
-check(confirmed.length === 0 && last.model === "qwen3.8-flash-next-4bit" && last.quality === "faster", "a model picked from the menu needs no extra confirm");
+check(confirmed.length === 0 && last.model === "qwen3.8-flash-next-4bit" && last.quality === "dynamic", "a model picked from the menu needs no extra confirm");
 
 // The folders section and its browser: a folder chosen for expert copies joins the stores, saved comma-separated.
 routes["v1/fs"] = { roots: [{ name: "Home", path: "/Users/me", drive: "internal drive", free_bytes: 5e11 }],
@@ -557,7 +556,7 @@ confirmAnswer = false; confirmed = []; postsBefore = hotPosts().length; await cl
 check(/>Copy all experts, 4-bit, to Fast</.test(c.acts) && /all experts, 4-bit, to Fast \(100 GB, about 17 min\), then reloads/.test(confirmed[0]) && hotPosts().length === postsBefore,
   "Copy all experts names the 4-bit copy; declined, nothing starts");
 // A family's saved memory limit shows as saved.
-routes["v1/plan"] = { settings: { context: 131072, quality: "exact", memory_limit: 25.77e9 }, quality: { allowed: true, levels: [{ name: "exact" }, { name: "faster" }] }, context: { limit: 131072 },
+routes["v1/plan"] = { settings: { context: 131072, quality: "exact", memory_limit: 25.77e9 }, quality: { allowed: true, levels: [{ name: "exact" }, { name: "dynamic" }, { name: "fast" }] }, context: { limit: 131072 },
   experts: { cache_experts: 900, total: 10000 }, memory: { cap_bytes: 25.77e9, most_bytes: 27e9, ram_bytes: 34359738368, split: [] }, drives: [] };
 await run("loadSetup(status)"); await settle();
 check(/^25\.8 GB of 32 GB$/.test(element("o-memory").textContent) && !("memory_limit" in run("changes()")), "saved memory reads in the decimal GB the setting takes and is not resent");
@@ -650,7 +649,7 @@ const stoppedBody = (status, freed) => [{ status, version: "2.3.3-dev", model: "
   error: { code: "stopped", message: "Origami is stopped; press Start on its dashboard (this server's address in a browser) or run origami start on its Mac", type: "server_unavailable" } }, 503];
 routes["v1/jobs"] = { job: null };
 routes["v1/status"] = { status: "ready", version: "2.3.3-dev", model: { name: "GLM-5.3-Flash", fingerprint: "glm2" }, requests: { recent: [], current: { phase: "decode", output_pieces: 40 } },
-  settings: { context: { value: "32k", source: "config" }, quality: { value: "exact", source: "config" } }, quality_levels: ["exact", "faster"], mac: { gpu: "Apple M2 Pro", memory_bytes: 34359738368 } };
+  settings: { context: { value: "32k", source: "config" }, quality: { value: "exact", source: "config" } }, quality_levels: ["exact", "dynamic", "fast"], mac: { gpu: "Apple M2 Pro", memory_bytes: 34359738368 } };
 await run("refresh()"); await settle();
 check(!element("power").hidden && !element("power").disabled && element("power").attrs["aria-label"] === "Stop and unload" && /^Stop<span class="power-more"> and unload/.test(element("power").innerHTML),
   "the front's page offers Stop and unload in the header");
@@ -827,7 +826,7 @@ const wiredStatus = () => ({ status: "ready", model: { name: "GLM", fingerprint:
 routes["v1/dashboard"] = () => answer(wiredStatus());
 routes["v1/jobs"] = { job: null };
 run('dashboard = null; initial = null; smSaved = null; conflict = false; applying = null; reloading = false; job = null; offline = false; noModel = false; generation = null; revision = null; liveState = "ready"');
-run(`acceptSnapshot(${JSON.stringify(wiredSnapshot)}); familySetup({settings: ${JSON.stringify(wiredSnapshot.saved_settings)}, quality_levels: ["exact", "faster"]}); gate()`);
+run(`acceptSnapshot(${JSON.stringify(wiredSnapshot)}); familySetup({settings: ${JSON.stringify(wiredSnapshot.saved_settings)}, quality_levels: ["exact", "dynamic", "fast"]}); gate()`);
 check(run("memoryStops.at(-1)") === 27.5 && !element("memory").disabled && element("wired-saved").textContent === "26.0 GB"
   && element("wired-active").textContent === "24.0 GB" && element("wired-system").textContent === "24.0 GB",
   "wired RAM uses the host's fractional maximum and separates saved, active and system budgets");
@@ -860,7 +859,7 @@ const wiredReloadBefore = sent.filter(r => r.path === "v1/reload").length;
 routes["v1/memory/wired"] = [{ error: { message: "Administrator approval cancelled; nothing saved." } }, 403];
 await run("apply(false)"); await settle();
 const wiredDenied = sent.filter(r => r.path === "v1/memory/wired").at(-1);
-check(wiredDenied.headers["If-Match"] === "wired1" && wiredDenied.signal.milliseconds === 135000 && JSON.parse(wiredDenied.body).quality === "faster"
+check(wiredDenied.headers["If-Match"] === "wired1" && wiredDenied.signal.milliseconds === 135000 && JSON.parse(wiredDenied.body).quality === "dynamic"
   && sent.filter(r => r.path === "v1/config").length === wiredConfigBefore && run("dirty()")
   && /nothing saved/.test(element("apply-note").textContent), "wired save includes every edited setting and preserves the draft after authorization fails");
 routes["v1/memory/wired"] = (_path, options) => {
@@ -1130,7 +1129,7 @@ check(element("notice-title").textContent === "The model did not start", "a new 
       pending_changes: differs() ? [{ key: "memory_limit", label: "Memory", saved: "automatic", running: "24.0 GB" }] : [], pending_revert: differs() ? { memory_limit: "24.0 GB" } : {},
       wired_memory: { physical_memory_bytes: 34359738368, os_headroom_bytes: 4.3 * G, safe_max_budget_bytes: 30 * G, effective_limit_bytes: 30 * G, system_default: true, metal_recommended_bytes: 24 * G,
         configured_budget_bytes: memoryWorld.saved, active_budget_bytes: memoryWorld.running || 25.5 * G, supported: true, requires_raise: false } } });
-  routes["v1/plan"] = () => answer({ settings: { context: 131072, quality: "exact", expert_bits: 4, memory_limit: memoryWorld.running || "auto" }, quality: { allowed: true, levels: [{ name: "exact" }, { name: "faster" }] },
+  routes["v1/plan"] = () => answer({ settings: { context: 131072, quality: "exact", expert_bits: 4, memory_limit: memoryWorld.running || "auto" }, quality: { allowed: true, levels: [{ name: "exact" }, { name: "dynamic" }, { name: "fast" }] },
     context: { limit: 262144, in_memory_up_to: 262144 }, experts: { pack_ready: true, bits: 4 }, memory: { cap_bytes: memoryWorld.running || 25.5 * G, most_bytes: 30 * G, ram_bytes: 34359738368, split: [] }, drives: [], notes: [] });
   routes["v1/jobs"] = { job: null };
   const writes = [];

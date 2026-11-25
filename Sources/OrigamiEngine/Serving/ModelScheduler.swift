@@ -235,8 +235,8 @@ public final class ModelScheduler<Child: AnyObject>: @unchecked Sendable {
         if let old { stop(old.child) }
     }
 
-    /// The listed id a requested model name means: the id itself, the id with a `-<level>` suffix (`-faster`,
-    /// `-fast`…), either with Ollama's `:latest` tag; nil for a name not listed.
+    /// The listed id a requested model name means: the id itself, the id with a `-<level>` suffix (`-fast`,
+    /// `-faster`…), either with Ollama's `:latest` tag; nil for a name not listed.
     public static func resolve(_ name: String?, ids: [String]) -> String? {
         guard var name else { return nil }
         if name.hasSuffix(":latest") { name.removeLast(":latest".count) }

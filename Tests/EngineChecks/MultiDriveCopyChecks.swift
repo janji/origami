@@ -401,6 +401,8 @@ private func splitStore(_ root: URL) throws -> (PackStore, HotCopy, HotCopy, Sou
     let further = try HotCopy.write(
         source: source, keys: Array(0..<8), folder: drive.appendingPathComponent(PackStore.furtherCopyFolder), identity: identity)
     let store = try PackStore(model: model, copies: [drive], log: { _ in })
+    // Every folder of a check is on one disk: count each as its own drive.
+    store.disk = { _ in nil }
     let hot = try HotCopy.write(source: source, keys: Array(0..<8), folder: root.appendingPathComponent("hot"), identity: identity)
     store.attachHotCopy(hot)
     let ledger = try MemoryLedger(ceiling: 400_000_000, transientMargin: 1_000_000)
@@ -502,6 +504,7 @@ func splitReadQwenPlaces() throws {
     defer { try? FileManager.default.removeItem(at: root) }
     let model = try multiSpanModel(root.appendingPathComponent("model"))
     let store = try PackStore(model: model)
+    store.disk = { _ in nil }
     let identity = PackStore.hotCopyIdentity(model)
     let a = try HotCopy.write(source: store, keys: [0, 1, 2, 3], folder: root.appendingPathComponent("placeA"), identity: identity)
     let b = try HotCopy.write(source: store, keys: [0, 1, 4], folder: root.appendingPathComponent("placeB"), identity: identity)
@@ -523,7 +526,14 @@ func splitReadQwenPlaces() throws {
             try store.readExpert(layer: key.layer, expert: key.expert, into: destination, source: .packed)
         }
     }
-    loader.enableSplitReads(SourceExpertLoader.SplitPartReader(store: store))
+    // No measured speeds: the plan follows the calibration, not how fast this Mac read the last record.
+    loader.enableSplitReads(
+        .init(
+            sources: { store.splitSources($0) }, wearing: { _, _ in false },
+            read: { key, source, offset, into, checks in
+                try store.readExpertPart(key, source: source, at: offset, into: into, checks: checks)
+            },
+            verify: { key, record, checks in try store.verifySplit(key, record: record, checks: checks) }))
     loader.splitsReads = true
     loader.setDecoding(true)
     let calibration = ExpertSourceCalibration(
@@ -561,4 +571,30 @@ func splitReadQwenPlaces() throws {
     try multiRequire(
         loader.splitReads.splitCount == 3 && (loader.splitReads.report["failed_part_rereads"] as? Int ?? 0) >= 1,
         "the gone place's part did not fail over: \(loader.splitReads.report)")
+}
+
+/// Qwen, every demand read planned (`SourceExpertLoader`): eight concurrent demand reads of records the model's spans, a
+/// hot copy and a pack copy hold publish the exact records and leave no planned bytes behind.
+func splitReadQwenConcurrent() throws {
+    let root = try multiRoot("split-concurrent")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (_, _, _, loader, scheduler) = try splitStore(root)
+    defer { scheduler.shutdown() }
+    final class Results: @unchecked Sendable {
+        let lock = NSLock()
+        var exact = 0
+        var errors: [String] = []
+    }
+    let results = Results()
+    DispatchQueue.concurrentPerform(iterations: 8) { expert in
+        do {
+            let exact = try splitStoreRead(loader, scheduler, expert) == multiRecord(expert)
+            results.lock.withLock { results.exact += exact ? 1 : 0 }
+        } catch { results.lock.withLock { results.errors.append("\(error)") } }
+    }
+    try multiRequire(results.errors.isEmpty && results.exact == 8, "concurrent reads: \(results.exact) exact, \(results.errors)")
+    try multiRequire(loader.splitReads.splitCount >= 1, "no concurrent read was split: \(loader.splitReads.report)")
+    let end = Date(timeIntervalSinceNow: 2)
+    while loader.plannedBytes.total != 0 && Date() < end { Thread.sleep(forTimeInterval: 0.001) }
+    try multiRequire(loader.plannedBytes.total == 0, "planned bytes left: \(loader.plannedBytes.total)")
 }

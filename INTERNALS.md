@@ -1459,9 +1459,11 @@ first on ties, the order the normaliser sums in; the full sort only for `substit
 (`FamilyRunner.performanceCores`, 64 rows a lane at least), gathered in row order. Decode applies it with the dial
 (section 6): experts per token, tail skip, and, as every miss is late here, `skip` drops the experts not in memory but
 the heaviest, while `substitute` runs the resident expert with the best selection score in each one's place. A
-conversation continues only from exact rows or rows of its own level. GLM offers `faster` and DeepSeek
-`dynamic-fastest` (`QualityDial.offered`): `fastest`'s late-miss skip drops every expert not in memory but the
-heaviest here, which broke GLM's answers even when gated to confident tokens, and DeepSeek's only when not gated.
+conversation continues only from exact rows or rows of its own level. GLM and DeepSeek offer `exact`,
+`dynamic` and `fast` (`QualityDial.offered`): `fastest`'s late-miss skip drops every expert not in memory but the
+heaviest here, which broke GLM's answers even when gated to confident tokens, so GLM runs `fastest` as `fast`. DeepSeek
+gained nothing from the plain knobs, so its `dynamic` runs the `dynamic-fastest` knob set and its `fast` the `fastest`
+one (`QualityDial.runs`); ungated, that slipped once in 14 tasks.
 
 #### Checks
 
@@ -2098,55 +2100,76 @@ adopts a race's entry after it was published but before it left the in-flight ta
 when none is left (the cache ticket still refuses a record evicted meanwhile;
 `expert_replica_late_adopter_repins`).
 
-**Split reads** (`Streaming/SplitReads.swift`, all three engines; off by default, `ORIGAMI_SPLIT_READS=1` turns them
-on: on one fast drive they gained nothing, 9.72 against 9.75 tok/s). Off, the engines still find a lone read's
-sources and count its wait (`lone_demand_waits`, `lone_demand_wait_seconds`): nothing is planned, staged or
-allocated. A lone
-demand miss that a layer waits on and that more than one source holds goes to `SplitReads.plan`. Its sources are the
-record's live list: every hot copy place that can serve it now (`HotCopySet.sources`, a duplicate on a slower place
-included) plus the model's own files (Qwen: the checkpoint's spans, and the pack queue when a copy there holds it;
-Qwen needs a decode demand read whose caller named no drive, with no other demand read of the loader in flight; GLM and
-DeepSeek: a decode fetch with one miss). The planner is a pure function of the record size and, per source, its live
-rate and fixed cost per read (a place: its lane's time per read once measured; otherwise Qwen's placement curve at one
-read, the families' planned rate and latency EWMA), its healthy rate (a place: its own slow-read tally), its reads in
-flight or queued, and its wear. It is read whole, as before, unless: the fastest whole reader and every other part-taker are idle (else `busy`);
-no part-taker is below a third of its own healthy rate (`unhealthy`, the hedge rule's stall) or worn (`wear`: its
-files' `DriveReadHistory` says high or due, or the live `SlowDriveReads` share is high); parts are sized so all would
-end together (latency + bytes / rate), on 16 KiB boundaries, dropping a source whose part would be under a page; and
-the latest part is predicted to end at least 15% (`SplitReads.margin`) before the fastest whole read (`small_gain`; the
-measurement gained 25–40% with about 10% noise). The record's read is one scheduler job on the fastest part's drive
-(charged that part's bytes), so the rest of the engine sees one read (its slot, its hedge race, its generation, its
-completion). `SplitReads.execute` reads the fastest part on that job's thread straight into the slot; every other part
-is a demand job of its own on its drive (so a read planned meanwhile sees that drive busy, and `shutdown`,
-`cancelAndJoin` and Qwen's `joinDiscarding` join it; a part whose job is cancelled before it runs ends from the
-job's completion, once, and the split then fails as cancelled with no whole re-read: `split_read_queued_part_cancel`), read into a replica-arena lease at the same offsets and copied in.
-The fastest part always reads in place, inline, before the wait that guards late parts begins, so only a record-level
-hedge race covers it (the families; Qwen with `tail_replicas`, which the plan turns on only with a pack on a second
-drive), as it covers a whole read. (It was once staged too when no race ran, for a guard of its own; that guard could
-never fire, since the inline read had ended before the wait began, so it cost one copy of its bytes for nothing.)
-Without the race (Qwen on one drive with hot copies, the usual case) staging comes from a two-record arena charged to
-the ledger at the first split (about 5.6 MB). A staged part later than the hedge delay for its bytes is read again from the fastest
-other source straight into the slot; the first complete version of each range wins, and a staged part that ends while
-its guard still reads waits for it, so two writers never write the same bytes. A staged part is copied into the slot
-only inside `ExpertReadReplica.whileOwned`, under the lock a replica's win is published under: once a replica has
-published the record the split drops its staged bytes, waits for its reads into the slot, and fails
-(`SplitReadOrphaned`, no whole re-read), and the winner's bytes reach the slot only by the existing rule (copied once
-the primary job, and so every in-place writer, has ended; otherwise the lease is used in place and the slot freed when
-the primary fails). A failed part is read again from another source; a range every source failed fails the split, and
-the record is read whole as an ordinary read. A staged loser may outlive the job, writing only into its lease, which
-its job holds (asserted in debug builds) until it returns. The assembled record is checked as a whole read is (the
-copy's CRC32 on its first read, against the checksum its part read saw, so an in-place swap cannot change what it is
-checked against; Qwen's sampled pack digests); a mismatch drops nothing and the record is read whole, whose own check
-drops whichever copy is wrong. A key a swap took out of a copy between plan and read makes that part fail over like a
-failed read (or, on Qwen's model drive, read from the checkpoint's spans). Every completed part trains its drive as a
-whole read does, with its own bytes and time (Qwen's online estimator, the families' `learn`, copy lanes, slow-read
-tallies), a staged loser that ends after its split included; parts are not counted as records in the demand timing
-counters. Bytes are the same from every source, so output cannot change. Counters: `split_reads` in `/v1/status` and
-each request's notes (Qwen: `split_*` request phase counters; its `lone_demand_wait_seconds` counts decode only).
-Checks: `split_read_planner`, `split_read_execution`, `split_read_family_fetch`, `split_read_family_hedge_wins` (200
-runs), `split_read_qwen_loader`, `split_read_trains_estimates`, `split_read_pack_store`, `split_read_swapped_key`,
-`split_read_qwen_places` (the loader as one-drive serving builds it), `split_read_family_places`; the
-hedged-read and two-drive copy checks run with splits off.
+**Split reads** (`Streaming/SplitReads.swift`, all three engines; opt-in with `ORIGAMI_SPLIT_READS=1`: they have gained
+nothing so far, 9.72 against 9.75 tok/s on one fast drive with lone decode misses and 8.68 against 8.89 with every
+demand read planned across two drives). Off, the engines still find a lone read's sources and count its wait
+(`lone_demand_waits`, `lone_demand_wait_seconds`): nothing is planned, staged or allocated. Qwen plans every demand
+read whose caller named no drive (prefill and decode); GLM and DeepSeek a decode fetch with one miss the copy holds.
+The sources are the record's live list: every hot copy place that can serve it now (`HotCopySet.sources`, a duplicate
+on a slower place included) plus the model's own files (Qwen: the checkpoint's spans, and the pack queue when a copy
+there holds it), one per physical disk (`SplitReads.onePerDisk` on `DriveSpeed.disk`, the fastest kept: two sources on
+one disk would each claim its whole bandwidth; a hot copy or a pack can sit on the model's drive). `SplitReads.plan`
+is a pure function of the record size and, per source: its live rate from that physical source's own completed reads,
+whole and part (a place or a pack copy: its lane's smoothed bytes over smoothed time, `ReadLane.measured`, once it has
+8 reads; the model's drive: its slow-read tally's current rate, `SlowDriveReads`; until measured, Qwen's static curve
+at one read, the families' planned rate and latency EWMA), that rate's age, its healthy rate (its own tally), how long
+until the work already on it is done (`busySeconds`: Qwen, the bytes its loader planned there and has not read
+(`SplitPlannedBytes`; parts and whole reads, added at plan time and given back when each part or read ends, a whole
+read the planner did not route counted on the source that reads it when that is known), at its rate; the families,
+the place's reads in flight and its share of the copies' queue, a record each, and the GGUF queue's bytes) and its
+wear. A rate older than 10 s (`SplitReads.freshSeconds`: a drive's state changes over tens of seconds) is measured
+again rather than trusted: planned at the healthy rate (else the last one), never excluded as stalled, never the
+first part unless every candidate is stale. The candidates are the sources not worn (`wear`: its files'
+`DriveReadHistory` says high or due, or the live `SlowDriveReads` share is high) and not stalled while fresh (below a
+third of its own healthy rate, `unhealthy`, the hedge rule's stall). Each can deliver rate x (T − busy − latency)
+bytes by time T; T is where the candidates together deliver the record (water-filling: sources added by start time
+while they start before T), parts on 16 KiB boundaries, a source whose part would be under a page dropped. The read is
+split when the latest part is predicted to end at least 15% (`SplitReads.margin`) before the best whole read (the
+candidate that would end it first; the measurement gained 25–40% with about 10% noise); else it is whole from that
+candidate (`small_gain`). Such a whole read goes to that source when it is not the normal path's: Qwen reads it as a
+one-part split (no staging) when it is the model's files or the pack and the normal path reads another known source;
+the families swap the lone miss between the copy and the GGUF when `copyShare` gave it the other
+(`whole_from_other_source`). A split's first part is the fastest fresh source's (at the record's end). The record's
+read is one scheduler job on the first part's drive (charged that part's bytes), so the rest of the engine sees one
+read (its slot, its hedge race, its generation, its completion); the other parts' jobs start when it runs, so a first
+source with a backlog delays them too. `SplitReads.execute` reads the first part on that job's thread straight into
+the slot. In the families (only a lone miss is split) every other part is a demand job of its own on its drive (so
+`shutdown` and `cancelAndJoin` join it; a part whose job is cancelled before it runs ends from the job's completion,
+once, and the split then fails as cancelled with no whole re-read). In Qwen, where every demand read is planned and
+several splits run at once, the other parts run on threads outside the queues: a part waiting for a queue slot that
+split reads' own jobs hold would never start (`split_read_queued_part_cancel`, `split_read_qwen_concurrent`). Either
+way the part is read into a replica-arena lease
+at the same offsets and copied in. The first part always reads in place, inline, before the wait that guards late
+parts begins, so only a record-level hedge race covers it (the families; Qwen with `tail_replicas`, which the plan
+turns on only with a pack on a second drive), as it covers a whole read. (It was once staged too when no race ran,
+for a guard of its own; that guard could never fire, since the inline read had ended before the wait began, so it
+cost one copy of its bytes for nothing.) Without the race (Qwen on one drive with hot copies, the usual case) staging
+comes from an arena of the experts one token activates in a layer (ten records), charged to the ledger at the first
+split. A staged part later than the hedge delay for its bytes is read again from the fastest other source straight
+into the slot; the first complete version of each range wins, and a staged part that ends while its guard still reads
+waits for it, so two writers never write the same bytes. A staged part is copied into the slot only inside
+`ExpertReadReplica.whileOwned`, under the lock a replica's win is published under: once a replica has published the
+record the split drops its staged bytes, waits for its reads into the slot, and fails (`SplitReadOrphaned`, no whole
+re-read), and the winner's bytes reach the slot only by the existing rule (copied once the primary job, and so every
+in-place writer, has ended; otherwise the lease is used in place and the slot freed when the primary fails). A failed
+part is read again from another source; a range every source failed fails the split, and the record is read whole as
+an ordinary read. A staged loser may outlive the job, writing only into its lease, which its job holds (asserted in
+debug builds) until it returns. The assembled record is checked as a whole read is (the copy's CRC32 on its first
+read, against the checksum its part read saw, so an in-place swap cannot change what it is checked against; Qwen's
+sampled pack digests); a mismatch drops nothing and the record is read whole, whose own check drops whichever copy is
+wrong. A key a swap took out of a copy between plan and read makes that part fail over like a failed read (or, on
+Qwen's model drive, read from the checkpoint's spans). Every completed part trains its drive as a whole read does,
+with its own bytes and time (Qwen's online estimator, the families' `learn`, copy lanes, slow-read tallies), a staged
+loser that ends after its split included; parts are not counted as records in the demand timing counters. Bytes are
+the same from every source, so output cannot change. Counters: `split_reads` in `/v1/status` and each request's notes
+(per source the rate and age the last plan used, `sources`; Qwen: `split_*` request phase counters; its
+`lone_demand_wait_seconds` counts decode only). Checks: `split_read_planner`, `split_read_planner_live` (busy, stale,
+400 random source sets), `split_read_execution`, `split_read_family_fetch`, `split_read_family_routed`,
+`split_read_family_hedge_wins` (200 runs), `split_read_qwen_loader`, `split_read_qwen_routed`,
+`split_read_qwen_concurrent` (eight concurrent reads, the planned bytes back to zero), `split_read_trains_estimates`,
+`split_read_pack_store`, `split_read_swapped_key`, `split_read_qwen_places` (the loader as one-drive serving builds
+it), `split_read_family_places`; the checks' folders share one disk, so they give each folder its own (`disk`), and
+every other check runs with one source per record, so unsplit.
 
 **PLE and host-stage rows.** `PLERowPrefetch` de-duplicates a scope's (or token's) PLE rows and reads them concurrently
 into one charged payload: 32 dedicated threads for scopes (GCD does not give 32 concurrent blocking reads), a
@@ -2232,8 +2255,8 @@ turns this path off (section 8); GGUF experts take it on ggml's kernels (section
 
 ### Fast mode
 
-v1's fast mode (now the quality dial's internal `QualityDial.lateMissSkip`, reached with the knob `late_miss skip`; the
-name `fast` maps to the level `faster`) is NUMERIC and opt-in per request. At a decode layer's join point, `FastLateMissSkip` skips routed records whose reads have no outcome yet and
+v1's fast mode (now the quality dial's internal `QualityDial.lateMissSkip`, reached with the knob `late_miss skip`; not the
+level `fast`) is NUMERIC and opt-in per request. At a decode layer's join point, `FastLateMissSkip` skips routed records whose reads have no outcome yet and
 whose normalised gate is below τ (`fast.late_miss_skip_tau`): their gate becomes 0 and the kept gates are rescaled to
 the routed mass before the reduce is encoded. The heaviest late record is kept when only zero gates would remain, and
 skips are bounded by a reserve of 10 demand records per drive. Skipped reads are not cancelled; they complete into the
@@ -2260,15 +2283,17 @@ already holds is computed with gate zero (no read). Late misses use the v1 fast 
 resident expert with the highest router logit outside the routed ten in the skipped rank's place, weighted
 `w · exp(l_sub − l_late)`, then renormalises. Prompt reads and the joined replay path (`fallbacks`, expected 0) stay
 exact; decode rows of a non-exact dial carry their own timeline epoch (`FastLateMissSkip.timelineEpoch`), and v1's
-late-miss skip keeps its old one. The named levels are `exact`, `dynamic`, `faster`, `fastest` and `dynamic-fastest`
-(`QualityDial.levels`; `dynamic-fastest` is `fastest`'s knobs with `confidentAbove` 0.9). Each model offers exact and
-only the fast levels that clearly helped it on checkable tasks (`QualityDial.offered`: Qwen `faster` and `fastest`,
-GLM `faster`, DeepSeek `dynamic-fastest`); listings, `quality_levels`, the plan, the dashboard and the chat command
-show only those. Every name is still accepted: `LocalHTTPServer` maps a request's dial (named, sticky or the default)
-with `offered(by: configuration.family)`, so a level the model does not offer runs as its mildest offered fast level,
-and usage, `X-Origami-Mode` and the request record name that one; custom knobs pass unchanged.
-`QualityDial.aliases` maps `fast` to `faster` wherever a level is named (`origami_mode`, a `-<level>` model id,
-settings, chat commands).
+late-miss skip keeps its old one. The named knob sets are `exact`, `dynamic`, `fast`, `fastest` and `dynamic-fastest`
+(`QualityDial.levels`; `dynamic` and `dynamic-fastest` are `fast`'s and `fastest`'s knobs with `confidentAbove` 0.9);
+settings files store these names. Every model offers the same ladder (`QualityDial.offered`): `exact`, `dynamic`,
+`fast`, and `fastest` only on Qwen; listings, `quality_levels`, the plan, the dashboard and the chat command show only
+those. Every name is still accepted: `LocalHTTPServer` maps a request's dial (named, sticky or the default) with
+`offered(by: configuration.family)` to the knobs the family runs (`QualityDial.runs`: `dynamic-fastest` runs as
+`dynamic`, `fastest` on GLM as `fast`, DeepSeek's `dynamic` and `fast` as `dynamic-fastest` and `fastest`), and
+usage, `X-Origami-Mode`, `/v1/status`, the request record and the log line name it with `name(family)`, the level on
+that family's ladder; custom knobs pass unchanged. Timeline epochs come from the knobs (`signature`), not the names.
+`QualityDial.aliases` maps `faster`, the name of `fast` before 3.1.8, to `fast` wherever a level is named
+(`origami_mode`, a `-<level>` model id, settings, chat commands).
 
 A dial with `confidentAbove` is dynamic: `step(after: logits)` gives one decode step's dial from the distribution the
 token just produced was sampled from: the other knobs when its top-1 probability (`topProbability`, the softmax
@@ -3488,7 +3513,7 @@ start had to degrade, `X-Origami-Note`.
 
 | Limit | Default (256K tier in brackets) |
 |---|---|
-| Connections | 64 requests plus 2 for health and status (`maximumConnections`); a 65th request gets a 503 "Too many open requests; retry in a moment", and a connection past all 66 is closed. The front takes as many |
+| Connections | 64 requests plus 2 for health and status (`maximumConnections`; further health and status reads take free request slots); a 65th request gets a 503 "Too many open requests; retry in a moment", and a connection past all 66 is closed. The front takes as many |
 | Requests buffered at once | 4 [2] (`bufferedRequests`): the body pool below; when it is full, a 503 "Request buffers are busy; retry in a moment" |
 | Header bytes | 32 KiB |
 | Body bytes | 24 MiB (images arrive inline) |
@@ -3520,7 +3545,7 @@ for reading and answered 503; otherwise it gets the 503 itself.
 `ServingRequest.parse` validates once and fills defaults:
 
 - **Model.** Any model id is accepted (with `list_models` on, the front answers an unlisted one with 404
-  `model_not_found`); the model's own id (or `origami`) plus `-<level>` (any level name, or `-fast` for `faster`)
+  `model_not_found`); the model's own id (or `origami`) plus `-<level>` (any level name, or `-faster` for `fast`)
   selects that quality level, as does `origami_mode`, so a name that merely ends in a level's is not read as one; the
   server runs it as the model's nearest offered level.
 - **Thinking.** It comes under a dozen field names (`reasoning_effort`, `think`, `reasoning.{effort, enabled,
@@ -3594,7 +3619,7 @@ forget <name|all> | fast on|off | quality [level]`, in any case (tolerating a tr
 Anything else is an ordinary message. Replies start with `Origami ·`. Earlier commands and their marked replies are
 dropped from what the model sees. `save` takes the generation slot (it may prefill); the others answer at once, even
 while the model loads; `save`, `forget` and `prompts` first wait for pending saves. `quality <level>` (and `fast on|off`,
-its older form: `faster` or `exact`) is stored per system prompt (keyed by the SHA-256 of the leading system and
+its older form: `fast` or `exact`; levels are stored by their ladder name) is stored per system prompt (keyed by the SHA-256 of the leading system and
 developer text) in `fast-mode.json`; a request's own choice wins.
 `commands false` turns commands off.
 

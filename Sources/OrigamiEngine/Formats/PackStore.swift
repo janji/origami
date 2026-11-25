@@ -458,14 +458,50 @@ public final class PackStore: @unchecked Sendable {
         case pack
     }
     /// Every source that can serve `key` now, from the live lookups: the model's spans, each hot copy place holding it
-    /// (`HotCopySet.sources`, duplicates on several places included) and the pack queue when a copy there holds it.
-    /// Empty for a GGUF expert record (it carries a header the engine writes, so it is read whole).
+    /// (`HotCopySet.sources`, duplicates on several places included) and the pack queue when a copy there holds it; of
+    /// sources on one physical disk (a hot copy or a pack on the model's drive) only the fastest
+    /// (`SplitReads.onePerDisk`). Empty for a GGUF expert record (it carries a header the engine writes, so it is read
+    /// whole).
     package func splitSources(_ key: ExpertKey) -> [SplitSource] {
         let index = key.layer * ModelContract.experts + key.expert
         guard model.ggufExperts == nil else { return [] }
         let places = hotLock.withLock { hotCopies }.map { set in set.sources(index).map { SplitSource.place(set, $0) } } ?? []
-        let pack = lock.withLock { copies.contains { $0.store?.holds(index) ?? ($0.experts != nil && $0.records[index] != nil) } }
-        return [.model] + places + (pack ? [.pack] : [])
+        let pack = packLanes(index)
+        let sources: [SplitSource] = [.model] + places + (pack.isEmpty ? [] : [.pack])
+        guard sources.count >= 2 else { return sources }
+        // The pack's copies on one disk name it; on several, none (never dropped).
+        let packDisks = Set(pack.map { disk($0.folder) })
+        let disks = sources.map { source -> String? in
+            switch source {
+            case .model: disk(model.directory)
+            case .place(let set, let place): disk(set.stores[place].folder)
+            case .pack: packDisks.count == 1 ? packDisks.first! : nil
+            }
+        }
+        let rates = sources.map { source -> Double in
+            switch source {
+            case .model: modelDriveReads.rates.current
+            case .place(let set, let place): set.lane(place).measured?.bytesPerSecond ?? 0
+            case .pack: pack.compactMap(\.lane.measured?.bytesPerSecond).max() ?? 0
+            }
+        }
+        return SplitReads.onePerDisk(disks, rates: rates).map { sources[$0] }
+    }
+    /// The physical disk of a folder (`DriveSpeed.disk`); checks, whose folders all share one disk, give each its own.
+    /// Set before serving.
+    package var disk: @Sendable (URL) -> String? = { DriveSpeed.disk($0) }
+    /// The open pack-queue copies holding record `index`: each one's folder and lane.
+    private func packLanes(_ index: Int) -> [(folder: URL, lane: ReadLane)] {
+        lock.withLock {
+            copies.filter { $0.store?.holds(index) ?? ($0.experts != nil && $0.records[index] != nil) }.map { ($0.folder, $0.lane) }
+        }
+    }
+    /// The pack queue's lane a split plans `key` from: of its copies holding it, the measured one with the highest rate
+    /// (`ReadLane.measured`); nil while none is measured.
+    package func packLane(_ key: ExpertKey) -> ReadLane? {
+        packLanes(key.layer * ModelContract.experts + key.expert).map(\.lane).filter { $0.measured != nil }.max {
+            $0.measured!.bytesPerSecond < $1.measured!.bytesPerSecond
+        }
     }
 
     /// Bytes `at ..< at + buffer.count` of expert `key`'s record from `source` (a split read's part): the pack queue's

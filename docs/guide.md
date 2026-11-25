@@ -160,6 +160,10 @@ is automatic and replies are the same with or without it.
 - **More drives.** Tick more drives in **Change…** (or set `hot_copy_more`): the fastest drive holds the most-used
   experts, the next drive the next ones, and each read goes to the drive expected to finish first. For Qwen,
   `origami store add <folder>` also keeps a full copy of the experts on another drive.
+- **Reading from every drive at once.** An expert that several drives hold (the copy and the model's own drive) is
+  read in parts from all of them, each a share that matches its measured speed and the work it already has, or whole
+  from the one that would finish first; a drive that slows down gets no share until it is fast again
+  (an experiment, off unless `ORIGAMI_SPLIT_READS=1`).
 
 Details: [settings.md](settings.md#model-and-files).
 
@@ -189,10 +193,11 @@ Details: [settings.md](settings.md#saved-prompts).
 **Exact by default.** Origami uses every expert the model picks, so replies are the model's own. Every option that
 changes replies is opt-in and labelled wherever the model is shown.
 
-- **Quality levels** leave out experts a reply would wait for, so it writes faster: `faster` and `fastest` for Qwen,
-  `faster` for GLM, `dynamic-fastest` for DeepSeek. Choose per request (`"origami_mode": "faster"`, or the model
-  name `qwen3.8-flash-next-faster`), per chat (`origami quality faster`), or as the default
-  (`origami config set quality faster`).
+- **Quality levels** take shortcuts, leaving out experts a reply would wait for, so it writes faster. Every model
+  offers `dynamic` (shortcuts only where the model is sure of the next word), `fast` (the shortcut everywhere,
+  replies differ slightly), and Qwen also `fastest` (the most shortcuts, replies differ most). Choose per request
+  (`"origami_mode": "fast"`, or the model name `qwen3.8-flash-next-fast`), per chat (`origami quality fast`), or as
+  the default (`origami config set quality fast`).
 - **`allow_fast`** (default `true`) allows those levels. `origami config set allow_fast false` makes every request
   exact.
 - **An exact request never reuses fast-mode state.** It never restores work a fast mode computed, so fast turns
@@ -265,7 +270,7 @@ These are ideas waiting for a measurement, not promises. The full list is in [RO
 
 - Testing on other Macs: 16 and 24 GB under real load, M1, M5, 64 GB or more.
 - Mixing exact and low-bit experts in one reply, and speculative decoding, where they pay.
-- Deciding the four remaining experiment switches, such as split reads across two fast drives
+- Deciding the three remaining experiment switches, and measuring split reads (on since 3.1.8) on more Macs
   ([switches.md](switches.md)).
 - Smaller speed-ups that still need measuring: kernel fusions, GPU keep-alive power use.
 

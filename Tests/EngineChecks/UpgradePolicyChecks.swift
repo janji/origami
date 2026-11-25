@@ -25,11 +25,11 @@ func upgradePolicyChecks() -> [(String, () throws -> Void)] {
                 }
                 let enabled = try parse(["origami_mode": "fast", "origami_tune": ["delayed_experts": true]])
                 try require(
-                    enabled.quality.name == "faster" && enabled.quality.delayedExperts != nil,
+                    enabled.quality.name == "fast" && enabled.quality.delayedExperts != nil,
                     "Delayed policy lost the mode alias")
                 for early in [false, true] {
                     let scheduled = try parse([
-                        "origami_mode": "faster",
+                        "origami_mode": "fast",
                         "origami_tune": [
                             "delayed_experts": true, "family_early_delayed_reads": early,
                         ],
@@ -40,12 +40,12 @@ func upgradePolicyChecks() -> [(String, () throws -> Void)] {
                 }
                 try require(
                     refuses([
-                        "origami_mode": "faster",
+                        "origami_mode": "fast",
                         "origami_tune": [
                             "delayed_experts": true, "family_early_delayed_reads": 1,
                         ],
                     ]), "Numeric early-read flag was accepted")
-                let baseline = QualityDial.level("faster")!
+                let baseline = QualityDial.level("fast")!
                 try require(
                     FastLateMissSkip.timelineEpoch("x", quality: enabled.quality)
                         != FastLateMissSkip.timelineEpoch("x", quality: baseline), "Delayed policy reused the baseline timeline")

@@ -615,8 +615,12 @@ package final class FamilyExperts: @unchecked Sendable {
     package let modelDriveReads = SlowDriveReads()
     /// Split reads of lone decode misses the copy also holds (`SplitReads`): `split_reads` in the notes.
     package let splitReads = SplitReadCounters()
-    /// Whether lone decode misses may be split (`SplitReads.enabled` at start; checks of split reads turn it on).
+    /// Whether lone decode misses may be split or read whole from the drive found best (`SplitReads.enabled` at start;
+    /// checks turn it on and off).
     package var splitsReads = SplitReads.enabled
+    /// The physical disk of a folder (`DriveSpeed.disk`); checks, whose folders all share one disk, give each its own.
+    /// Set before serving.
+    package var disk: @Sendable (URL) -> String? = { DriveSpeed.disk($0) }
     /// Split parts' times, from the reader threads, until the serving thread trains the drives with them.
     private let splitTimings = SplitPartTimings()
     /// Checks only: runs in each split part's read after its bytes are read (source, whether it reads into staging, the
@@ -1573,8 +1577,9 @@ package final class FamilyExperts: @unchecked Sendable {
             }
             // A lone decode miss a copy also holds, which the layer waits on: read in parts from every place holding it
             // (`HotCopySet.sources`) and the GGUF when that is predicted to end clearly sooner (`SplitReads`; sources
-            // 0 ..< n the copy places, n the GGUF). One job, on the drive of the fastest part, is the record's read for
-            // the rest of `fetch` (its hedge, its slot, its verification).
+            // 0 ..< n the copy places, n the GGUF). One job, on the drive of the lead part, is the record's read for
+            // the rest of `fetch` (its hedge, its slot, its verification). Read whole, it goes to the drive the plan
+            // found best when `copyShare` gave it the other one.
             let lone = decode && first && missing.count == 1 && hot?.holds(layer * e + missing[0].expert) == true
             var split: [SplitReadPart]?
             var splitOrder: [Int] = []
@@ -1582,14 +1587,23 @@ package final class FamilyExperts: @unchecked Sendable {
             var splitStores: [Int] = []
             if lone, splitsReads, let hot {
                 splitStores = hot.sources(layer * e + missing[0].expert)
-                let sources = splitSources(holding: hot, stores: splitStores, key: layer * e + missing[0].expert)
+                let sources = splitSources(holding: hot, stores: &splitStores, key: layer * e + missing[0].expert)
                 let plan = SplitReads.plan(recordBytes: bank.record, sources: sources, waited: true, enabled: splitsReads)
-                splitReads.record(plan)
+                splitReads.record(
+                    plan, sources: sources,
+                    names: splitStores.map { "copy\($0)" } + (sources.count > splitStores.count ? ["model"] : []))
                 if case .split(let parts) = plan {
                     split = parts
                     jobs = [(0, parts[0].source < splitStores.count ? -1 : -2)]
                     splitOrder = sources.indices.sorted { sources[$0].seconds(bank.record) < sources[$1].seconds(bank.record) }
                     splitHealthy = sources.map(\.healthyBytesPerSecond)
+                } else if case .whole(let best?, _) = plan, (best < splitStores.count) != (jobs[0].part == -1) {
+                    // The plan's best drive, not `copyShare`'s: the copy (whichever place it picks) or the GGUF.
+                    let fromCopy = best < splitStores.count
+                    jobs = fromCopy ? [(miss: 0, part: -1)] : (0..<3).map { (miss: 0, part: $0) }
+                    heldMain = fromCopy ? [] : [0]
+                    counters.demandHeldMainRecords += fromCopy ? -1 : 1
+                    splitReads.routedWhole()
                 }
             }
             let staging = split == nil ? nil : replicaArena
@@ -1775,7 +1789,7 @@ package final class FamilyExperts: @unchecked Sendable {
                 progress, won: won, work: work, misses: misses, missing: missing, bank: bank, pool: p, decode: decode, started: started,
                 observations: observations, observationBytes: &observationBytes)
             if let (outcome, _) = progress.lock.withLock({ progress.split }) {
-                recordSplit(outcome, won: !won.isEmpty, places: places.count)
+                recordSplit(outcome, won: !won.isEmpty, places: places)
             }
         }
         try readMissing(Array(experts.indices), first: true)
@@ -2013,30 +2027,45 @@ package final class FamilyExperts: @unchecked Sendable {
         }
     }
 
-    /// The split planner's view of `key`'s sources: each copy place in `stores` (its lane's time per read once it has
-    /// 8 reads, else the copies' planned rate and latency; healthy from its own slow-read tally; outstanding its lane's
-    /// reads in flight plus the copies' queue; wear from its tally), then the GGUF (planned rate, latency, healthy rate,
-    /// its queue, its drive's wear).
-    private func splitSources(holding hot: HotCopySet, stores: [Int], key: Int) -> [SplitReadSource] {
-        var outstanding: [IOSource: Int] = [:]
-        for drive in reads.snapshot().drives { outstanding[drive.source] = drive.outstanding }
+    /// The split planner's view of `key`'s sources: each copy place in `stores` (its lane's rate and age once it has 8
+    /// reads (`ReadLane.measured`), else the copies' planned rate and latency, never measured; healthy from its own
+    /// slow-read tally; busy for its lane's reads in flight and its share of the copies' queued reads, a record each;
+    /// wear from its tally), then the GGUF (planned rate and latency, aged by the last read its slow-read tally counted;
+    /// healthy rate; busy for its queue's bytes; its drive's wear). Of sources on one disk (`disk`; a place on the
+    /// GGUF's drive with the same-drive experiment) only the fastest: `stores` keeps the places kept, and the GGUF is
+    /// last when kept.
+    private func splitSources(holding hot: HotCopySet, stores: inout [Int], key: Int) -> [SplitReadSource] {
+        let drives = reads.snapshot().drives
+        let queued = drives.first { $0.source == .internalSSD }.map { $0.queuedDemand + $0.queuedPrefetch } ?? 0
+        let ggufBytes = drives.first { $0.source == .externalSSD }?.outstandingBytes ?? 0
         let planned = plannedBandwidth
-        let record = Double(banks[key / weights.geometry.experts]?.record ?? 1)
+        let bank = banks[key / weights.geometry.experts]
+        let record = Double(bank?.record ?? 1)
         let places = stores.map { index -> SplitReadSource in
             let lane = hot.lane(index)
+            let measured = lane.measured
             let rates = hot.stores[index].reads.rates
-            let measured = lane.reads >= 8 && lane.serviceSeconds > 0
-            return SplitReadSource(
-                bytesPerSecond: measured ? record / lane.serviceSeconds : planned.hot, latencySeconds: measured ? 0 : readLatency.hot,
+            var source = SplitReadSource(
+                bytesPerSecond: measured?.bytesPerSecond ?? planned.hot, latencySeconds: measured == nil ? readLatency.hot : 0,
                 healthyBytesPerSecond: rates.healthy > 0 ? rates.healthy : driveRates.healthy(.internalSSD) ?? bandwidth.hot,
-                outstanding: lane.inFlight + (outstanding[.internalSSD] ?? 0), wearing: hot.stores[index].reads.wearing)
+                measuredSecondsAgo: measured?.secondsAgo ?? .infinity, wearing: hot.stores[index].reads.wearing)
+            // shortcut: the copies' queue is shared by every place, so each takes an equal share of its queued reads;
+            // count per place if places on drives of very different speeds ever split badly.
+            source.busySeconds =
+                (Double(lane.inFlight) + Double(queued) / Double(max(1, hot.stores.count))) * record / source.plannedBytesPerSecond
+            return source
         }
-        return places + [
-            SplitReadSource(
-                bytesPerSecond: planned.gguf, latencySeconds: readLatency.gguf,
-                healthyBytesPerSecond: driveRates.healthy(.externalSSD) ?? bandwidth.gguf, outstanding: outstanding[.externalSSD] ?? 0,
-                wearing: modelDriveReads.wearing)
-        ]
+        var gguf = SplitReadSource(
+            bytesPerSecond: planned.gguf, latencySeconds: readLatency.gguf,
+            healthyBytesPerSecond: driveRates.healthy(.externalSSD) ?? bandwidth.gguf, measuredSecondsAgo: modelDriveReads.age,
+            wearing: modelDriveReads.wearing)
+        gguf.busySeconds = Double(ggufBytes) / gguf.plannedBytesPerSecond
+        let all = places + [gguf]
+        let kept = SplitReads.onePerDisk(
+            stores.map { disk(hot.stores[$0].folder) } + [bank.flatMap { disk(weights.gguf.url($0.tensors[0].file)) }],
+            rates: all.map(\.bytesPerSecond))
+        stores = kept.filter { $0 < stores.count }.map { stores[$0] }
+        return kept.map { all[$0] }
     }
 
     /// Record `key` read in `parts` (`SplitReads.execute`, staged in `staging` when a lease was free, a late part
@@ -2116,11 +2145,11 @@ package final class FamilyExperts: @unchecked Sendable {
     /// A split read's accounting: its bytes per drive (`recordDemandReads` counted the record as the GGUF's), each part
     /// training its drive's estimates (`learn`), and the split counters. A record a hedge replica won
     /// (`won`) keeps `recordDemandReads`' count.
-    private func recordSplit(_ outcome: SplitReadOutcome?, won: Bool, places: Int) {
-        splitReads.record(outcome, names: (0..<places).map { "copy\($0)" } + ["model"])
+    private func recordSplit(_ outcome: SplitReadOutcome?, won: Bool, places: [Int]) {
+        splitReads.record(outcome, names: places.map { "copy\($0)" } + ["model"])
         drainSplitTimings()
         guard let outcome, !won else { return }
-        let copied = outcome.bytesBySource.filter { $0.key < places }.values.reduce(0, +)
+        let copied = outcome.bytesBySource.filter { $0.key < places.count }.values.reduce(0, +)
         counters.copyBytes += copied
         counters.modelBytes -= copied
         counters.hotBytes += copied

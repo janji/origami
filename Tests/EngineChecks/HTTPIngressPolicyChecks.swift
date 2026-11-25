@@ -437,7 +437,10 @@ private func httpControlSlotsReserved() throws {
         budget.release(requests[0])
         requests.removeFirst()
         try ingressRequire(budget.reserveBody(requests[0], bytes: 16), "released body capacity leaked")
-        for id in requests + [extra, second] { budget.release(id) }
+        let third = budget.accept()!
+        try ingressRequire(budget.classify(third, control: true), "a third status read did not take the free request slot")
+        try ingressRequire(budget.classify(third, control: true), "a classified status read was refused when asked again")
+        for id in requests + [extra, second, third] { budget.release(id) }
         try ingressRequire(budget.snapshot["connections"] as? Int == 0, "admissions leaked")
     }
     try ingressRequire(HTTPIngressPolicy.isControl(method: "GET", target: "/v1/status?sample=1"), "status query not control")

@@ -868,10 +868,11 @@ struct Settings {
             let value = try samplingNumber(key, text)
             return key == "top_k" ? Int(value) as Any : value
         case "quality":
-            guard QualityDial.level(text) != nil else {
+            // Stored under its own name (`faster` as `fast`).
+            guard let level = QualityDial.level(text) else {
                 throw CLIError("quality is \(QualityDial.offeredByModel)")
             }
-            return text
+            return level.name
         case "experts_per_token", "tail_skip", "late_miss", "confident_above":
             _ = try knob(key, text, on: current.quality)
             return text

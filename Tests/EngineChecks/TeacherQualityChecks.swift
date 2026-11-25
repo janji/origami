@@ -38,7 +38,7 @@ func teacherQualityChecks() -> [(String, () throws -> Void)] {
                 stats.teacher = score
                 stats.stageSeconds = ["generation": 1.25]
                 stats.phaseCounters = ["generation.reads": 3]
-                let wire = try ServingWire.usage(stats)
+                let wire = try ServingWire.usage(stats, family: .qwen)
                 _ = try JSONSerialization.data(withJSONObject: wire)
                 let teacher = wire["origami_teacher"] as! [String: Any]
                 let values = teacher["token_log_probabilities"] as! [Any]
@@ -48,7 +48,7 @@ func teacherQualityChecks() -> [(String, () throws -> Void)] {
                     "Explicit measurement lost boundary timing")
                 stats.teacher = nil
                 try require(
-                    try ServingWire.usage(stats)["origami_stage_seconds"] == nil,
+                    try ServingWire.usage(stats, family: .qwen)["origami_stage_seconds"] == nil,
                     "Ordinary traffic emitted diagnostic timing")
             }
         )

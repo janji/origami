@@ -1,7 +1,8 @@
 import Foundation
 
 /// One source of a record among several holding the same bytes (a copy on one drive): its reads in flight, its reads
-/// done, its smoothed time per read and when it was last chosen. Lock-owned by whoever keeps the lanes.
+/// done, its smoothed time per read, when it was last chosen and when it last served a read. Lock-owned by whoever keeps
+/// the lanes.
 package struct ReadLane: Sendable {
     package var inFlight = 0
     package var reads: UInt64 = 0
@@ -9,7 +10,16 @@ package struct ReadLane: Sendable {
     /// Bytes per read, smoothed as `serviceSeconds` is: with it, the drive's rate per read (`HotCopySet.laneRates`).
     package var serviceBytes = 0.0
     package var lastSelected: UInt64 = 0
+    /// When it last served a read (uptime seconds).
+    package var lastServed = 0.0
     package init() {}
+
+    /// Its drive's rate per read (smoothed bytes over smoothed time, so parts and whole records train it alike) and the
+    /// seconds since a read last fed it, once it has 8 reads; nil before.
+    package var measured: (bytesPerSecond: Double, secondsAgo: Double)? {
+        guard reads >= 8, serviceSeconds > 0 else { return nil }
+        return (serviceBytes / serviceSeconds, max(0, Double(DispatchTime.now().uptimeNanoseconds) / 1e9 - lastServed))
+    }
 
     /// A read of `bytes` done in `seconds`: the smoothed time moves an eighth of the way to it (each sample clamped to
     /// a quarter to four times the estimate, so one stall or one cached read does not swing it).
@@ -19,6 +29,7 @@ package struct ReadLane: Sendable {
         serviceSeconds = reads == 0 ? sample : prior + (sample - prior) / 8
         serviceBytes = reads == 0 ? Double(bytes) : serviceBytes + (Double(bytes) - serviceBytes) / 8
         reads &+= 1
+        lastServed = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
     }
 }
 

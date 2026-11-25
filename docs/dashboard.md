@@ -176,7 +176,7 @@ The dashboard's **Tune for this Mac** finds one of three things:
 The first two use temperature 0 without changing your saved sampling settings or saving the test prompts. Review the
 results before applying them. Other requests, memory pressure or an
 unavailable model interrupt it. From the command line: `origami tune --review true` saves a proposal without
-applying it, and `origami tune --tradeoffs true` compares exact with the model's mildest fast level without changing
+applying it, and `origami tune --tradeoffs true` compares exact with the model's mildest level after it (`dynamic`) without changing
 settings (`--quality-floor <level>` compares down to that level).
 
 ### The fastest memory limit

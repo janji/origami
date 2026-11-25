@@ -2,25 +2,41 @@ import Dispatch
 import Foundation
 
 /// One source holding a record (a drive with the model's files or a copy), as the split planner sees it now: its live
-/// read rate and fixed cost per read (from completed reads), its own healthy rate, the reads it has in flight or
-/// queued, and whether its read tally says it is being worn into its slow state (`DriveReadHistory.high` or `due`).
+/// read rate and fixed cost per read (from that drive's own completed reads, whole and part) and how long ago a read
+/// last fed that rate, its own healthy rate, how long until the work it already has is done, and whether its read tally
+/// says it is being worn into its slow state (`DriveReadHistory.high` or `due`).
 package struct SplitReadSource: Sendable, Equatable {
     package var bytesPerSecond: Double
     package var latencySeconds: Double
     package var healthyBytesPerSecond: Double
-    package var outstanding: Int
+    /// Seconds until the reads already on this source are done (0: idle).
+    package var busySeconds: Double
+    /// Seconds since a completed read last fed `bytesPerSecond` (`.infinity`: never).
+    package var measuredSecondsAgo: Double
     package var wearing: Bool
-    package init(bytesPerSecond: Double, latencySeconds: Double, healthyBytesPerSecond: Double, outstanding: Int, wearing: Bool = false) {
+    package init(
+        bytesPerSecond: Double, latencySeconds: Double, healthyBytesPerSecond: Double, busySeconds: Double = 0,
+        measuredSecondsAgo: Double = 0, wearing: Bool = false
+    ) {
         self.bytesPerSecond = bytesPerSecond
         self.latencySeconds = latencySeconds
         self.healthyBytesPerSecond = healthyBytesPerSecond
-        self.outstanding = outstanding
+        self.busySeconds = busySeconds
+        self.measuredSecondsAgo = measuredSecondsAgo
         self.wearing = wearing
     }
-    /// The read time of `bytes` alone on this source.
-    package func seconds(_ bytes: Int) -> Double { max(0, latencySeconds) + Double(bytes) / max(1, bytesPerSecond) }
-    /// Below a third of its own healthy rate: the hedge rule's and `SlowDriveReads`' stall.
-    package var stalled: Bool { healthyBytesPerSecond > 0 && bytesPerSecond < healthyBytesPerSecond / 3 }
+    /// Its rate is recent enough to trust (`SplitReads.freshSeconds`).
+    package var fresh: Bool { measuredSecondsAgo <= SplitReads.freshSeconds }
+    /// The rate a plan uses: the live one while fresh; a stale one is measured again, planned at the healthy rate when
+    /// that is known (else at the last one).
+    package var plannedBytesPerSecond: Double { max(1, fresh || healthyBytesPerSecond <= 0 ? bytesPerSecond : healthyBytesPerSecond) }
+    /// When a read issued now would start delivering: after the work already there and the fixed cost per read.
+    package var startSeconds: Double { max(0, busySeconds) + max(0, latencySeconds) }
+    /// When a read of `bytes` issued now would end on this source.
+    package func seconds(_ bytes: Int) -> Double { startSeconds + Double(bytes) / plannedBytesPerSecond }
+    /// Below a third of its own healthy rate, measured recently: the hedge rule's and `SlowDriveReads`' stall (a stale
+    /// rate says nothing about now).
+    package var stalled: Bool { fresh && healthyBytesPerSecond > 0 && bytesPerSecond < healthyBytesPerSecond / 3 }
 }
 
 /// One part of a split read: bytes `offset ..< offset + length` of the record from source `source`.
@@ -33,22 +49,24 @@ package struct SplitReadPart: Sendable, Equatable {
     }
 }
 
-/// Why a lone demand read that more than one source holds was read whole.
+/// Why a demand read that more than one source holds was read whole.
 package enum SplitReadSkip: String, CaseIterable, Sendable {
-    case busy, unhealthy, wear
+    case unhealthy, wear
     case smallGain = "small_gain"
 }
 
-/// The planner's answer: the read as today (with why it was not split when it was eligible), or its parts.
+/// The planner's answer: the read whole from `source`, the one whose read would end first (nil: not eligible, read as
+/// before), with why it was not split when it was eligible; or its parts.
 package enum SplitReadPlan: Equatable, Sendable {
-    case whole(SplitReadSkip?)
+    case whole(source: Int?, SplitReadSkip?)
     case split([SplitReadPart])
 }
 
-/// Split reads (measured 2026-11-17 with `Tools/bench/split_reads.py`): a lone demand miss that a layer waits on and
-/// several idle, healthy sources hold is read in parts, one per source, sized by live speed so they end together.
-/// Every source holds the same bytes and the assembled record is verified as a whole read's is, so output cannot
-/// change (BITWISE); only which drive reads which bytes does. Shared by all three engines.
+/// Split reads (measured 2026-11-17 with `Tools/bench/split_reads.py`): a demand read that a layer waits on and several
+/// healthy sources hold is read in parts, one per source, sized by each one's live speed and the work it already has so
+/// they end together; else whole from the source that would end it first. Every source holds the same bytes and the
+/// assembled record is verified as a whole read's is, so output cannot change (BITWISE); only which drive reads which
+/// bytes does. Shared by all three engines.
 package enum SplitReads {
     /// A split must be predicted to end at least this much sooner than the best whole read: the measurement gained
     /// 25–40% on lone reads, with about 10% run-to-run noise, so 15% keeps only clear wins.
@@ -56,54 +74,70 @@ package enum SplitReads {
     /// Part boundaries fall on multiples of this many bytes from the record's start: the 16 KiB page of Apple silicon,
     /// at which every record, slot and staging record starts (so uncached reads land whole pages).
     package static let alignment = 16_384
-    /// `ORIGAMI_SPLIT_READS=1` turns split reads on (off by default: no gain measured with one fast copy drive; an
-    /// experiment for Macs with two or more, decided by 3.2). Each engine reads it once at start (`splitsReads`).
+    /// Split reads are off unless `ORIGAMI_SPLIT_READS=1` (an experiment: no gain measured yet; the default or deleted
+    /// by 3.2). Each engine reads it once at start (`splitsReads`).
     package static let enabled = ProcessInfo.processInfo.environment["ORIGAMI_SPLIT_READS"] == "1"
+    /// A source's rate older than this many seconds is measured again instead of trusted (`SplitReadSource.fresh`): a
+    /// drive's state (thermal throttling, another app reading it) changes over tens of seconds, and measuring it again
+    /// costs one guarded part.
+    package static let freshSeconds = 10.0
 
     /// How to read a record of `recordBytes` that `sources` hold (the same bytes each). `waited`: a demand read a layer
-    /// waits on (never read-ahead, a guess, warm-up or a keeper read). Whole (today's read; a nil reason: not
-    /// eligible) unless every rule holds:
-    /// - only idle sources (nothing in flight or queued) take a part, and the fastest whole reader always takes one;
-    /// - a stalled source (below a third of its healthy rate) or a wearing one takes none;
-    /// - parts are sized so each would end at the same time T (latency + bytes / rate), boundaries on `alignment`; a
-    ///   source whose part would be under one alignment unit (its fixed cost alone nearly reaches T) takes none and
-    ///   its bytes go to the others;
-    /// - the latest part's predicted end is at least `margin` sooner than the fastest whole read's.
-    /// The parts come fastest source first (its part lies at the record's end); together they cover the record once.
+    /// waits on (never read-ahead, a guess, warm-up or a keeper read); otherwise, with one source or a record under two
+    /// pages, whole with no source (read as before). Of the candidates (not wearing, not stalled while its rate is
+    /// fresh), each source can deliver rate x (T - busy - latency) bytes by time T: T is where the candidates together
+    /// deliver the record (sources added by when they could start, while that is before T). A source whose part would
+    /// be under one alignment unit takes none and its bytes go to the others; boundaries are on `alignment`. Split when
+    /// the latest part's predicted end is at least `margin` sooner than the best whole read (the candidate whose read
+    /// would end first); else whole from that candidate.
+    /// The first part (read in place with no guard of its own) is the fastest fresh source's and lies at the record's
+    /// end; a stale source takes it only when every candidate is stale (it is staged, so a wrong guess costs one guarded
+    /// re-read). Together the parts cover the record once.
     package static func plan(recordBytes: Int, sources: [SplitReadSource], waited: Bool, enabled: Bool = true) -> SplitReadPlan {
-        guard enabled, waited, sources.count >= 2, recordBytes >= 2 * alignment else { return .whole(nil) }
-        let fastest = sources.indices.min { sources[$0].seconds(recordBytes) < sources[$1].seconds(recordBytes) }!
-        func excluded(_ i: Int) -> SplitReadSkip? {
-            sources[i].outstanding > 0 ? .busy : sources[i].stalled ? .unhealthy : sources[i].wearing ? .wear : nil
+        guard enabled, waited, sources.count >= 2, recordBytes >= 2 * alignment else { return .whole(source: nil, nil) }
+        let ends = sources.map { $0.seconds(recordBytes) }
+        func excluded(_ i: Int) -> SplitReadSkip? { sources[i].stalled ? .unhealthy : sources[i].wearing ? .wear : nil }
+        let candidates = sources.indices.filter { excluded($0) == nil }
+        guard let best = candidates.min(by: { ends[$0] < ends[$1] }) else {
+            return .whole(source: nil, excluded(sources.indices.min { ends[$0] < ends[$1] }!))
         }
-        if let reason = excluded(fastest) { return .whole(reason) }
-        let others = sources.indices.filter { $0 != fastest }
-        var chosen = [fastest] + others.filter { excluded($0) == nil }
-        guard chosen.count >= 2 else {
+        guard candidates.count >= 2 else {
             let order = SplitReadSkip.allCases
-            return .whole(others.compactMap(excluded).min { order.firstIndex(of: $0)! < order.firstIndex(of: $1)! })
+            return .whole(source: best, sources.indices.compactMap(excluded).min { order.firstIndex(of: $0)! < order.firstIndex(of: $1)! })
         }
+        // When the sources in `chosen` together deliver the record: the sum of rate x (T - start) is the record.
+        func end(_ chosen: [Int]) -> Double {
+            let rates = chosen.map { sources[$0].plannedBytesPerSecond }
+            return (Double(recordBytes) + zip(rates, chosen).reduce(0) { $0 + $1.0 * sources[$1.1].startSeconds }) / rates.reduce(0, +)
+        }
+        var chosen: [Int] = []
+        for i in candidates.sorted(by: { sources[$0].startSeconds < sources[$1].startSeconds }) {
+            if !chosen.isEmpty && sources[i].startSeconds >= end(chosen) { break }
+            chosen.append(i)
+        }
+        let fresh = chosen.filter { sources[$0].fresh }
+        guard chosen.count >= 2,
+            let lead = (fresh.isEmpty && candidates.allSatisfy { !sources[$0].fresh } ? chosen : fresh).min(by: { ends[$0] < ends[$1] })
+        else { return .whole(source: best, .smallGain) }
+        chosen = [lead] + chosen.filter { $0 != lead }.sorted()
         let units = (recordBytes + alignment - 1) / alignment
         var shares: [Int] = []
         while true {
-            // Equal ends: the sum over parts of rate x (T - latency) is the record.
-            let rates = chosen.map { max(1, sources[$0].bytesPerSecond) }
-            let latencies = chosen.map { max(0, sources[$0].latencySeconds) }
-            let end = (Double(recordBytes) + zip(rates, latencies).reduce(0) { $0 + $1.0 * $1.1 }) / rates.reduce(0, +)
-            // Whole alignment units per part (the record's partial last page counted whole); the fastest takes what rounding
+            let at = end(chosen)
+            // Whole alignment units per part (the record's partial last page counted whole); the lead takes what rounding
             // leaves.
-            shares = chosen.indices.map { Int((rates[$0] * (end - latencies[$0]) / Double(alignment)).rounded()) }
+            shares = chosen.map { Int((sources[$0].plannedBytesPerSecond * (at - sources[$0].startSeconds) / Double(alignment)).rounded()) }
             shares[0] = units - shares.dropFirst().reduce(0, +)
             guard let drop = shares.indices.dropFirst().last(where: { shares[$0] < 1 }) else { break }
             chosen.remove(at: drop)
-            if chosen.count < 2 { return .whole(.smallGain) }
+            if chosen.count < 2 { return .whole(source: best, .smallGain) }
         }
-        guard shares[0] >= 1 else { return .whole(.smallGain) }
-        // The fastest part takes the record's partial last page and lies at its end, so every boundary is on a page.
+        guard shares[0] >= 1 else { return .whole(source: best, .smallGain) }
+        // The lead part takes the record's partial last page and lies at its end, so every boundary is on a page.
         var lengths = shares.map { $0 * alignment }
         lengths[0] -= units * alignment - recordBytes
         let predicted = chosen.indices.map { sources[chosen[$0]].seconds(lengths[$0]) }.max()!
-        guard lengths[0] > 0, predicted <= (1 - margin) * sources[fastest].seconds(recordBytes) else { return .whole(.smallGain) }
+        guard lengths[0] > 0, predicted <= (1 - margin) * ends[best] else { return .whole(source: best, .smallGain) }
         var offsets = Array(repeating: 0, count: chosen.count)
         var offset = 0
         for n in chosen.indices.dropFirst() + [0] {
@@ -269,6 +303,17 @@ package enum SplitReads {
         }
         return pieces
     }
+
+    /// Of sources on `disks` (each one's physical disk, `DriveSpeed.disk`; nil: unknown, always kept), the ones a split
+    /// may use: one per disk, the fastest by `rates` (the later one on a tie). Two sources on one disk share its
+    /// bandwidth, so each one's own rate would claim the whole disk.
+    package static func onePerDisk(_ disks: [String?], rates: [Double]) -> [Int] {
+        disks.indices.filter { i in
+            !disks.indices.contains { j in
+                j != i && disks[i] != nil && disks[j] == disks[i] && (rates[j] > rates[i] || (rates[j] == rates[i] && j > i))
+            }
+        }
+    }
 }
 
 /// What a split read did: guard reads of late parts, reads again after a failed part, per source the bytes it
@@ -367,21 +412,29 @@ private final class SplitReadState: @unchecked Sendable {
 }
 
 /// Split-read counters (any thread), in `/v1/status` and each request's notes as `split_reads`: split reads, the bytes
-/// each source delivered to them, guard re-reads of late parts and re-reads of failed parts, the lone demand reads that
-/// more than one source held but were read whole and why, and the seconds decode waited on such lone reads (split or
-/// not, so the benefit can be judged).
+/// each source delivered to them, guard re-reads of late parts and re-reads of failed parts, the demand reads that more
+/// than one source held but were read whole and why, the whole reads sent to another source than the default one, per
+/// source the rate and its age the last plan used, and the seconds decode waited on lone reads (split or not, so the
+/// benefit can be judged).
 package final class SplitReadCounters: @unchecked Sendable {
     private let lock = NSLock()
-    private var splits = 0, guards = 0, fallbacks = 0, failures = 0
+    private var splits = 0, guards = 0, fallbacks = 0, failures = 0, routed = 0
     private var partBytes: [String: Int] = [:]
     private var skipped: [String: Int] = [:]
+    private var planned: [String: (rate: Double, age: Double, at: UInt64)] = [:]
     private var loneWaits = 0, loneWaitSeconds = 0.0
     package init() {}
 
-    package func record(_ plan: SplitReadPlan) {
-        guard case .whole(let reason?) = plan else { return }
-        lock.withLock { skipped[reason.rawValue, default: 0] += 1 }
+    /// A plan, made from `sources` (named `names`, each source's status name).
+    package func record(_ plan: SplitReadPlan, sources: [SplitReadSource] = [], names: [String] = []) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        lock.withLock {
+            for (name, source) in zip(names, sources) { planned[name] = (source.plannedBytesPerSecond, source.measuredSecondsAgo, now) }
+            if case .whole(_, let reason?) = plan { skipped[reason.rawValue, default: 0] += 1 }
+        }
     }
+    /// A whole read went to the source the plan found best instead of the default one.
+    package func routedWhole() { lock.withLock { routed += 1 } }
     /// A split read ended (`outcome` nil: it failed and was read again whole); `names`: each source's status name.
     package func record(_ outcome: SplitReadOutcome?, names: [String]) {
         lock.withLock {
@@ -410,7 +463,11 @@ package final class SplitReadCounters: @unchecked Sendable {
                 "enabled": SplitReads.enabled, "split_reads": splits, "part_bytes": partBytes, "guard_rereads": guards,
                 "failed_part_rereads": fallbacks, "failed_splits": failures,
                 "read_whole": Dictionary(uniqueKeysWithValues: SplitReadSkip.allCases.map { ($0.rawValue, skipped[$0.rawValue] ?? 0) }),
-                "lone_demand_waits": loneWaits, "lone_demand_wait_seconds": loneWaitSeconds,
+                "lone_demand_waits": loneWaits, "lone_demand_wait_seconds": loneWaitSeconds, "whole_from_other_source": routed,
+                "sources": planned.mapValues { source -> [String: Any] in
+                    let age = source.age + Double(DispatchTime.now().uptimeNanoseconds - source.at) / 1e9
+                    return ["bytes_per_second": source.rate, "measured_seconds_ago": age.isFinite ? age : NSNull()]
+                },
             ]
         }
     }
@@ -419,14 +476,43 @@ package final class SplitReadCounters: @unchecked Sendable {
     package var loneWaitTotal: Double { lock.withLock { loneWaitSeconds } }
 }
 
-/// A split read's part jobs (any thread): their tickets, so a caller that waits for the read's own job can join them too.
-package final class SplitReadJobs: @unchecked Sendable {
+/// The bytes planned on each source and not yet read (any thread), by a key per physical source: with the source's
+/// rate, how long until the work it already has is done (`SplitReadSource.busySeconds`).
+package final class SplitPlannedBytes: @unchecked Sendable {
     private let lock = NSLock()
-    private var tickets: [IOTicket] = []
+    private var bytes: [AnyHashable: Int] = [:]
     package init() {}
-    package func add(_ ticket: IOTicket) { lock.withLock { tickets.append(ticket) } }
-    /// Joins every part job until `deadline` (one still running then is left, as the scheduler's bounded joins leave it).
-    package func join(until deadline: Date) {
-        for ticket in lock.withLock({ tickets }) { _ = ticket.join(timeout: deadline.timeIntervalSinceNow) }
+    package subscript(_ source: AnyHashable) -> Int { lock.withLock { bytes[source] ?? 0 } }
+    /// Every source's bytes together: 0 once every planned read has ended (checks).
+    package var total: Int { lock.withLock { bytes.values.reduce(0, +) } }
+    fileprivate func add(_ source: AnyHashable, _ count: Int) { lock.withLock { bytes[source, default: 0] += count } }
+    fileprivate func remove(_ source: AnyHashable, _ count: Int) {
+        lock.withLock {
+            let left = bytes[source, default: 0] - count
+            assert(left >= 0, "More bytes ended on a split source than were planned on it")
+            bytes[source] = left > 0 ? left : nil
+        }
     }
+}
+
+/// The bytes one read planned on its sources (`SplitPlannedBytes`, added at once), each item given back once: when its
+/// part ends (`end`), when the read ends (`endAll`), at the latest when this is released.
+package final class SplitPlannedRead: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(source: AnyHashable, bytes: Int)?]
+    private let ledger: SplitPlannedBytes
+    package init(_ items: [(AnyHashable, Int)], ledger: SplitPlannedBytes) {
+        self.items = items.map { (source: $0.0, bytes: $0.1) }
+        self.ledger = ledger
+        for (source, bytes) in items { ledger.add(source, bytes) }
+    }
+    deinit { endAll() }
+    package func end(_ index: Int) {
+        let item = lock.withLock { () -> (source: AnyHashable, bytes: Int)? in
+            defer { items[index] = nil }
+            return items[index]
+        }
+        if let item { ledger.remove(item.source, item.bytes) }
+    }
+    package func endAll() { for index in lock.withLock({ items.indices }) { end(index) } }
 }

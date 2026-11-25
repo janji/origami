@@ -234,9 +234,9 @@ origami serve --model glm-q2
 These models are much larger than Qwen, and on a 32 GB Mac most of every token's experts come from the drive, so
 the time goes to reading experts, not to the GPU. The measured figures are in the README's
 [What to expect](../README.md#what-to-expect). Other Macs and drives will differ; a drive that has slowed down on the
-model's files makes them much slower ([The model drive got slow](troubleshooting.md#the-model-drive-got-slow)). In earlier short benchmarks with Origami 2.x, `faster` kept the answers (90% and 99% of exact's next tokens
-for GLM and DeepSeek) and `fastest` did not (62% and 83%, 1 of 4 answers right); neither model offers `fastest` now
-(see [Quality dial](#quality-dial)).
+model's files makes them much slower ([The model drive got slow](troubleshooting.md#the-model-drive-got-slow)). In earlier short benchmarks with Origami 2.x, `fast` (then called `faster`) kept the answers (90% and 99% of exact's
+next tokens for GLM and DeepSeek) and `fastest` did not (62% and 83%, 1 of 4 answers right); neither model offers
+`fastest` now (see [Quality dial](#quality-dial)).
 
 ### What is checked
 
@@ -252,55 +252,68 @@ reference rounds activations to FP8/FP4 and uses BF16 in places, so its outputs 
 
 ## Quality dial
 
-One setting trades replies for decode speed. `exact` (the default) gives the model's own replies. The fast levels
-leave out experts a reply would wait for (a lightly weighted one that is not in memory, or one still being read), so
-they decode faster and reply differently. Prompts are always read exactly, so saved prompts serve every level.
+One setting trades replies for decode speed. `exact` (the default) gives the model's own replies. The other levels
+take shortcuts: they leave out parts of the model (experts) that a reply would otherwise wait for (a lightly weighted
+one that is not in memory, or one still being read), so they decode faster and reply differently. Prompts are always
+read exactly, so saved prompts serve every level.
 
-Each model offers only the fast levels that clearly helped it:
-
-| Model | Levels offered | Measured effect of the fast levels |
-|---|---|---|
-| Qwen3.8-Flash-Next | `exact`, `faster`, `fastest` | both took 62–71% less time than exact; on the most recent 14-task check exact solved 12, `faster` 10 and `fastest` 9 |
-| GLM-5.3-Flash | `exact`, `faster` | 34–42% less time, every task right (`fastest` rambled and wrote reasoning after `</think>`) |
-| DeepSeek-V4.1-Flash | `exact`, `dynamic-fastest` | about 30% less time, every task right, one reply of 14 with reasoning after `</think>` (`fastest` got a task wrong and leaked reasoning twice; `faster` saved no time in an earlier four-task screen) |
-
-The evidence is short checkable tasks (answers scored right or wrong: ten short tasks and four coding and long-form
-ones per model) on one Mac, an M2 Pro with 32 GB reading the models from an external SSD. Treat it as a guide, not a
-guarantee. `dynamic` stayed right everywhere but was slower than `faster` on Qwen and GLM and barely faster than
-exact on DeepSeek, so no model offers it.
+Every model offers the same ladder, from the model's own replies to the most shortcuts:
 
 | Level | What it does |
 |---|---|
-| `exact` (default) | the model's own replies |
-| `faster` | an expert under 10% of the routing weight is left out when it is not in memory |
-| `fastest` | the `faster` skip, and an expert still being read is left out |
-| `dynamic-fastest` | the `fastest` skips, but only after a token the model gave at least 0.9 probability; other tokens decode exactly |
-| `dynamic` | the `faster` skip, but only after a token the model gave at least 0.9 probability (no model offers it) |
+| `exact` (default) | the model's own replies; the slowest |
+| `dynamic` | takes shortcuts only where the model is sure of the next word; between exact and fast |
+| `fast` | takes the shortcut everywhere; replies differ slightly |
+| `fastest` | the most shortcuts; replies differ most. Only where it stayed usable: Qwen |
 
-An earlier Qwen run of eight benchmark replies at 8K, without a pack, measured `faster` at 1.7× exact's decode speed
+| Model | Levels offered | Measured effect |
+|---|---|---|
+| Qwen3.8-Flash-Next | `exact`, `dynamic`, `fast`, `fastest` | `fast` and `fastest` took 62–71% less time than exact; on the most recent 14-task check exact solved 12, `fast` 10 and `fastest` 9 |
+| GLM-5.3-Flash | `exact`, `dynamic`, `fast` | `fast` took 34–42% less time, every task right (`fastest` rambled and wrote reasoning after `</think>`, so GLM does not offer it) |
+| DeepSeek-V4.1-Flash | `exact`, `dynamic`, `fast` | `dynamic` took about 30% less time, every task right, one reply of 14 with reasoning after `</think>`; `fast` is faster still, but got one task of 14 wrong and wrote reasoning after `</think>` twice |
+
+On Qwen and GLM, `dynamic` stayed right on every task and was slower than `fast`; its speed against exact is not yet
+published here. The evidence is short checkable tasks (answers scored right or wrong: ten short tasks and four coding
+and long-form ones per model) on one Mac, an M2 Pro with 32 GB reading the models from an external SSD. Treat it as a
+guide, not a guarantee.
+
+What the shortcuts are, on Qwen and GLM:
+
+- `fast`: an expert under 10% of the routing weight is left out when it is not in memory;
+- `fastest`: the `fast` skip, and an expert still being read is left out;
+- `dynamic`: the `fast` skip, but only after a token the model gave at least 0.9 probability; other tokens decode
+  exactly.
+
+DeepSeek takes bigger shortcuts at the same names, because the ones above saved it no time: its `dynamic` is the
+`fastest` skips after a token of at least 0.9 probability (exact after any other), and its `fast` is the `fastest`
+skips everywhere.
+
+An earlier Qwen run of eight benchmark replies at 8K, without a pack, measured `fast` at 1.7× exact's decode speed
 (94.8% of exact's next tokens) and `fastest` at 2.1× (90.0%, 3 of 4 answers right).
 
-A level a model does not offer is never refused: a request, setting or chat command naming one runs the model's
-mildest offered fast level (`faster` on Qwen and GLM, `dynamic-fastest` on DeepSeek), and usage, `X-Origami-Mode`
-and the request record name the level that ran.
+A level a model does not offer is never refused: a request, setting or chat command naming `fastest` on GLM or
+DeepSeek runs their `fast`. Usage, `X-Origami-Mode`, `/v1/status` and the request record always name the level on
+the serving model's ladder.
 
 - Levels other than exact can reply differently from run to run, since what is in memory decides which experts count.
 - At every level a tool call decodes exactly from its opening marker on, so the call's name and arguments are the
   model's own.
 - GLM and DeepSeek read every expert a layer routes before the layer runs, so for them every expert not in memory
-  counts as late: the `late_miss skip` knob, and with it `fastest` (and `dynamic-fastest` after a confident token),
-  leaves out all of them but the heaviest.
-- `fast`, the name of 1.x's fast mode, means `faster` (on DeepSeek, then `dynamic-fastest`).
+  counts as late: the `late_miss skip` knob, and with it `fastest` (and DeepSeek's `dynamic` and `fast`), leaves out
+  all of them but the heaviest.
+- `faster`, the name of `fast` before 3.1.8, still means `fast`; `dynamic-fastest`, which DeepSeek offered before
+  3.1.8, still works and runs as `dynamic`.
 
 Choose a level:
 
-- per request: `"origami_mode": "<level>"`, or the model name `<model>-<level>` (such as `qwen3.8-flash-next-faster`
-  or `deepseek-v4.1-flash-dynamic-fastest`; `-fast` is `-faster`);
+- per request: `"origami_mode": "<level>"`, or the model name `<model>-<level>` (such as `qwen3.8-flash-next-fast`
+  or `deepseek-v4.1-flash-dynamic`);
 - per chat: the chat command `origami quality <level>`;
 - for every request that names none: `origami config set quality <level>`.
 
 `origami config set allow_fast false` forbids every level but exact. The dashboard, `/v1/models`, `/v1/status` and
-`/v1/plan` list only the served model's levels; `/v1/status` and `/v1/plan` also report the level and its knobs.
+`/v1/plan` list only the served model's levels; `/v1/status` and `/v1/plan` also report the level and the knobs that
+model runs.
 
 ### Knobs
 
@@ -310,9 +323,9 @@ Each knob is also a setting of its own, applied on top of the level:
 |---|---|
 | `experts_per_token` 1–10 or `all` | each token uses only its heaviest experts of the ten the router picks, weights renormalised (5: 1.5× decode, 89% as exact; 7: 1.4×, 94%) |
 | `tail_skip` share or `off` | drops routed experts below this share of the routing weight (the heaviest is kept); 0.1 always: 1.7×, 85% as exact |
-| `tail_skip_misses_only` true/false | the tail skip drops only experts not in memory, saving the reads and keeping the free ones (with 0.1: `faster`) |
+| `tail_skip_misses_only` true/false | the tail skip drops only experts not in memory, saving the reads and keeping the free ones (with 0.1: `fast`) |
 | `late_miss` `wait`, `skip` or `substitute` | an expert still being read when its layer needs it: wait (exact), leave it out (1.x's fast mode: 1.3×, 91.6% as exact), or use the in-memory expert the router scored highest instead (1.3×, 93%, but two of four answers broke) |
-| `confident_above` probability or `off` | the other knobs apply only after a token the model gave at least this probability; other steps decode exactly (`dynamic-fastest`: 0.9) |
+| `confident_above` probability or `off` | the other knobs apply only after a token the model gave at least this probability; other steps decode exactly (`dynamic`: 0.9) |
 
 ### Measuring a level yourself
 

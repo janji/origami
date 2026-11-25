@@ -55,6 +55,8 @@ package final class SlowDriveReads: @unchecked Sendable {
     package var rates: (current: Double, healthy: Double) {
         lock.withLock { (window.seconds > 0 ? window.bytes / window.seconds : 0, healthy.rate) }
     }
+    /// Seconds since a read last fed the current rate (`.infinity`: never): how stale `rates.current` is.
+    package var age: Double { lock.withLock { window.seconds > 0 ? max(0, clock() - window.at) : .infinity } }
 
     /// `clock`: seconds, monotonic (checks pass their own).
     package init(clock: @escaping () -> Double = { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }) { self.clock = clock }

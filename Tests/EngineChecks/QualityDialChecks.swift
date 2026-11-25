@@ -10,6 +10,7 @@ func qualityDialChecks() -> [(String, () throws -> Void)] {
     [
         ("quality_dial_levels_and_knobs", qualityDialLevelsAndKnobs),
         ("quality_dial_offered_per_model", qualityDialOfferedPerModel),
+        ("quality_dial_ladder", qualityDialLadder),
         ("quality_dial_dynamic_steps", qualityDialDynamicSteps),
         ("quality_dial_tool_call_opener", qualityDialToolCallOpener),
         ("quality_dial_kept_ranks_and_gates", qualityDialKeptRanksAndGates),
@@ -80,11 +81,11 @@ private func qualityDialToolCallOpener() throws {
 private func qualityDialLevelsAndKnobs() throws {
     let names = QualityDial.levels.map(\.name)
     try require(
-        names == ["exact", "dynamic", "faster", "fastest", "dynamic-fastest"] && Set(names).count == names.count,
+        names == ["exact", "dynamic", "fast", "fastest", "dynamic-fastest"] && Set(names).count == names.count,
         "Levels differ: \(names)")
-    // `fast` names `faster`; v1's late-miss skip is an internal dial without a name.
+    // `faster` names `fast`; v1's late-miss skip is an internal dial without a name.
     try require(
-        QualityDial.level("exact") == .exact && QualityDial.exact.isExact && QualityDial.level("fast") == QualityDial.level("faster")
+        QualityDial.level("exact") == .exact && QualityDial.exact.isExact && QualityDial.level("faster") == QualityDial.level("fast")
             && QualityDial.lateMissSkip == QualityDial(lateMiss: .skip) && QualityDial.lateMissSkip.name == "custom"
             && QualityDial.level("FAST") == nil && QualityDial.level("custom") == nil, "Level lookup differs")
     try require(QualityDial.levels.dropFirst().allSatisfy { !$0.dial.isExact }, "A non-exact level is exact")
@@ -117,42 +118,67 @@ private func qualityDialLevelsAndKnobs() throws {
     try require(decoded == custom, "Dial JSON round trip differs")
 }
 
-/// Each model offers exact and only the fast levels that clearly helped it; every other named level runs as the model's
-/// mildest offered fast level, keeping an experimental delayed policy, and custom knobs run as set.
+/// A level a model runs with other knobs keeps an experimental delayed policy, and custom knobs run as set.
 private func qualityDialOfferedPerModel() throws {
-    try require(
-        QualityDial.offered(.qwen) == ["exact", "faster", "fastest"] && QualityDial.offered(.glm) == ["exact", "faster"]
-            && QualityDial.offered(.deepseek) == ["exact", "dynamic-fastest"], "Offered levels differ")
-    let runs: [ModelFamily: [String]] = [  // what exact, dynamic, faster, fastest and dynamic-fastest run as
-        .qwen: ["exact", "faster", "faster", "fastest", "faster"], .glm: ["exact", "faster", "faster", "faster", "faster"],
-        .deepseek: ["exact", "dynamic-fastest", "dynamic-fastest", "dynamic-fastest", "dynamic-fastest"],
-    ]
-    for (family, expected) in runs {
-        let ran = QualityDial.levels.map { $0.dial.offered(by: family).name }
-        try require(ran == expected, "\(family.displayName) runs the levels as \(ran)")
-    }
     let custom = QualityDial(expertsPerToken: 6, lateMiss: .skip)
     var delayed = QualityDial.level("fastest")!
     delayed.delayedExperts = try DelayedExpertPolicy().validated()
-    var expected = QualityDial.level("faster")!
+    var expected = QualityDial.level("fast")!
     expected.delayedExperts = delayed.delayedExperts
     try require(
-        custom.offered(by: .glm) == custom && delayed.offered(by: .glm) == expected && delayed.offered(by: .qwen) == delayed,
+        custom.offered(by: .glm) == custom && delayed.offered(by: .glm) == expected && delayed.offered(by: .qwen) == delayed
+            && custom.name(.deepseek) == "custom" && delayed.name(.glm) == "fast",
         "Custom knobs or a delayed policy changed")
     try require(
         QualityDial.offeredByModel
-            == "exact or a fast level the model offers (Qwen3.8-Flash-Next: faster, fastest; GLM-5.3-Flash: faster; DeepSeek-V4.1-Flash: dynamic-fastest)",
+            == "exact or a quicker level the model offers (Qwen3.8-Flash-Next: dynamic, fast, fastest; GLM-5.3-Flash: dynamic, fast; DeepSeek-V4.1-Flash: dynamic, fast)",
         "Per-model summary differs: \(QualityDial.offeredByModel)")
+}
+
+/// The ladder: every model offers exact, dynamic and fast, and fastest where it stayed usable (Qwen). Each name a request
+/// or setting may hold (the old `faster` and `dynamic-fastest` too) runs the family's knobs and is reported by the
+/// family's ladder name; DeepSeek's dynamic and fast run the dynamic-fastest and fastest knob sets. Translating twice
+/// changes nothing, and a `faster` setting reads (and is stored, by `name`) as `fast`.
+private func qualityDialLadder() throws {
+    try require(
+        QualityDial.offered(.qwen) == ["exact", "dynamic", "fast", "fastest"] && QualityDial.offered(.glm) == ["exact", "dynamic", "fast"]
+            && QualityDial.offered(.deepseek) == ["exact", "dynamic", "fast"], "Offered levels differ")
+    let asked = ["exact", "dynamic", "fast", "fastest", "faster", "dynamic-fastest"]
+    // Per family, for each asked name: the knob set that runs and the name users see.
+    let expected: [ModelFamily: [(knobs: String, shown: String)]] = [
+        .qwen: [
+            ("exact", "exact"), ("dynamic", "dynamic"), ("fast", "fast"), ("fastest", "fastest"), ("fast", "fast"),
+            ("dynamic", "dynamic"),
+        ],
+        .glm: [("exact", "exact"), ("dynamic", "dynamic"), ("fast", "fast"), ("fast", "fast"), ("fast", "fast"), ("dynamic", "dynamic")],
+        .deepseek: [
+            ("exact", "exact"), ("dynamic-fastest", "dynamic"), ("fastest", "fast"), ("fastest", "fast"), ("fastest", "fast"),
+            ("dynamic-fastest", "dynamic"),
+        ],
+    ]
+    for (family, rows) in expected {
+        for (name, row) in zip(asked, rows) {
+            let dial = QualityDial.level(name)!
+            let served = dial.offered(by: family)
+            try require(
+                served == QualityDial.level(row.knobs) && served.offered(by: family) == served && dial.name(family) == row.shown
+                    && served.name(family) == row.shown && QualityDial.offered(family).contains(row.shown),
+                "\(family.displayName) runs \(name) as \(served.name), shown as \(dial.name(family))")
+        }
+    }
+    try require(
+        QualityDial.level("faster")!.name == "fast" && QualityDial.level("dynamic-fastest")!.name == "dynamic-fastest",
+        "An old name does not read as the new one")
 }
 
 /// Dynamic: the knobs after a confident token, exact after any other; the threshold is a probability, a threshold over
 /// exact knobs is exact, and a dial saved before the knob existed still decodes.
 private func qualityDialDynamicSteps() throws {
     let dynamic = QualityDial.level("dynamic")!
-    let faster = QualityDial.level("faster")!
+    let fast = QualityDial.level("fast")!
     let fastest = QualityDial.level("fastest")!
     try require(
-        dynamic.confidentAbove == 0.9 && !dynamic.isExact && dynamic.signature == faster.signature + "-c0.9"
+        dynamic.confidentAbove == 0.9 && !dynamic.isExact && dynamic.signature == fast.signature + "-c0.9"
             && dynamic.knobs["confident_above"] == "0.9", "Dynamic level differs: \(dynamic.signature)")
     // Softmax top-1: [ln 9, 0] gives 0.9; equal logits split evenly; no finite logit is no confidence.
     try require(
@@ -167,7 +193,7 @@ private func qualityDialDynamicSteps() throws {
             && dynamicFastest.step(after: [1, 1, 0]) == .exact && dynamicFastest.validated() == dynamicFastest,
         "Dynamic-fastest level differs: \(dynamicFastest.signature)")
     try require(
-        dynamic.step(after: [10, 0, 0]) == faster && dynamic.step(after: [1, 1, 0]) == .exact
+        dynamic.step(after: [10, 0, 0]) == fast && dynamic.step(after: [1, 1, 0]) == .exact
             && dynamic.step(after: [logf(8.9), 0]) == .exact && fastest.step(after: [0, 0]) == fastest, "Dynamic step differs")
     for bad in [0, 1, -0.5, 2, Double.nan] {
         try require(refuses { try QualityDial(tailSkip: 0.1, confidentAbove: bad).validated() }, "Threshold \(bad) accepted")
@@ -260,16 +286,16 @@ private func qualityDialRequestSurfaces() throws {
     try require(
         try parse(["model": "origami-fastest", "origami_mode": "fastest"]).quality == QualityDial.level("fastest"),
         "A matching id and mode were refused")
-    // `fast` (v1's name) is `faster` as a mode and as a model id, and a matching pair is not a conflict.
+    // `faster` (fast's old name) is `fast` as a mode and as a model id, and a matching pair is not a conflict.
     try require(
-        try parse(["origami_mode": "fast"]).quality == QualityDial.level("faster")
-            && parse(["model": "qwen3.8-flash-next-fast"]).quality == QualityDial.level("faster")
-            && parse(["model": "qwen3.8-flash-next-fast", "origami_mode": "faster"]).quality == QualityDial.level("faster")
-            && parse(["model": "qwen3.8-flash-next-faster"]).quality == QualityDial.level("faster"), "fast does not name faster")
+        try parse(["origami_mode": "faster"]).quality == QualityDial.level("fast")
+            && parse(["model": "qwen3.8-flash-next-faster"]).quality == QualityDial.level("fast")
+            && parse(["model": "qwen3.8-flash-next-fast", "origami_mode": "faster"]).quality == QualityDial.level("fast")
+            && parse(["model": "qwen3.8-flash-next-fast"]).quality == QualityDial.level("fast"), "faster does not name fast")
     // J61: only the served model's id (or `origami`) with a level is a level; another name ending in one is just a name.
     try require(
         try parse(["model": "something-fast"]).quality == .exact && parse(["model": "x-fastest"]).quality == .exact
-            && parse(["model": "origami-faster"]).quality == QualityDial.level("faster"), "A name merely ending in a level selected it")
+            && parse(["model": "origami-faster"]).quality == QualityDial.level("fast"), "A name merely ending in a level selected it")
     try require(
         refuses { try parse(["origami_mode": "turbo"]) } && refuses { try parse(["origami_mode": 1]) }, "An unknown level was accepted")
     // The server's default applies to a request that names no level, and only to it.
@@ -293,11 +319,15 @@ private func qualityDialRequestSurfaces() throws {
     agreement.agreed = 2
     agreement.firstDifference = 1
     stats.teacher = agreement
-    let usage = try ServingWire.usage(stats)
+    let usage = try ServingWire.usage(stats, family: .qwen)
+    // DeepSeek runs the fastest knobs as its fast, and says so.
+    let deepseek = try ServingWire.usage(stats, family: .deepseek)
     try require(
-        usage["origami_mode"] as? String == "fastest" && usage["origami_tokens"] as? [Int] == [7, 8, 9]
+        usage["origami_mode"] as? String == "fastest" && deepseek["origami_mode"] as? String == "fast"
+            && usage["origami_tokens"] as? [Int] == [7, 8, 9]
             && (usage["origami_teacher"] as? [String: Any])?["agreed"] as? Int == 2, "Usage does not report the level or teacher result")
-    let custom = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 3, quality: QualityDial(expertsPerToken: 6)))
+    let custom = try ServingWire.usage(
+        GenerationStatistics(promptTokens: 5, completionTokens: 3, quality: QualityDial(expertsPerToken: 6)), family: .qwen)
     try require(custom["origami_mode"] as? String == "custom", "A custom dial is not reported as custom")
     // Chat commands.
     try require(

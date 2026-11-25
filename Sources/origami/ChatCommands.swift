@@ -34,15 +34,15 @@ enum ChatCommands {
         - `origami prompts`: the saved system prompts
         - `origami forget <name|all>`: remove saved system prompts
         - `origami quality [level]`: the quality level for chats with this system prompt (without a level, the current one and this model's levels)
-        - `origami fast on|off`: the same as `origami quality faster` or `exact`
+        - `origami fast on|off`: the same as `origami quality fast` or `exact`
         - `origami help`: this list
         """
 
-    /// What each non-exact level costs, as the chat reply says it (measured on an M2 Pro with 32 GB at 8K).
+    /// What each non-exact level does, as the chat reply says it.
     static let effect: [String: String] = [
-        "faster": "decode about 1.7× as fast, replies differ slightly",
-        "fastest": "decode about 2.1× as fast, replies differ more and may slip on strict instructions",
-        "dynamic-fastest": "decode about 1.4× as fast, fastest's shortcut only after tokens the model is sure of; replies differ slightly",
+        "dynamic": "takes shortcuts only where the model is sure of the next word: between exact and fast",
+        "fast": "takes the shortcut everywhere: quicker, replies differ slightly",
+        "fastest": "takes the most shortcuts: quickest, replies differ most and may slip on strict instructions",
     ]
 
     /// The handler `LocalHTTPConfiguration.commands` calls: `report` is `/v1/status`'s, `serving` the backend's status,
@@ -62,19 +62,19 @@ enum ChatCommands {
                     throw ServingFailure("`origami \(command.verb)` is kept per system prompt, and this chat has none")
                 }
                 let levels = QualityDial.offered(family).map { "`\($0)`" }.joined(separator: ", ")
-                guard let given = command.verb == "fast" ? (command.arguments[0] == "on" ? "faster" : "exact") : command.arguments.first
+                guard let given = command.verb == "fast" ? (command.arguments[0] == "on" ? "fast" : "exact") : command.arguments.first
                 else {
-                    let current = (sticky.level(key) ?? defaultQuality).offered(by: family)
+                    let current = (sticky.level(key) ?? defaultQuality).name(family)
                     return
-                        "quality **\(current.name)** for chats with this system prompt (levels: \(levels); `origami quality <level>` changes it)."
+                        "quality **\(current)** for chats with this system prompt (levels: \(levels); `origami quality <level>` changes it)."
                 }
                 // A level this model does not offer is kept as the one it runs.
-                guard let name = QualityDial.level(given)?.offered(by: family).name else { return "quality is one of \(levels)." }
+                guard let name = QualityDial.level(given)?.name(family) else { return "quality is one of \(levels)." }
                 guard name == "exact" || serving().fastOptIn else { return "only exact is allowed on this server (`allow_fast` is false)." }
                 try sticky.set(key, name)
                 return name == "exact"
                     ? "quality **exact** for chats with this system prompt: the model's own replies."
-                    : "quality **\(name)** for chats with this system prompt (\(Self.effect[name] ?? "faster decode, replies differ slightly"); `origami quality exact` undoes it)."
+                    : "quality **\(name)** for chats with this system prompt (\(Self.effect[name] ?? "quicker, replies differ slightly"); `origami quality exact` undoes it)."
             default:
                 guard let keeper = keeper() else {
                     throw ServingFailure("The model is still loading; try again in a moment", status: 503, type: "engine_unavailable")
@@ -218,7 +218,7 @@ final class StickyQuality: @unchecked Sendable {
         let data = try? Data(contentsOf: file)
         levels =
             data.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
-            ?? data.flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) }?.compactMapValues { $0 ? "faster" : nil } ?? [:]
+            ?? data.flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) }?.compactMapValues { $0 ? "fast" : nil } ?? [:]
     }
     func level(_ key: String) -> QualityDial? {
         lock.lock()

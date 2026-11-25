@@ -6,10 +6,11 @@ import OrigamiEngine
 private func splitRequire(_ condition: Bool, _ what: String) throws { if !condition { throw EngineError("Split reads: " + what) } }
 
 private func splitSource(
-    _ rate: Double, latency: Double = 1e-4, healthy: Double? = nil, outstanding: Int = 0, wearing: Bool = false
+    _ rate: Double, latency: Double = 1e-4, healthy: Double? = nil, busy: Double = 0, age: Double = 0, wearing: Bool = false
 ) -> SplitReadSource {
     SplitReadSource(
-        bytesPerSecond: rate, latencySeconds: latency, healthyBytesPerSecond: healthy ?? rate, outstanding: outstanding, wearing: wearing)
+        bytesPerSecond: rate, latencySeconds: latency, healthyBytesPerSecond: healthy ?? rate, busySeconds: busy, measuredSecondsAgo: age,
+        wearing: wearing)
 }
 
 /// Whether `parts` cover `record` bytes once, in order, one per source, every boundary on the alignment.
@@ -43,30 +44,27 @@ func splitReadPlanner() throws {
         try splitRequire(ends.max()! <= (1 - SplitReads.margin) * sources[0].seconds(record), "no clear gain")
     }
     let two = [splitSource(2.5e9), splitSource(2.5e9)]
-    try splitRequire(SplitReads.plan(recordBytes: qwen, sources: two, waited: false) == .whole(nil), "read-ahead was split")
-    try splitRequire(SplitReads.plan(recordBytes: qwen, sources: two, waited: true, enabled: false) == .whole(nil), "switch off")
-    try splitRequire(SplitReads.plan(recordBytes: qwen, sources: [two[0]], waited: true) == .whole(nil), "one source")
-    try splitRequire(SplitReads.plan(recordBytes: 20_000, sources: two, waited: true) == .whole(nil), "a record under two pages")
-    // Another read in flight on either drive.
+    let notEligible = SplitReadPlan.whole(source: nil, nil)
+    try splitRequire(SplitReads.plan(recordBytes: qwen, sources: two, waited: false) == notEligible, "read-ahead was split")
+    try splitRequire(SplitReads.plan(recordBytes: qwen, sources: two, waited: true, enabled: false) == notEligible, "switch off")
+    try splitRequire(SplitReads.plan(recordBytes: qwen, sources: [two[0]], waited: true) == notEligible, "one source")
+    try splitRequire(SplitReads.plan(recordBytes: 20_000, sources: two, waited: true) == notEligible, "a record under two pages")
+    // A fresh drive below a third of its healthy rate (a throttled one at 0.5 of 2 GB/s), or one wearing: no part, and the
+    // record is read whole from the other.
     try splitRequire(
-        SplitReads.plan(recordBytes: qwen, sources: [splitSource(2.5e9, outstanding: 1), two[1]], waited: true) == .whole(.busy),
-        "fastest busy")
+        SplitReads.plan(recordBytes: family, sources: [two[0], splitSource(0.5e9, healthy: 2e9)], waited: true)
+            == .whole(source: 0, .unhealthy), "a stalled drive took a part")
     try splitRequire(
-        SplitReads.plan(recordBytes: qwen, sources: [two[0], splitSource(2.4e9, outstanding: 2)], waited: true) == .whole(.busy),
-        "other busy")
-    // A drive below a third of its healthy rate (a throttled one at 0.5 of 2 GB/s), or one wearing.
-    try splitRequire(
-        SplitReads.plan(recordBytes: family, sources: [two[0], splitSource(0.5e9, healthy: 2e9)], waited: true) == .whole(.unhealthy),
-        "a stalled drive took a part")
-    try splitRequire(
-        SplitReads.plan(recordBytes: family, sources: [two[0], splitSource(2.4e9, wearing: true)], waited: true) == .whole(.wear),
+        SplitReads.plan(recordBytes: family, sources: [two[0], splitSource(2.4e9, wearing: true)], waited: true)
+            == .whole(source: 0, .wear),
         "a wearing drive took a part")
     try splitRequire(
-        SplitReads.plan(recordBytes: family, sources: [splitSource(2.5e9, wearing: true), two[1]], waited: true) == .whole(.wear),
-        "the wearing fastest drive split")
+        SplitReads.plan(recordBytes: family, sources: [splitSource(2.5e9, wearing: true), two[1]], waited: true)
+            == .whole(source: 1, .wear), "the wearing fastest drive split, or was read")
     // A healthy but much slower drive: the split would gain under the margin.
     try splitRequire(
-        SplitReads.plan(recordBytes: family, sources: [two[0], splitSource(0.3e9)], waited: true) == .whole(.smallGain), "small gain")
+        SplitReads.plan(recordBytes: family, sources: [two[0], splitSource(0.3e9)], waited: true) == .whole(source: 0, .smallGain),
+        "small gain")
     // Three and four sources: parts in proportion to speed; the healthy idle ones all take a part.
     for rates in [[3e9, 2e9, 1e9], [4e9, 3e9, 2e9, 2e9]] {
         let sources = rates.map { splitSource($0, latency: 0) }
@@ -271,6 +269,7 @@ func splitReadFamilyFetch() throws {
         let experts = try FamilyExperts(weights: weights, budget: UInt64(3 * (212_992 + 114_688)))
         experts.adaptiveGuesses = false
         experts.splitsReads = on
+        experts.disk = { _ in nil }
         let record = experts.bank(1)!.bytes.reduce(0, +)
         experts.attach(try HotCopy.write(source: experts, keys: Array(4..<12), folder: folder.appendingPathComponent("hot"), identity: "h"))
         let slots = try experts.fetch(layer: 1, experts: [2], decode: true)
@@ -290,7 +289,7 @@ func splitReadFamilyFetch() throws {
             try splitRequire(
                 report["split_reads"] as? Int == 1 && bytes["copy0", default: 0] + bytes["model", default: 0] == record
                     && bytes["copy0"] == c.copyBytes, "not split: \(report)")
-            // Another read in flight on a drive: the next lone miss is read whole.
+            // Another read in flight on a drive no longer keeps a lone miss whole: its part starts after that read's bytes.
             let held = DispatchSemaphore(value: 0)
             let blocker = try experts.reads.submit(
                 source: .externalSSD, priority: .demand, generation: experts.reads.currentGeneration, byteCount: 1,
@@ -299,8 +298,11 @@ func splitReadFamilyFetch() throws {
             held.signal()
             _ = blocker.join()
             let after = experts.splitReads.report
+            let sources = after["sources"] as? [String: [String: Any]] ?? [:]
             try splitRequire(
-                after["split_reads"] as? Int == 1 && (after["read_whole"] as? [String: Int])?["busy"] == 1, "busy drive: \(after)")
+                after["split_reads"] as? Int == 2 && (after["read_whole"] as? [String: Int])?["busy"] == nil
+                    && sources["copy0"]?["bytes_per_second"] is Double && sources["model"]?["measured_seconds_ago"] != nil,
+                "busy drive: \(after)")
         } else {
             try splitRequire(report["split_reads"] as? Int == 0 && experts.counters.hotReads == 1, "switch off split: \(report)")
         }
@@ -319,7 +321,8 @@ private func splitEventually(_ condition: () -> Bool) -> Bool {
 /// from `whole`, an online estimator when `estimator` is given, and `concurrent` reads at once per drive.
 private func splitQwenLoader(
     sources: SplitSources, whole: SplitSources, estimator: ExpertSourceOnlineEstimator? = nil, split: Bool = true, concurrent: Int = 4,
-    replicas: Bool = true
+    replicas: Bool = true,
+    measured: @escaping @Sendable (IOSource) -> (bytesPerSecond: Double, secondsAgo: Double, healthy: Double) = { _ in (0, .infinity, 0) }
 ) throws -> (SourceExpertLoader, IOScheduler, ExpertCache, ExpertReplicaArena) {
     guard let device = MTLCreateSystemDefaultDevice() else { throw FixtureUnavailable(description: "no Metal device") }
     let ledger = try MemoryLedger(ceiling: 400_000_000, transientMargin: 1_000_000)
@@ -335,7 +338,7 @@ private func splitQwenLoader(
     if split {
         loader.enableSplitReads(
             .init(
-                available: { _ in true }, wearing: { _, _ in false },
+                available: { _ in true }, wearing: { _, _ in false }, measured: measured,
                 read: { _, source, offset, into, _ in try sources.read(source == .internalSSD ? 0 : 1, offset, into) },
                 verify: { _, record, _ in
                     guard record.elementsEqual(sources.pattern) else { throw EngineError("assembled record differs") }
@@ -386,16 +389,15 @@ func splitReadQwenLoader() throws {
     try splitRequire(
         whole.readCount == 2 && loader.splitReads.splitCount == 1 && loader.splitReads.report["lone_demand_waits"] as? Int == 2,
         "the switch off still split, or its lone wait was not counted")
-    // During a split both drives have its reads outstanding: a read planned then finds them busy.
+    // During a split its parts' bytes are planned on its sources (what a read planned then finds them busy with); none
+    // once it ended.
     sources.delays = [0.15, 0.15]
     let leases = arena.snapshot().leasedRecords
     let running = try request(0)
     try splitRequire(splitEventually { sources.runningReads == 2 }, "the split's parts did not start")
-    let drives = scheduler.snapshot().drives
-    try splitRequire(drives.allSatisfy { $0.outstanding >= 1 }, "a split's part is not charged to its drive: \(drives)")
-    let during = drives.map { splitSource(2.5e9, outstanding: $0.outstanding) }
-    try splitRequire(SplitReads.plan(recordBytes: PackStore.expertBytes, sources: during, waited: true) == .whole(.busy), "not busy")
+    try splitRequire(loader.plannedBytes["model"] > 0 && loader.plannedBytes["pack"] > 0, "the parts' bytes are not planned")
     try (try loader.joinAndPin(running)).retireAfterGPUCompletion()
+    try splitRequire(splitEventually { loader.plannedBytes.total == 0 }, "planned bytes left: \(loader.plannedBytes.total)")
     // Cancelled while its parts read: the wait ends once they have, and the slot is free again.
     sources.destination = nil
     // Parts a second long: the cancel at 20 ms comes while they read, also on a loaded Mac or under a sanitizer.
@@ -507,6 +509,7 @@ func splitReadFamilyHedgeWins() throws {
         let experts = try FamilyExperts(weights: weights, budget: UInt64(3 * (212_992 + 114_688)))
         experts.adaptiveGuesses = false
         experts.splitsReads = true
+        experts.disk = { _ in nil }
         experts.attach(
             try HotCopy.write(source: experts, keys: Array(4..<12), folder: folder.appendingPathComponent("hot\(run)"), identity: "h"))
         let probe = Probe()
@@ -549,6 +552,7 @@ func splitReadFamilyHedgeWins() throws {
     let experts = try FamilyExperts(weights: weights, budget: UInt64(3 * (212_992 + 114_688)))
     experts.adaptiveGuesses = false
     experts.splitsReads = true
+    experts.disk = { _ in nil }
     experts.attach(try HotCopy.write(source: experts, keys: Array(4..<12), folder: folder.appendingPathComponent("hotB"), identity: "h"))
     let probe = Probe()
     experts.splitPartProbe = { _, staged, _ in
@@ -562,7 +566,12 @@ func splitReadFamilyHedgeWins() throws {
     try splitRequire(exact(slots[0]) && probe.lock.withLock({ probe.running }) == 1, "the guarded split")
     experts.reads.shutdown()
     try splitRequire(probe.lock.withLock { probe.running } == 0, "shutdown left a staged reader running")
-    try splitRequire(splitEventually { (experts.replicaArena?.snapshot().leasedRecords ?? 0) == leases }, "the staging lease was kept")
+    // A hedge replica that won while the split still read stays pinned for its slot: that lease is not the staging's.
+    let pinned = experts.counters.hedgeReplicaWins
+    try splitRequire(
+        splitEventually { (experts.replicaArena?.snapshot().leasedRecords ?? 0) <= leases + pinned },
+        "the staging lease was kept (\(experts.replicaArena?.snapshot().leasedRecords ?? 0) leased, \(leases) before, \(pinned) hedge wins)"
+    )
 }
 
 /// GLM and DeepSeek with two copy places (`attach(copies:)`): a record both places hold splits three ways with the
@@ -575,6 +584,7 @@ func splitReadFamilyPlaces() throws {
     let experts = try FamilyExperts(weights: weights, budget: UInt64(3 * (212_992 + 114_688)))
     experts.adaptiveGuesses = false
     experts.splitsReads = true
+    experts.disk = { _ in nil }
     let a = try HotCopy.write(source: experts, keys: [4, 5, 6], folder: folder.appendingPathComponent("a"), identity: "h")
     let b = try HotCopy.write(source: experts, keys: [4, 5], folder: folder.appendingPathComponent("b"), identity: "h")
     experts.attach(copies: [a, b])
@@ -594,6 +604,7 @@ func splitReadFamilyPlaces() throws {
     let single = try FamilyExperts(weights: weights, budget: UInt64(3 * (212_992 + 114_688)))
     single.adaptiveGuesses = false
     single.splitsReads = true
+    single.disk = { _ in nil }
     single.attach(copies: [a, b])
     try splitRequire(exact(try single.fetch(layer: 1, experts: [2], decode: true)[0], 2), "one place")
     let parts = single.splitReads.report["part_bytes"] as? [String: Int] ?? [:]
@@ -641,33 +652,38 @@ private func splitQueuePartThenCancel(
         "shutdown or the cancel waited on a split whose part was queued")
 }
 
-/// A split part still queued behind a slow read when its generation is cancelled or its scheduler shut down: its job
-/// ends without running it, and the part ends with it, so the split returns at once (not at the stall bound), no
-/// reader is left, the staging lease is back and `shutdown` returns promptly. Both adapters: Qwen's loader and the
-/// families' `fetch`.
+/// Qwen's split parts hold no queue slot (a part waiting for a slot that split reads' own jobs hold would never start):
+/// with the other drive's only slot taken by a slow read, a split still ends at once, exact. The families' parts are
+/// jobs on their drives (only a lone miss is split there): one still queued behind a slow read when its generation is
+/// cancelled or its scheduler shut down ends without running, and the part ends with it, so the split returns at once
+/// (not at the stall bound), no reader is left, the staging lease is back and `shutdown` returns promptly.
 func splitReadQueuedPartCancel() throws {
-    for shutdown in [false, true] {
+    do {
         let sources = SplitSources(PackStore.expertBytes, sources: 2)
         let whole = SplitSources(PackStore.expertBytes, sources: 2)
-        let (loader, scheduler, cache, arena) = try splitQwenLoader(sources: sources, whole: whole, concurrent: 1)
-        let leases = arena.snapshot().leasedRecords
+        let (loader, scheduler, _, _) = try splitQwenLoader(sources: sources, whole: whole, concurrent: 1)
         let hold = scheduler.holdStarts()
         let request = try loader.request(
             try ExpertKey(layer: 0, expert: 1), generation: scheduler.currentGeneration, policy: .earliestCompletion,
             calibration: splitCalibration)
-        let generation = scheduler.currentGeneration
-        try splitQueuePartThenCancel(scheduler, shutdown: shutdown, hold: hold) { try loader.cancelAndJoin(generation) }
+        try splitRequire(splitEventually { scheduler.snapshot().drives.contains { $0.queuedDemand == 1 } }, "the split's job did not queue")
+        let other: IOSource =
+            scheduler.snapshot().drives.first { $0.queuedDemand == 1 }!.source == .internalSSD ? .externalSSD : .internalSSD
+        try scheduler.submit(
+            source: other, priority: .demand, generation: scheduler.currentGeneration, byteCount: 1,
+            operation: { cancellation in
+                while true {
+                    try cancellation.throwIfCancelled()
+                    Thread.sleep(forTimeInterval: 0.002)
+                }
+            })
+        hold.release()
         let begun = Date()
-        var cancelled = false
-        do { try (try loader.joinAndPin(request)).retireAfterGPUCompletion() } catch { cancelled = true }
+        try (try loader.joinAndPin(request)).retireAfterGPUCompletion()
         let seconds = Date().timeIntervalSince(begun)
         try splitRequire(
-            cancelled && seconds < 1 && loader.splitReads.splitCount == 0,
-            "Qwen (shutdown \(shutdown)): the split waited \(seconds) s on its queued part (cancelled \(cancelled))")
-        try splitRequire(sources.runningReads == 0, "Qwen: a part reader outlived the split")
-        try splitRequire(
-            splitEventually { cache.snapshot().inFlightReads == 0 && arena.snapshot().leasedRecords == leases },
-            "Qwen: the slot or the staging lease was kept")
+            seconds < 1 && loader.splitReads.splitCount == 1 && whole.readCount == 0,
+            "Qwen: the split waited \(seconds) s for a queue slot: \(loader.splitReads.report)")
         try splitRequire(splitPromptly { scheduler.shutdown() }, "Qwen: shutdown did not return")
     }
     guard let device = MTLCreateSystemDefaultDevice() else { throw FixtureUnavailable(description: "no Metal device") }
@@ -682,6 +698,7 @@ func splitReadQueuedPartCancel() throws {
         FamilyExperts.checkReadLimits = saved
         experts.adaptiveGuesses = false
         experts.splitsReads = true
+        experts.disk = { _ in nil }
         experts.attach(
             try HotCopy.write(source: experts, keys: Array(4..<12), folder: folder.appendingPathComponent("hot\(shutdown)"), identity: "h"))
         let leases = experts.replicaArena?.snapshot().leasedRecords ?? 0
@@ -733,4 +750,157 @@ func splitReadFirstPartInPlace() throws {
     try splitRequire(
         Array(loaded.buffer.bytes) == sources.pattern && loader.splitReads.splitCount == 1 && sources.readCount == 2 && inSlot == 1,
         "\(sources.readCount) part reads, \(inSlot) into the slot, \(loader.splitReads.splitCount) splits")
+}
+
+/// A seeded generator (SplitMix64), so a failing random plan can be run again.
+private struct SplitRandom: RandomNumberGenerator {
+    var state: UInt64
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
+/// The planner with busy and stale sources: a busy source gets a smaller, later part instead of none; a deep equal
+/// backlog gives a whole read from the source that ends it first; a stale source (even one stalled when last measured) is
+/// measured again with a part that is not the first, and leads only when every candidate is stale; over 400 seeded random
+/// source sets the parts cover the record once on aligned boundaries, the lead's at its end, only candidates take parts
+/// and a whole read goes to the candidate ending first. One source per disk; a lane's and the slow-read tally's age.
+func splitReadPlannerLive() throws {
+    let record = 2_764_800
+    func plan(_ sources: [SplitReadSource]) -> SplitReadPlan { SplitReads.plan(recordBytes: record, sources: sources, waited: true) }
+    let idle = splitSource(2.5e9)
+    for (sources, idleAt) in [([idle, splitSource(2.5e9, busy: 0.5e-3)], 0), ([splitSource(2.5e9, busy: 0.5e-3), idle], 1)] {
+        guard case .split(let parts) = plan(sources), parts.count == 2, splitCovers(parts, record) else {
+            throw EngineError("Split reads: a busy source took no part: \(plan(sources))")
+        }
+        let busyPart = parts.first { $0.source != idleAt }!
+        try splitRequire(parts[0].source == idleAt && busyPart.length < record / 2, "the busy source's part: \(parts)")
+        let ends = parts.map { sources[$0.source].seconds($0.length) }
+        try splitRequire(abs(ends[0] - ends[1]) <= 2 * Double(SplitReads.alignment) / 2.5e9, "busy parts end apart: \(ends)")
+    }
+    try splitRequire(plan([splitSource(2.5e9, busy: 1), splitSource(2.5e9, busy: 1.001)]) == .whole(source: 0, .smallGain), "backlog")
+    try splitRequire(plan([splitSource(2.5e9, busy: 1.001), splitSource(2.5e9, busy: 1)]) == .whole(source: 1, .smallGain), "backlog 2")
+    // Stalled when last measured a minute ago: planned at its healthy rate, staged behind the fresh lead.
+    for sources in [[idle, splitSource(0.3e9, healthy: 2.4e9, age: 60)], [splitSource(0.3e9, healthy: 3e9, age: .infinity), idle]] {
+        guard case .split(let parts) = plan(sources), parts.count == 2, sources[parts[0].source].fresh else {
+            throw EngineError("Split reads: a stale source was not measured again behind a fresh lead: \(plan(sources))")
+        }
+    }
+    try splitRequire(
+        plan([idle, splitSource(0.3e9, healthy: 2.4e9, age: 1)]) == .whole(source: 0, .unhealthy)
+            && plan([idle, splitSource(2.5e9, age: 60, wearing: true)]) == .whole(source: 0, .wear), "a fresh stalled or wearing source")
+    // Every candidate stale: one may lead. A fresh one deep in a backlog with stale idle ones: no stale lead, so whole.
+    guard case .split(let stale) = plan([splitSource(2.5e9, age: 30), splitSource(2.4e9, age: .infinity)]), stale[0].source == 0 else {
+        throw EngineError("Split reads: stale sources alone were not split")
+    }
+    try splitRequire(
+        plan([splitSource(2.5e9, busy: 1), splitSource(2.5e9, age: 60), splitSource(2.4e9, age: 60)]) == .whole(source: 1, .smallGain),
+        "a stale source led while a fresh one was a candidate")
+    var random = SplitRandom(state: 1)
+    for run in 0..<400 {
+        let count = Int.random(in: 2...5, using: &random)
+        let sources = (0..<count).map { _ -> SplitReadSource in
+            let rate = Double.random(in: 0.05e9...5e9, using: &random)
+            return splitSource(
+                rate, latency: Double.random(in: 0...1e-3, using: &random),
+                healthy: [rate, 2 * rate, 4 * rate, 0].randomElement(using: &random)!,
+                busy: [0, 0, 1e-4, 1e-3, 0.1].randomElement(using: &random)!,
+                age: [0, 5, 30, .infinity].randomElement(using: &random)!, wearing: Int.random(in: 0..<10, using: &random) == 0)
+        }
+        let bytes = Int.random(in: (2 * SplitReads.alignment)...20_000_000, using: &random)
+        let candidates = sources.indices.filter { !sources[$0].stalled && !sources[$0].wearing }
+        let first = candidates.map { sources[$0].seconds(bytes) }.min()
+        switch SplitReads.plan(recordBytes: bytes, sources: sources, waited: true) {
+        case .split(let parts):
+            try splitRequire(
+                parts.count >= 2 && splitCovers(parts, bytes) && parts[0].offset + parts[0].length == bytes
+                    && parts.allSatisfy { candidates.contains($0.source) }
+                    && (sources[parts[0].source].fresh || candidates.allSatisfy { !sources[$0].fresh })
+                    && parts.map({ sources[$0.source].seconds($0.length) }).max()! <= (1 - SplitReads.margin) * first!,
+                "run \(run): parts \(parts) of \(bytes) bytes over \(sources)")
+        case .whole(let source?, _):
+            try splitRequire(candidates.contains(source) && sources[source].seconds(bytes) == first, "run \(run): whole from \(source)")
+        case .whole(nil, _):
+            try splitRequire(candidates.isEmpty, "run \(run): no source for a whole read with candidates \(candidates)")
+        }
+    }
+    try splitRequire(
+        SplitReads.onePerDisk(["disk3", "disk3", nil, "disk4", nil], rates: [1, 2, 0, 1, 0]) == [1, 2, 3, 4]
+            && SplitReads.onePerDisk(["disk3", "disk3"], rates: [0, 0]) == [1], "one source per disk")
+    // A lane trained by parts and whole records alike: bytes over time, aged from its last read.
+    var lane = ReadLane()
+    for n in 0..<16 { lane.served(seconds: 1e-3 * Double(n % 2 + 1), bytes: 1_000_000 * (n % 2 + 1)) }
+    let measured = lane.measured
+    try splitRequire(
+        measured.map { abs($0.bytesPerSecond / 1e9 - 1) < 0.01 && $0.secondsAgo < 1 } == true && ReadLane().measured == nil,
+        "lane rate \(String(describing: measured))")
+    final class Clock: @unchecked Sendable { var now = 100.0 }
+    let clock = Clock()
+    let reads = SlowDriveReads(clock: { clock.now })
+    try splitRequire(reads.age == .infinity, "an unfed tally has an age")
+    reads.add(bytes: 1e6, seconds: 1e-3)
+    clock.now = 112
+    try splitRequire(abs(reads.age - 12) < 1e-9, "tally age \(reads.age)")
+}
+
+/// Qwen: a read whose normal path is the pack, with the pack stalled, goes whole to the model's drive as one part (no
+/// staging lease), exact, counted as `whole_from_other_source` and not as a split, and leaves no planned bytes behind.
+func splitReadQwenRouted() throws {
+    let sources = SplitSources(PackStore.expertBytes, sources: 2)
+    let whole = SplitSources(PackStore.expertBytes, sources: 2)
+    let (routed, routedScheduler, _, arena) = try splitQwenLoader(
+        sources: sources, whole: whole, measured: { $0 == .externalSSD ? (0.5e9, 0, 2.4e9) : (2.5e9, 0, 2.5e9) })
+    defer { routedScheduler.shutdown() }
+    let leases = arena.snapshot().leasedRecords
+    let loaded = try routed.joinAndPin(
+        try routed.request(
+            try ExpertKey(layer: 0, expert: 1), generation: routedScheduler.currentGeneration, calibration: splitCalibration))
+    defer { try? loaded.retireAfterGPUCompletion() }
+    let report = routed.splitReads.report
+    try splitRequire(
+        Array(loaded.buffer.bytes) == sources.pattern && sources.reads == [0] && whole.readCount == 0
+            && report["whole_from_other_source"] as? Int == 1 && routed.splitReads.splitCount == 0
+            && arena.snapshot().leasedRecords == leases,
+        "routed whole read: \(sources.reads) part and \(whole.reads) whole reads, \(report)")
+    try splitRequire(splitEventually { routed.plannedBytes.total == 0 }, "planned bytes left after a routed read")
+}
+
+/// GLM and DeepSeek: a lone miss whose copy place is wearing is read whole from the GGUF (`whole_from_other_source`),
+/// exact, though `copyShare` gave it the copy; with neither wearing, several lone misses in a row split, exact.
+func splitReadFamilyRouted() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else { throw FixtureUnavailable(description: "no Metal device") }
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("origami-split-routed-\(getpid())")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let weights = try FamilyWeights(gguf: GGUFSource(try expertFixtureGGUF(in: folder)), device: device)
+    let experts = try FamilyExperts(weights: weights, budget: UInt64(3 * (212_992 + 114_688)))
+    experts.adaptiveGuesses = false
+    experts.splitsReads = true
+    experts.disk = { _ in nil }
+    let copy = try HotCopy.write(source: experts, keys: Array(4..<12), folder: folder.appendingPathComponent("hot"), identity: "h")
+    experts.attach(copy)
+    let per = GGUFQuantize.bytes(8, count: 256 * 256)
+    func exact(_ slot: FamilyExperts.Slot, _ expert: Int) -> Bool {
+        (0..<3).allSatisfy { part in
+            UnsafeRawBufferPointer(start: slot.buffer.contents() + slot.offsets[part], count: per).allSatisfy {
+                $0 == UInt8(50 + expert * 10 + part)
+            }
+        }
+    }
+    copy.reads.markWear(true)
+    let hotReads = experts.counters.hotReads
+    try splitRequire(exact(try experts.fetch(layer: 1, experts: [2], decode: true)[0], 2), "the routed record's bytes")
+    let report = experts.splitReads.report
+    try splitRequire(
+        report["whole_from_other_source"] as? Int == 1 && experts.splitReads.splitCount == 0 && experts.counters.hotReads == hotReads,
+        "a wearing copy was read: \(report), hot reads \(experts.counters.hotReads)")
+    copy.reads.markWear(false)
+    for expert in [0, 1, 3] {
+        try splitRequire(exact(try experts.fetch(layer: 1, experts: [expert], decode: true)[0], expert), "expert \(expert)'s bytes")
+    }
+    try splitRequire(experts.splitReads.splitCount >= 1, "no lone miss split: \(experts.splitReads.report)")
+    try requireFamilyMirror(experts, "split routed")
 }

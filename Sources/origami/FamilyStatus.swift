@@ -264,7 +264,7 @@ final class FamilyStatus: @unchecked Sendable {
             changed.memoryLimit = value
         }
         if case .some(let value) = try size("expert_memory") { changed.expertMemory = value }
-        if let text = query["quality"], !text.isEmpty, text != settings.quality.name {
+        if let text = query["quality"], !text.isEmpty, text != settings.quality.name(family) {
             guard let level = QualityDial.level(text) else {
                 throw ServingFailure("quality is one of \(QualityDial.offered(family).joined(separator: ", "))")
             }
@@ -326,7 +326,7 @@ final class FamilyStatus: @unchecked Sendable {
                 "context": changed.context,
                 "memory_limit": orAuto(changed.memoryLimit), "expert_memory": orAuto(changed.expertMemory),
                 "hot_copy": changed.hotCopy == 0 ? "off" : orAuto(changed.hotCopy), "context_dir": changed.promptCacheRoot.path,
-                "quality": changed.quality.offered(by: family).name,
+                "quality": changed.quality.name(family),
             ],
             "quality": StatusSource.qualityReport(changed, family: family),
             "memory": [

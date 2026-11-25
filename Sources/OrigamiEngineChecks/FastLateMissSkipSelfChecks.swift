@@ -325,11 +325,11 @@ package enum FastLateMissSkipSelfChecks {
 
     /// Per-request opt-in. Exact requests take the unchanged path (no τ, so the decode layer
     /// builds no skip closure) with or without the allowance; a non-exact request runs with the allowed τ and is refused
-    /// without it (`notAllowed`, never run exact instead). Requests parse `origami_mode` (absent/null/"exact"/"fast", the
-    /// last meaning "faster"; anything else 400) and the `<alias>-fast` model id (faster; with `origami_mode: "exact"` 400);
+    /// without it (`notAllowed`, never run exact instead). Requests parse `origami_mode` (absent/null/"exact"/"fast";
+    /// anything else 400) and the `<alias>-fast` model id (fast; with `origami_mode: "exact"` 400);
     /// usage keeps its exact-only keys for exact responses and names the level for the others.
     package static func requestModeSelection() throws {
-        let faster = QualityDial.level("faster")!
+        let faster = QualityDial.level("fast")!
         try Check.require(
             try FastLateMissSkip.requestTau(.exact, allowedTau: nil) == nil
                 && FastLateMissSkip.requestTau(.exact, allowedTau: 1) == nil
@@ -362,18 +362,18 @@ package enum FastLateMissSkipSelfChecks {
         let plain = try parse([:])
         try Check.require(
             named.quality == faster && named.model == fastID && redundant.quality == faster
-                && plain.quality == .exact && plain.model == "qwen3.8-flash-next:4bit", "The fast model id did not select faster")
+                && plain.quality == .exact && plain.model == "qwen3.8-flash-next:4bit", "The fast model id did not select fast")
         for (extra, status) in [(["model": fastID, "origami_mode": "exact"], 400)] as [([String: Any], Int)] {
             var refused = false
             do { _ = try parse(extra) } catch let failure as ServingFailure { refused = failure.status == status }
             try Check.require(refused, "Fast model id case was not refused with \(status): \(extra)")
         }
 
-        let exact = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 2))
-        let fast = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 2, quality: faster))
+        let exact = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 2), family: .qwen)
+        let fast = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 2, quality: faster), family: .qwen)
         try Check.require(
             Set(exact.keys) == ["prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details"]
-                && Set(fast.keys) == Set(exact.keys).union(["origami_mode"]) && fast["origami_mode"] as? String == "faster",
+                && Set(fast.keys) == Set(exact.keys).union(["origami_mode"]) && fast["origami_mode"] as? String == "fast",
             "Usage does not report the level alone")
     }
 

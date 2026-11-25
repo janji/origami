@@ -73,7 +73,7 @@ Responses `reasoning` input item is the next assistant turn's reasoning, as `rea
 An Anthropic `tool_result` with images passes them to a model that reads images (as a user turn right after the
 results); for one that does not, the result says an image was left out. A reply ended by a `stop` string says so on
 the Anthropic wire (`stop_reason` `stop_sequence`, with the string); the other wires say `stop`. A model name selects
-a quality level only as this model's id (or `origami`) and `-<level>`, such as `qwen3.8-flash-next-faster`.
+a quality level only as this model's id (or `origami`) and `-<level>`, such as `qwen3.8-flash-next-fast`.
 
 ## Requests
 
@@ -200,7 +200,7 @@ drops earlier commands and their answers from what the model sees.
 | `origami prompts` | the saved system prompts and kept sessions |
 | `origami forget <name\|all>` | removes saved system prompts and kept sessions |
 | `origami quality [level]` | the quality level for chats with this system prompt (a request's own choice wins); alone, shows the current one |
-| `origami fast on\|off` | the same as `origami quality faster` or `origami quality exact` |
+| `origami fast on\|off` | the same as `origami quality fast` or `origami quality exact` |
 
 Anything else, such as `origami help?` or a question about origami, is an ordinary message.
 `origami config set commands false` turns commands off.

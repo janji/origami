@@ -156,7 +156,7 @@ final class StatusSource: @unchecked Sendable {
             }
             changed.contextDir = URL(fileURLWithPath: Settings.expand(text), isDirectory: true)
         }
-        if let text = query["quality"], !text.isEmpty, text != settings.quality.name {
+        if let text = query["quality"], !text.isEmpty, text != settings.quality.name(.qwen) {
             guard let level = QualityDial.level(text) else {
                 throw ServingFailure("quality is one of \(QualityDial.offered(.qwen).joined(separator: ", "))")
             }
@@ -253,7 +253,7 @@ final class StatusSource: @unchecked Sendable {
                 "context": changed.context, "memory_limit": orAuto(changed.memoryLimit),
                 "expert_memory": orAuto(changed.expertMemory),
                 "hot_copy": changed.hotCopy == 0 ? "off" : orAuto(changed.hotCopy), "context_dir": changed.promptCacheRoot.path,
-                "quality": changed.quality.offered(by: .qwen).name,
+                "quality": changed.quality.name(.qwen),
             ],
             "quality": Self.qualityReport(changed),
             "memory": [
@@ -344,9 +344,10 @@ final class StatusSource: @unchecked Sendable {
             ])
         }
         // The quality dial: each level's measured cost (ballpark cases at 8K, no pack).
-        if let measured = qualityCost[quality.name] {
+        if let measured = qualityCost[quality.name(.qwen)] {
             rows.append([
-                "choice": "Quality " + quality.name, "decode": measured.decode, "prompt": "unchanged (prompts are always read exactly)",
+                "choice": "Quality " + quality.name(.qwen), "decode": measured.decode,
+                "prompt": "unchanged (prompts are always read exactly)",
                 "quality": measured.quality, "basis": measured.basis,
             ])
         } else {
@@ -372,9 +373,9 @@ final class StatusSource: @unchecked Sendable {
     static func qualityReport(_ settings: Settings, family: ModelFamily = .qwen) -> [String: Any] {
         let level = settings.quality.offered(by: family)
         return [
-            "level": level.name, "knobs": level.knobs, "allowed": settings.allowFast,
+            "level": level.name(family), "knobs": level.knobs, "allowed": settings.allowFast,
             "levels": QualityDial.offered(family).map { name -> [String: Any] in
-                var row: [String: Any] = ["name": name, "knobs": QualityDial.level(name)!.knobs]
+                var row: [String: Any] = ["name": name, "knobs": QualityDial.level(name)!.offered(by: family).knobs]
                 if family == .qwen, let cost = qualityCost[name] {
                     row["decode"] = cost.decode
                     row["quality"] = cost.quality
@@ -384,10 +385,14 @@ final class StatusSource: @unchecked Sendable {
             },
         ]
     }
-    /// Each level Qwen offers, its measured effect on an M2 Pro with 32 GB.
+    /// Each level Qwen offers, its measured effect on an M2 Pro with 32 GB (dynamic's speed is not measured here).
     static let qualityCost: [String: (decode: String, quality: String, basis: String)] = [
         "exact": ("the model's own speed", "the model's own replies (bitwise)", "measured on an M2 Pro with 32 GB"),
-        "faster": ("about 1.7× decode", "94.8% of next tokens as exact; ballpark answers right", "measured on an M2 Pro with 32 GB"),
+        "dynamic": (
+            "between exact and fast", "takes shortcuts only where the model is sure of the next word; replies can differ",
+            "not measured"
+        ),
+        "fast": ("about 1.7× decode", "94.8% of next tokens as exact; ballpark answers right", "measured on an M2 Pro with 32 GB"),
         "fastest": (
             "about 2.1× decode", "90% of next tokens as exact; slips on strict instructions (3 of 4 ballpark answers right)",
             "measured on an M2 Pro with 32 GB"

@@ -1,7 +1,7 @@
 import Foundation
 import OrigamiEngine
 
-let version = "3.1.7.1"
+let version = "3.1.8"
 
 /// Options that set a setting; every command that reads settings accepts them. Help lists them in this order: the
 /// ones people change most first, the quality knobs last.
@@ -85,7 +85,7 @@ let optionLines: [String: String] = [
     "full-pack": "--full-pack                 copy the experts even onto the model's own drive",
     "review": "--review true               save a proposal without applying it",
     "tradeoffs": "--tradeoffs true            compare quality modes without changing settings",
-    "quality-floor": "--quality-floor <level>     lowest quality to compare (default the model's mildest fast level)",
+    "quality-floor": "--quality-floor <level>     lowest quality to compare (default the model's mildest level after exact)",
     "minutes": "--minutes <n>               time limit: 3 to 30 minutes (default 8); with --memory 3 to 60 (default 30)",
     "recheck": "--recheck                   check that the tuned settings are still faster than the defaults",
     "undo": "--undo                      remove the tuned settings and reload with the defaults",

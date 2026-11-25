@@ -1060,10 +1060,10 @@ public struct ServingRequest: Sendable {
     public var stream: Bool
     public let includeUsage, parallelToolCalls: Bool
     public let toolChoice: ServingToolChoice
-    /// `origami_mode`: a quality level (any of `QualityDial.levels`; "fast" is "faster"); absent, the server's default
+    /// `origami_mode`: a quality level (any of `QualityDial.levels`; "faster" is "fast"); absent, the server's default
     /// (exact unless set). A non-exact level runs only where the configuration allows it, and the server runs a level its
     /// model does not offer as the model's nearest one (`QualityDial.offered(by:)`). The model id `<alias>-<level>`
-    /// (`-faster`, `-fastest`, `-dynamic-fastest`, `-fast`…) selects one too, for clients that cannot send body fields.
+    /// (`-dynamic`, `-fast`, `-fastest`, `-faster`…) selects one too, for clients that cannot send body fields.
     public var quality: QualityDial = .exact
     /// `origami_teacher_tokens`: decode compares its own greedy picks with these tokens and continues from them
     /// (measurement: top-1 agreement with a reference reply, reported in usage). Nil decodes normally.
@@ -1221,11 +1221,13 @@ public struct ServingRequest: Sendable {
         }
         // Fields this server does not use are ignored, as clients send many vendor extensions.
         // One model is served under any name (wrappers such as llama-swap rename it); a name
-        // ending in "-<level>" ("-faster", "-fastest", "-fast"…) selects that quality level for clients that cannot send body fields.
+        // ending in "-<level>" ("-dynamic", "-fast", "-fastest"…) selects that quality level for clients that cannot send body fields.
         let requestedModel = body["model"] as? String ?? model
         // `origami_mode` (a level name). The old field name is refused, not ignored: ignoring it would run exact
         // where a client asked for fast.
-        guard body["qfs_mode"] == nil else { throw ServingFailure("qfs_mode is now origami_mode (\"exact\", \"faster\" or \"fastest\")") }
+        guard body["qfs_mode"] == nil else {
+            throw ServingFailure("qfs_mode is now origami_mode (\"exact\", \"dynamic\", \"fast\" or \"fastest\")")
+        }
         let modeField = body["origami_mode"]
         let levelNames = QualityDial.levels.map(\.name)
         var named: QualityDial?
@@ -1640,7 +1642,7 @@ public struct ServingRequest: Sendable {
         let overrides = try TuneOverrides(json: raw)
         // An empty marker pauses background copying for a local quality comparison; no timing switches change.
         if quality.isExact, overrides.delayedExperts != nil {
-            throw ServingFailure("delayed_experts requires dynamic, fast/faster or fastest mode")
+            throw ServingFailure("delayed_experts requires dynamic, fast or fastest mode")
         }
         // Prefill remains exact in approximate decode modes. A bounded prefill scope also forces
         // isolated prompt state, so qualification requests cannot reuse another mode's frontier.
@@ -2015,7 +2017,7 @@ public enum ServingWire {
     public static let done = Data("data: [DONE]\n\n".utf8)
     /// An SSE comment: keeps idle timers from firing, ignored by every client.
     public static let keepAlive = Data(": keepalive\n\n".utf8)
-    public static func usage(_ stats: GenerationStatistics) throws -> [String: Any] {
+    public static func usage(_ stats: GenerationStatistics, family: ModelFamily) throws -> [String: Any] {
         guard stats.promptTokens >= 0, stats.completionTokens >= 0, stats.cachedTokens >= 0,
             stats.cachedTokens <= stats.promptTokens, stats.promptTokens <= Int.max - stats.completionTokens
         else { throw EngineError("Invalid backend usage") }
@@ -2025,7 +2027,7 @@ public enum ServingWire {
             "prompt_tokens_details": ["cached_tokens": stats.cachedTokens],
         ]
         // Exact usage keeps its exact-only bytes; any other level says which (X-Origami-Mode reports every level).
-        if !stats.quality.isExact { usage["origami_mode"] = stats.quality.name }
+        if !stats.quality.isExact { usage["origami_mode"] = stats.quality.name(family) }
         if let tokens = stats.outputTokens { usage["origami_tokens"] = tokens }
         // Explicit diagnostic requests reuse already collected boundary data;
         // ordinary traffic adds neither measurement payload nor hot-path work.

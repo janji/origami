@@ -259,10 +259,10 @@ func servingOutputBudgetAndWireUsage() throws {
     let required = ServingStream(request: try servingRequest(["tools": servingTestTools(), "tool_choice": "required", "think": false]))
     _ = try required.push("No call")
     try servingReject({ _ = try required.finish(reason: "stop") }, status: 422)
-    let usage = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 2, cachedTokens: 3))
+    let usage = try ServingWire.usage(GenerationStatistics(promptTokens: 5, completionTokens: 2, cachedTokens: 3), family: .qwen)
     try servingAssert(usage["total_tokens"] as? Int == 7, "Usage arithmetic changed")
     do {
-        _ = try ServingWire.usage(GenerationStatistics(promptTokens: 2, completionTokens: -1))
+        _ = try ServingWire.usage(GenerationStatistics(promptTokens: 2, completionTokens: -1), family: .qwen)
         throw ServingFailure("negative usage accepted")
     } catch is EngineError {}
     let bytes = try ServingWire.sse(["x": "line\n雪"])
@@ -1420,7 +1420,7 @@ func servingClientErrorsNullFieldsAndDefaultBudget() throws {
         servingRequest(["origami_mode": "fast"]), servingRequest(["unknown_vendor_field": 1]),
     ].map(\.quality)
     try servingAssert(
-        modes == [.exact, QualityDial.level("faster")!, QualityDial.level("faster")!, .exact],
+        modes == [.exact, QualityDial.level("fast")!, QualityDial.level("fast")!, .exact],
         "Model names, origami_mode or unknown fields are not handled forgivingly")
     try servingReject({ _ = try servingRequest(["messages": [["role": "user", "content": NSNull()]]]) }, status: 400)
 
@@ -1441,7 +1441,7 @@ func servingClientErrorsNullFieldsAndDefaultBudget() throws {
     try servingAssert(clampedRoom == 8_191, "An explicit budget past the room was not clamped: \(clampedRoom)")
 }
 
-/// The `-<level>` model ids are listed only where the backend allows the other levels, `-fast` selects faster and a
+/// The `-<level>` model ids are listed only where the backend allows the other levels, `-fast` selects fast and a
 /// response echoes the id; degraded status reaches the wire and its header.
 func servingFastModelIDAndDegradedStatus() throws {
     let ledger = try MemoryLedger(ceiling: 1_000_000_000, transientMargin: 1_000_000)
@@ -1492,17 +1492,17 @@ func servingFastModelIDAndDegradedStatus() throws {
     let object = try JSONSerialization.jsonObject(with: reply) as? [String: Any]
     try servingAssert(
         replyStatus == 200 && object?["model"] as? String == "qwen3.8-flash-next-fast"
-            && (object?["usage"] as? [String: Any])?["origami_mode"] as? String == "faster"
-            && completion.header("X-Origami-Mode") == "faster",
-        "The -fast model id response did not echo the id or report faster")
-    // A level Qwen does not offer runs as its mildest fast one, and the reply names the one that ran.
+            && (object?["usage"] as? [String: Any])?["origami_mode"] as? String == "fast"
+            && completion.header("X-Origami-Mode") == "fast",
+        "The -fast model id response did not echo the id or report fast")
+    // A level Qwen does not offer runs as its nearest one, and the reply names the one that ran.
     request.httpBody = try servingBody(["origami_mode": "dynamic-fastest", "think": false])
     let mapped = ServingURLResult()
     let (mappedReply, mappedStatus) = try servingURL(request, session: session, result: mapped)
     let mappedUsage = (try JSONSerialization.jsonObject(with: mappedReply) as? [String: Any])?["usage"] as? [String: Any]
     try servingAssert(
-        mappedStatus == 200 && mappedUsage?["origami_mode"] as? String == "faster" && mapped.header("X-Origami-Mode") == "faster",
-        "dynamic-fastest did not run as faster on Qwen")
+        mappedStatus == 200 && mappedUsage?["origami_mode"] as? String == "dynamic" && mapped.header("X-Origami-Mode") == "dynamic",
+        "dynamic-fastest did not run as dynamic on Qwen")
     try servingAssert(server.stopAndJoin(timeout: 5), "Server failed to join actual workers")
 }
 
@@ -2390,7 +2390,8 @@ func servingRequestLimitsNamed() throws {
         toolLimit == "400 tools must be an array of at most 512 tools (this request has 513)"
             && messageLimit == "400 messages must be a nonempty array of at most 4096 messages", "Limits: \(toolLimit) / \(messageLimit)")
     let legacy = message { _ = try servingRequest(["qfs_mode": "fast"]) }
-    try servingAssert(legacy == "400 qfs_mode is now origami_mode (\"exact\", \"faster\" or \"fastest\")", "The old mode field: \(legacy)")
+    try servingAssert(
+        legacy == "400 qfs_mode is now origami_mode (\"exact\", \"dynamic\", \"fast\" or \"fastest\")", "The old mode field: \(legacy)")
 }
 
 /// The engine's storage and context-file errors reach the client with their own message and code; a cancellation is

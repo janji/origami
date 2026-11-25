@@ -87,7 +87,7 @@ check 1 "No model to refresh" "$bin" refresh --model /nonexistent/model --yes
 check 1 "No model to refresh" "$bin" refresh --copy --model /nonexistent/model --yes
 check 0 "Usage: origami serve" "$bin" help serve
 check 0 "--single-model" "$bin" help serve
-check 0 "(Qwen3.8-Flash-Next: faster, fastest; GLM-5.3-Flash: faster; DeepSeek-V4.1-Flash: dynamic-fastest)" "$bin" help serve
+check 0 "(Qwen3.8-Flash-Next: dynamic, fast, fastest; GLM-5.3-Flash: dynamic, fast; DeepSeek-V4.1-Flash: dynamic, fast)" "$bin" help serve
 [ -e "$tmp/data" ] && { echo "FAIL  --help created $tmp/data"; failures=$((failures + 1)); }
 check 0 "origami " "$bin" --version
 check 0 "origami " "$bin" serve --version
@@ -425,7 +425,7 @@ check 1 "sampling_override is true or false" "$bin" config set sampling_override
 check 0 "exact" env ORIGAMI_QUALITY=exact "$bin" config get quality  # a file knob does not override a stronger level
 check 1 "is not 1 to 10" "$bin" config set experts_per_token 11
 check 1 "late_miss" "$bin" config set late_miss later
-check 1 "quality is exact or a fast level the model offers (Qwen3.8-Flash-Next: faster, fastest;" "$bin" config set quality turbo
+check 1 "quality is exact or a quicker level the model offers (Qwen3.8-Flash-Next: dynamic, fast, fastest;" "$bin" config set quality turbo
 check 1 "is a probability" "$bin" config set confident_above 1.5
 check 0 "quality = dynamic" "$bin" config set quality dynamic
 check 0 "0.9" "$bin" config get confident_above
@@ -433,6 +433,8 @@ check 0 "confident_above = 0.8" "$bin" config set confident_above 0.8
 check 0 "custom (t0.1m-c0.8" "$bin" config get quality
 check 0 "quality = dynamic-fastest" "$bin" config set quality dynamic-fastest  # stored as named; each model runs its nearest
 check 0 "skip" "$bin" config get late_miss
+check 0 "quality = fast" "$bin" config set quality faster  # the old name of fast, stored as fast
+grep -q '"quality" : "fast"' "$tmp/data/config.json" || { echo "FAIL  config set quality faster did not store fast"; failures=$((failures + 1)); }
 check 0 "quality = exact" "$bin" config set quality exact
 check 0 "all" "$bin" config get experts_per_token
 # A knob on a named model is kept in its entry and served over the entry's own level; a level unset there leaves a null

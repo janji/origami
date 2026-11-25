@@ -4,6 +4,45 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.8 (2026-11-25)
+
+**Replies:** unchanged at `exact`. Some level names now run other shortcuts: `dynamic` runs as itself on Qwen and GLM
+(it ran as `faster`), and on DeepSeek `fast` (or `faster`) and `fastest` run `fastest`'s shortcuts (they ran as
+`dynamic-fastest`, now DeepSeek's `dynamic`).
+
+Every model offers the same quality ladder:
+
+- **One ladder for all three models**: `exact` (the model's own replies, the slowest), `dynamic` (shortcuts only where
+  the model is sure of the next word, between exact and fast), `fast` (the shortcut everywhere, replies differ
+  slightly), and on Qwen `fastest` (the most shortcuts, replies differ most), the only model on which it stayed usable.
+- **`fast` is the new name of `faster`.** The old name is still accepted everywhere (requests, `-faster` model ids,
+  settings, chat commands), and a settings file holding it keeps working; `usage.origami_mode` and `X-Origami-Mode`
+  now say `fast`.
+- **`dynamic` is offered on every model.** On Qwen and GLM it stayed right on every task and was slower than `fast`.
+- **DeepSeek's levels take bigger shortcuts at the same names**, as the plain ones saved it no time: its `dynamic` is
+  what it offered as `dynamic-fastest` (about 30% less time than exact, every task right), and its `fast` runs
+  `fastest`'s shortcuts (faster still; one task of 14 wrong, reasoning after `</think>` twice). Replies, the status
+  and the dashboard say `dynamic` and `fast`; `dynamic-fastest` is still accepted and runs as `dynamic`.
+- **GLM and DeepSeek asked for `fastest` run `fast`.**
+
+Reading:
+
+- **Split reads decide by each drive's current speed** (still an experiment, `ORIGAMI_SPLIT_READS=1`). When more than
+  one connected drive holds the model, Origami reads from all of them at once, each a share that matches its measured
+  speed, and stops using a drive that slows down. Each drive's speed
+  comes from its own recent reads; one not read for 10 s is measured again before it is trusted. A read that is not
+  worth splitting goes whole to the drive that would finish it first. Replies are unchanged (every drive holds the
+  same bytes, checked as before). It stays off by default: with the whole model also on a fast internal drive it was
+  about 2% slower than reading from that drive alone, and it wears the second drive.
+- **`split_reads` in the status** no longer counts `read_whole.busy` (a busy drive now takes a smaller, later share),
+  and adds `whole_from_other_source` and, per drive, the speed and age the last plan used (`sources`).
+
+### Serving
+
+- **Health and status no longer answer 503 while a few others are read.** Only two could be read at once, so with a
+  dashboard open, another program's health check could get "Too many active requests". Further reads now take free
+  request slots.
+
 ## 3.1.7.1 (2026-11-24)
 
 **Replies:** unchanged.

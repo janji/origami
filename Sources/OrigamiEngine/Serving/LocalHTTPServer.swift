@@ -1087,7 +1087,7 @@ public final class LocalHTTPServer: @unchecked Sendable {
             if let note = metadata.degraded { lines.append("X-Origami-Note: \(safe(note))") }
         }
         // The quality level of this completion (`origami_mode`; a non-exact one is refused before headers where not allowed).
-        if let requestMode { lines.append("X-Origami-Mode: \(requestMode.name)") }
+        if let requestMode { lines.append("X-Origami-Mode: \(requestMode.name(configuration.family))") }
         lines += extra
         return Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
     }
@@ -1266,7 +1266,7 @@ public final class LocalHTTPServer: @unchecked Sendable {
             client.lifecycle.mark("load_end")
             client.lifecycle.mark("service_start")
             lock.lock()
-            current = (client.control, Date(), nil, 0, request.reasoningEffort, request.quality.name)
+            current = (client.control, Date(), nil, 0, request.reasoningEffort, request.quality.name(configuration.family))
             lock.unlock()
             var produced: GenerationStatistics?
             var delivered = false
@@ -1314,7 +1314,7 @@ public final class LocalHTTPServer: @unchecked Sendable {
             }
             produced = stats
             try client.control.check()
-            var usage = try ServingWire.usage(stats)
+            var usage = try ServingWire.usage(stats, family: configuration.family)
             var details: [String: Any] = ["reasoning_effort": request.reasoningEffort]
             if let tokens = stats.reasoningTokens { details["reasoning_tokens"] = tokens }
             if let closedBy = stats.reasoningClosedBy { details["reasoning_closed_by"] = closedBy }

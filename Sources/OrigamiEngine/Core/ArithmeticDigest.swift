@@ -4,7 +4,7 @@
 /// .metal, .c and .h file under `included` and not under `excluded` (the script says why each is there). Saved prompts are
 /// keyed on it (`PromptCanary`), not on the executable; `arithmetic_digest_current` checks it is up to date.
 public enum ArithmeticDigest {
-    public static let value = "96456401f3f8352dd8113e3948a78fac5902b322dbc56ee07866ebb8ad97f5c4"
+    public static let value = "0346136676460429bb3ae772ba1f5e2ae9ae6682becfa1e3e920aa47bc96a8af"
     package static let included = [
         "Sources/CExactIO/",
         "Sources/OrigamiEngine/Core/",

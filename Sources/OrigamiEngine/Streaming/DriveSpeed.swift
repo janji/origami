@@ -79,6 +79,29 @@ public struct DriveSpeed: Codable, Sendable, Equatable {
         return nil
     }
 
+    /// The physical disk holding `url` ("disk3": APFS volumes of one container share it, as `Stores.volume` names it), or
+    /// nil where statfs gives none; kept per folder for the life of the process, since a split read asks per read.
+    /// shortcut: a drive plugged in again under another disk number keeps its old name, which only decides which of two
+    /// sources is dropped (`SplitReads.onePerDisk`); look again if a wrong name ever costs more than that.
+    package static func disk(_ url: URL) -> String? {
+        let path = url.standardizedFileURL.path
+        if let known = diskNames.lock.withLock({ diskNames.names[path] }) { return known }
+        var info = statfs()
+        var name: String?
+        if statfs(path, &info) == 0 {
+            let device = withUnsafeBytes(of: info.f_mntfromname) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            let volume = device.split(separator: "/").last.map(String.init) ?? device
+            name = volume.hasPrefix("disk") ? "disk" + volume.dropFirst(4).prefix { $0.isNumber } : volume
+        }
+        diskNames.lock.withLock { diskNames.names[path] = name }
+        return name
+    }
+    private final class DiskNames: @unchecked Sendable {
+        let lock = NSLock()
+        var names: [String: String?] = [:]
+    }
+    private static let diskNames = DiskNames()
+
     /// Bytes the drive holding `url` has read and written since it appeared (IOKit's block-storage statistics), or nil
     /// where macOS gives none (a network volume).
     package static func driveBytes(_ url: URL) -> UInt64? {

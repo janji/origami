@@ -619,8 +619,10 @@ enum Commands {
         if let note = settings.qualityNote { log(note) }
         // Forgiving: a stored level this model does not offer serves as its nearest offered one.
         http.defaults.quality = settings.quality.offered(by: .qwen)
-        if http.defaults.quality != settings.quality {
-            log("quality \(settings.quality.name) is not offered by \(ModelFamily.qwen.displayName); serving \(http.defaults.quality.name)")
+        if settings.quality.name != "custom", !QualityDial.offered(.qwen).contains(settings.quality.name) {
+            log(
+                "quality \(settings.quality.name) is not offered by \(ModelFamily.qwen.displayName); serving \(settings.quality.name(.qwen))"
+            )
         }
         let sticky = StickyQuality(file: settings.dataDir.appendingPathComponent("fast-mode.json"))
         http.stickyQuality = { sticky.level($0) }
@@ -1109,8 +1111,10 @@ enum Commands {
         http.defaults.statusMessages = settings.statusMessages
         // Forgiving: a stored level this model does not offer serves as its nearest offered one.
         http.defaults.quality = settings.quality.offered(by: geometry.family)
-        if http.defaults.quality != settings.quality {
-            log("quality \(settings.quality.name) is not offered by \(geometry.family.displayName); serving \(http.defaults.quality.name)")
+        if settings.quality.name != "custom", !QualityDial.offered(geometry.family).contains(settings.quality.name) {
+            log(
+                "quality \(settings.quality.name) is not offered by \(geometry.family.displayName); serving \(settings.quality.name(geometry.family))"
+            )
         }
         http.defaults.recommendedSampling = SamplingDefaults.recommended(gguf.metadata, splitModes: false)
         http.defaults.sampling = settings.sampling(http.defaults.recommendedSampling)
@@ -2454,7 +2458,9 @@ enum Commands {
             let forModel = changes.keys.contains(key) ? nil : settings.model
             changes.merge(settings.lanKeyFor(changes)) { $1 }
             try Settings.write(changes, to: settings.configFile)
-            print("\(key) = \(Settings.secretKeys.contains(key) && !Settings.isOff(text) ? "(set)" : text)")
+            // A quality level shows as stored (`faster` as `fast`).
+            let shown = key == "quality" ? value as? String ?? text : text
+            print("\(key) = \(Settings.secretKeys.contains(key) && !Settings.isOff(text) ? "(set)" : shown)")
             print(appliesLine(key, model: forModel, settings: settings))
             if key == "hot_copy_more" {
                 let kept = Set(try Settings.copyPlaces(text).map(\.folder))

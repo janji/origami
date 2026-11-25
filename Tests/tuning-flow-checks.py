@@ -30,8 +30,8 @@ MARKER = "ORIGAMI_TUNING_OUTCOME "
 GIB = 1024 ** 3
 # The Mac the CLI's host checks read: 8 GB, calm, so no run is refused for the runner's own swapping.
 HOST = {"memory_bytes": 8 * GIB, "swapout_bytes": 0, "memory_pressure": 1, "thermal_state": 0, "low_power": False}
-# The levels the fixture model offers; the unoffered floor "dynamic" runs as its mildest fast one.
-LEVELS = ("exact", "dynamic-fastest")
+# The levels the fixture model compares down to the floor "dynamic".
+LEVELS = ("exact", "dynamic")
 
 
 class Fixture:
@@ -82,7 +82,7 @@ class Fixture:
         # only each request's own before/after delta would incorrectly miss this.
         if self.scenario in ("between_samples", "legacy_between_samples") and len(self.requests) == 3 and not self.injected_between_samples:
             self.injected_between_samples = True
-            self.append_recent("faster")
+            self.append_recent("fast")
 
     def append_recent(self, mode, completion_tokens=16):
         self.completed += 1
@@ -99,7 +99,7 @@ class Fixture:
         completion_tokens = 1 if self.scenario == "last_short_reply" and count == 6 else 16
         self.append_recent(body.get("origami_mode"), completion_tokens)
         if self.scenario == "external_request" and count == 3:
-            self.append_recent("faster")
+            self.append_recent("fast")
         elif self.scenario == "counter_reset" and count == 3:
             self.completed = 0
         elif self.scenario == "changed_model" and count == 6:
@@ -311,7 +311,7 @@ class TuneFixture(Fixture):
                     self.completed = 0  # a new process counts from zero
                     handler.close_connection = True
                     return
-                self.append_recent("faster")  # an app's request completed meanwhile
+                self.append_recent("fast")  # an app's request completed meanwhile
         self.requests.append(body)
         tokens = 1 if self.short is not None and arm == self.short else body.get("max_tokens", 1)
         self.append_recent(body.get("origami_mode"), tokens)

@@ -1,8 +1,9 @@
 import Foundation
 
-/// The quality dial: one setting from `exact` (the default, bitwise the model's own replies) to a deliberately
-/// aggressive `fastest`; each model offers only the levels that clearly help it (`offered(_:)`). A level is a set of
-/// knobs, the same for every model family, and each knob is also settable alone (`origami config set
+/// The quality dial: one setting from `exact` (the default, bitwise the model's own replies) through `dynamic` and
+/// `fast` to a deliberately aggressive `fastest`, which only models it stayed usable on offer (`offered(_:)`). A named
+/// level is a set of knobs; a model may run a level with other knobs (`offered(by:)`, DeepSeek's), and users see the
+/// name on that model's ladder (`name(_:)`). Each knob is also settable alone (`origami config set
 /// experts_per_token 6` and so on). The knobs are plain values so any family backend can read them and apply those it
 /// supports; Qwen applies the expert knobs in its fused decode (`SerialExecutor`) and
 /// `confidentAbove` between decode steps (`GenerationDriver`).
@@ -54,60 +55,75 @@ public struct QualityDial: Codable, Sendable, Equatable {
     }
 
     public static let exact = QualityDial()
-    /// v1's fast mode, unchanged: late misses are skipped. Not a named level (`fast` names `faster`); the knob
-    /// `late_miss skip` alone still reaches it, and its decode rows keep v1's timeline epoch.
+    /// v1's fast mode, unchanged: late misses are skipped. Not a named level; the knob `late_miss skip` alone still
+    /// reaches it, and its decode rows keep v1's timeline epoch.
     public static let lateMissSkip = QualityDial(lateMiss: .skip)
-    /// Every named level, whichever models offer it (`offered(_:)`), so a request or setting naming any of them still
-    /// runs (`offered(by:)`). The knobs came from a screen of every knob (an M2 Pro with 32 GB, 8K context): the
-    /// misses-only tail skip beat experts per token and substitution on speed and agreement at once.
+    /// Every named knob set, the names settings files and requests use (`offered(by:)` turns one into what a model
+    /// runs). The knobs came from a screen of every knob (an M2 Pro with 32 GB, 8K context): the misses-only tail skip
+    /// beat experts per token and substitution on speed and agreement at once.
     public static let levels: [(name: String, dial: QualityDial)] = [
         ("exact", .exact),
-        // faster's knobs after a token the model gave at least 0.9, exact after any other.
+        // fast's knobs after a token the model gave at least 0.9, exact after any other.
         ("dynamic", QualityDial(tailSkip: 0.1, tailSkipMissesOnly: true, confidentAbove: 0.9)),
-        ("faster", QualityDial(tailSkip: 0.1, tailSkipMissesOnly: true)),
+        ("fast", QualityDial(tailSkip: 0.1, tailSkipMissesOnly: true)),
         ("fastest", QualityDial(tailSkip: 0.1, tailSkipMissesOnly: true, lateMiss: .skip)),
-        // fastest's knobs after a token the model gave at least 0.9, exact after any other.
+        // fastest's knobs after a token the model gave at least 0.9, exact after any other. No model lists it: it is
+        // what DeepSeek's dynamic runs.
         ("dynamic-fastest", QualityDial(tailSkip: 0.1, tailSkipMissesOnly: true, lateMiss: .skip, confidentAbove: 0.9)),
     ]
-    /// The levels a model offers: exact, then the fast levels that clearly helped it on short checkable tasks (answers
-    /// scored right or wrong, one Mac), mildest first. `dynamic` stayed right everywhere but was slower than `faster`
-    /// on Qwen and GLM and barely faster than exact on DeepSeek, so no model offers it.
+    /// The ladder a model offers: exact, dynamic (shortcuts only after a token the model was sure of), fast, and fastest
+    /// where an even faster level stayed usable on short checkable tasks (answers scored right or wrong, one Mac).
+    /// `dynamic` stayed right everywhere on Qwen and GLM and was slower than `fast` there.
     public static func offered(_ family: ModelFamily) -> [String] {
         switch family {
-        // Qwen: faster and fastest saved 62–71% of the time with every task right.
-        case .qwen: ["exact", "faster", "fastest"]
-        // GLM: faster saved 34–42% with every task right; fastest rambled and wrote reasoning after </think>.
-        case .glm: ["exact", "faster"]
-        // DeepSeek: dynamic-fastest saved about 30% with every task right; fastest missed one, faster saved no time.
-        case .deepseek: ["exact", "dynamic-fastest"]
+        // Qwen: fast and fastest saved 62–71% of the time with every task right.
+        case .qwen: ["exact", "dynamic", "fast", "fastest"]
+        // GLM: fast saved 34–42% with every task right; fastest rambled and wrote reasoning after </think>.
+        case .glm, .deepseek: ["exact", "dynamic", "fast"]
         }
     }
-    /// Each model's fast levels, for help and messages that cannot name the served one.
+    /// The knob set `family` runs for a named level, where it is not the level's own. DeepSeek's levels use stronger
+    /// knobs, as the plain ones saved it no time: its dynamic runs dynamic-fastest (about 30% less time, every task
+    /// right) and its fast runs fastest (faster still; one task of 14 wrong, reasoning after </think> twice). Every
+    /// target here is its own family's fixed point, so `offered(by:)` is idempotent.
+    private static func runs(_ family: ModelFamily) -> [String: String] {
+        switch family {
+        case .qwen: ["dynamic-fastest": "dynamic"]
+        case .glm: ["fastest": "fast", "dynamic-fastest": "dynamic"]
+        case .deepseek: ["dynamic": "dynamic-fastest", "fast": "fastest"]
+        }
+    }
+    /// Each model's levels besides exact, for help and messages that cannot name the served one.
     public static var offeredByModel: String {
         let models = ModelFamily.allCases.map { "\($0.displayName): " + offered($0).dropFirst().joined(separator: ", ") }
-        return "exact or a fast level the model offers (" + models.joined(separator: "; ") + ")"
+        return "exact or a quicker level the model offers (" + models.joined(separator: "; ") + ")"
     }
     /// Names accepted for a level besides its own (`origami_mode`, the `-<name>` model ids, settings and chat commands):
-    /// `fast`, the name of v1's fast mode and of the dial's first level, is `faster`.
-    public static let aliases = ["fast": "faster"]
+    /// `faster`, the name of `fast` until 3.1.8.
+    public static let aliases = ["faster": "fast"]
     public static func level(_ name: String) -> QualityDial? {
         let name = aliases[name] ?? name
         return levels.first { $0.name == name }?.dial
     }
-    /// This dial as `family` runs it. Forgiving: a named level the model does not offer runs its mildest offered fast
-    /// level (exact only for a model with none); exact, the offered levels and custom knobs are unchanged.
+    /// This dial as `family` runs it. Forgiving: a named level the model does not offer runs its nearest offered one;
+    /// exact and custom knobs are unchanged.
     public func offered(by family: ModelFamily) -> QualityDial {
-        let names = Self.offered(family)
-        guard name != "custom", !names.contains(name) else { return self }
-        var dial = names.count > 1 ? Self.level(names[1])! : .exact
+        guard let target = Self.runs(family)[name] else { return self }
+        var dial = Self.level(target)!
         dial.delayedExperts = delayedExperts
         return dial
+    }
+    /// The level's name on `family`'s ladder, as users see it (usage, headers, status, logs): DeepSeek's run of the
+    /// fastest knobs is its `fast`. "custom" for knobs set alone.
+    public func name(_ family: ModelFamily) -> String {
+        let served = offered(by: family).name
+        return Self.offered(family).first { Self.level($0)!.offered(by: family).name == served } ?? served
     }
 
     public var isExact: Bool { self == .exact }
     /// The dial drops routed experts before any read starts (experts per token or tail skip).
     public var dropsExperts: Bool { delayedExperts == nil && (expertsPerToken != nil || tailSkip != nil) }
-    /// The level's name, or "custom" for knobs set alone.
+    /// The knob set's name, as settings files store it, or "custom" for knobs set alone (`name(_:)` is the user's).
     public var name: String {
         var base = self
         base.delayedExperts = nil

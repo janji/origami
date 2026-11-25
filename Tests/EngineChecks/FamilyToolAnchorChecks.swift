@@ -131,7 +131,7 @@ func familyToolAnchors() throws {
     // Requests that cannot save exact model output never capture. Teacher forcing is explicitly checked even though
     // parsing already makes it no_store; internal callers may construct requests themselves.
     for extra: [String: Any] in [
-        ["prompt_cache_policy": "no_store"], ["origami_mode": "faster"],
+        ["prompt_cache_policy": "no_store"], ["origami_mode": "fast"],
         ["origami_teacher_tokens": Array(reply.utf8).map(Int.init)],
     ] {
         let (skipped, skippedStub) = try setup()

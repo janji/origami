@@ -99,9 +99,11 @@ public final class HTTPConnectionBudget: @unchecked Sendable {
     public func classify(_ id: Int, control: Bool) -> Bool {
         lock.withLock {
             guard let kind = entries[id]?.kind else { return false }
-            guard kind == .ingress else { return kind == (control ? .control : .request) }
-            let desired: Kind = control ? .control : .request
-            guard entries.values.filter({ $0.kind == desired }).count < (control ? reservedControl : maximumRequests) else { return false }
+            guard kind == .ingress else { return control || kind == .request }
+            let count = { (kind: Kind) in self.entries.values.filter { $0.kind == kind }.count }
+            // Health and status past their reserve take a free request slot: an open dashboard must not turn a health check into a 503.
+            let desired: Kind = control && count(.control) < reservedControl ? .control : .request
+            guard desired == .control || count(.request) < maximumRequests else { return false }
             entries[id]?.kind = desired
             return true
         }

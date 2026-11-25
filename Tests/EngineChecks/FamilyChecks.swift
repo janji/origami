@@ -2221,7 +2221,7 @@ func familyMemoryGovernor() throws {
 /// The family serving backend and the quality dial, on a stub model whose greedy pick is always "H" (72): prompts run
 /// exact and replies at the request's level; a conversation continues from exact rows or rows of its own level, never
 /// exact from non-exact ones; teacher forcing scores the greedy picks and continues from the teacher's tokens; a
-/// configuration without the fast allowance refuses every non-exact level; `dynamic` decodes at faster's knobs after a
+/// configuration without the fast allowance refuses every non-exact level; `dynamic` decodes at fast's knobs after a
 /// confident token and exact after an unsure one; a reply's tool call decodes exact from its opener on.
 func familyServingDial() throws {
     // The stub model's state lives in Metal buffers.
@@ -2328,7 +2328,7 @@ func familyServingDial() throws {
     try require(
         d.cachedTokens == 0 && stub.resets == 1 && stub.forwards.last!.dial.isExact,
         "an exact turn continued fastest rows (cached \(d.cachedTokens))")
-    let e = try run(backend, ["Hi"], ["origami_mode": "faster", "origami_teacher_tokens": [72, 73, 72], "origami_return_tokens": true])
+    let e = try run(backend, ["Hi"], ["origami_mode": "fast", "origami_teacher_tokens": [72, 73, 72], "origami_return_tokens": true])
     try require(
         e.teacher
             == {
@@ -2348,8 +2348,8 @@ func familyServingDial() throws {
             throw EngineError("Family serving: accepted \(bad)")
         } catch is ServingFailure {}
     }
-    // dynamic and dynamic-fastest: faster's or fastest's knobs after a confident token, exact after any other.
-    for (mode, knobs) in [("dynamic", "faster"), ("dynamic-fastest", "fastest")] {
+    // dynamic and dynamic-fastest: fast's or fastest's knobs after a confident token, exact after any other.
+    for (mode, knobs) in [("dynamic", "fast"), ("dynamic-fastest", "fastest")] {
         for confident in [true, false] {
             stub.forwards = []
             stub.confident = confident
@@ -2364,12 +2364,12 @@ func familyServingDial() throws {
     // A tool call decodes exact from its opener on, at any level (the tiny vocabulary finds it on the text): the
     // forward after `>` and every later one are exact, and the statistics name the first exact reply token.
     let call = Array("a<tool_call>bc".utf8).map(Int.init)
-    for mode in ["faster", "dynamic"] {
+    for mode in ["fast", "dynamic"] {
         stub.forwards = []
         let t = try run(backend, ["Hi"], ["origami_mode": mode, "origami_teacher_tokens": call, "max_tokens": call.count])
         let knobs = stub.forwards.dropFirst().map(\.dial)
         try require(
-            t.exactFrom == 12 && knobs.count == call.count - 1 && knobs.prefix(11).allSatisfy { $0 == QualityDial.level("faster")! }
+            t.exactFrom == 12 && knobs.count == call.count - 1 && knobs.prefix(11).allSatisfy { $0 == QualityDial.level("fast")! }
                 && knobs.dropFirst(11).allSatisfy(\.isExact),
             "\(mode) tool call: exact from \(String(describing: t.exactFrom)), \(knobs.map(\.name))")
     }

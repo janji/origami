@@ -54,6 +54,7 @@ package struct RequestPhaseCounters {
             values["split_guard_rereads"] = Double(split["guard_rereads"] as? Int ?? 0)
             values["split_failed_part_rereads"] = Double(split["failed_part_rereads"] as? Int ?? 0)
             values["split_lone_demand_wait_seconds"] = split["lone_demand_wait_seconds"] as? Double ?? 0
+            values["split_whole_from_other_source"] = Double(split["whole_from_other_source"] as? Int ?? 0)
             for (source, bytes) in split["part_bytes"] as? [String: Int] ?? [:] { values["split_part_bytes_\(source)"] = Double(bytes) }
             for (reason, count) in split["read_whole"] as? [String: Int] ?? [:] { values["split_read_whole_\(reason)"] = Double(count) }
         }
