@@ -10,7 +10,7 @@ import Foundation
 /// (and `v1/models` for Connect an app), `v1/models/found`, `v1/models/check`, `v1/fs` (its one folder browser), `v1/storage`
 /// (where Origami's files are), `v1/prompts/<id>` (a saved prompt's text), `v1/lan` (who can reach it) and `v1/jobs`, and writes
 /// `v1/config` then `v1/reload` (or `v1/restart` for access), `v1/fs/mkdir`, `v1/prompts` (rename, keep, delete, a system prompt edited into a new one),
-/// `v1/memory/learned` (forgets the learned memory budget), `v1/memory/wired` (saves the budget and raises its macOS ceiling)
+/// `v1/presets` (save, update, rename, delete or use a preset of the Setup settings), `v1/memory/learned` (forgets the learned memory budget), `v1/memory/wired` (saves the budget and raises its macOS ceiling)
 /// and `v1/jobs` (preparing smaller experts, adding a model or a low-bit variant, moving or removing a stored item, tuning).
 public enum DashboardPage {
     /// The CSP `script-src` for the page's one inline script, by its SHA-256: a script injected into the page
@@ -189,6 +189,12 @@ public enum DashboardPage {
             <div class="actions"><button type="button" id="sm-apply" hidden disabled aria-disabled="true">Apply and reload</button><button type="button" id="sm-reset" disabled aria-disabled="true">Reset to the recommendation</button></div><p class="note" id="sm-apply-why" role="status"></p>
             <p class="note" id="sm-note" role="status"></p>
           </div></details>
+          <details class="block wrap" id="presets-block"><summary><h2>Presets</h2><span class="sum-hint" id="presets-count"></span></summary>
+            <div id="presets"></div>
+            <div class="add-row preset-new"><input type="text" id="preset-name" aria-label="Name for a new preset" placeholder="A name, such as Long chats" maxlength="64" spellcheck="false" autocomplete="off">
+              <button type="button" id="preset-save">Save as preset</button></div>
+            <p class="note" id="preset-note" role="status"></p><p class="note" id="preset-why" role="status"></p>
+          </details>
           <div class="wrap restore-row"><button type="button" id="restore" hidden>Restore last working settings</button><p class="note" id="restore-note"></p><p class="note" id="restore-why" role="status"></p></div>
         </div>
         <div id="view-library" hidden>

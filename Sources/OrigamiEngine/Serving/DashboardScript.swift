@@ -2730,6 +2730,7 @@ enum DashboardScript {
           dashboard = next; revision = next.revision; generation = next.generation;
           showWiredMemory();
           $("restore").hidden = !next.can_restore;
+          showPresets();
         }
         function syncSaved() {
           if (!dashboard || dashboard.revision !== revision || !initial || conflict || syncedRevision === revision || dirty()) return;
@@ -2841,6 +2842,11 @@ enum DashboardScript {
           $("x-acts").querySelectorAll("button").forEach(b => { if (offline || busy) hold(b, true); });
           listWhy("x-acts-why", $("x-acts").querySelectorAll("button"));
           hold($("restore"), offline || busy || edits, false, busy || offline ? "" : "Save or discard your changes first");
+          // A preset keeps, and Use replaces, the saved settings: both wait for a draft to be saved or discarded.
+          const presetWhy = busy || offline ? "" : conflict ? "Settings changed elsewhere: review them first" : edits ? "Save or discard your changes first" : "";
+          hold($("preset-save"), offline || busy || edits || conflict, doing("preset-save"), presetWhy);
+          $("presets").querySelectorAll("button[data-preset]").forEach(b => { const saves = ["use", "update"].includes(b.dataset.preset); hold(b, offline || busy || saves && (edits || conflict), false, saves ? presetWhy : ""); });
+          listWhy("preset-why", [$("preset-save"), ...$("presets").querySelectorAll("button[data-preset]")]);
           const wired = wiredMemory();
           hold($("wired-restore"), offline || busy || edits || conflict || !wired || !wired.supported || !wired.requires_raise || launched.includes("memory"), doing("wired-restore"),
             busy || offline ? "" : draftWhy || (launched.includes("memory") ? "Set by the command that started Origami" : !wired || !wired.supported ? "macOS does not report its memory ceiling here" : "macOS already allows this limit"));
@@ -2900,6 +2906,60 @@ enum DashboardScript {
             $("restore-note").textContent = "Restored · reload to use these settings"; syncedRevision = null; await refresh();
           } catch (error) { $("restore-note").textContent = error.message; }
           finally { applying = null; gate(); }
+        });
+        // Presets: the saved Setup settings under a name (`v1/presets`). Use saves a preset's values, as Restore does; the
+        // bar's Reload then runs them.
+        function presetLine(v) {
+          const effort = v.reasoning_effort || "none", memory = v.memory_limit || "auto";
+          return [v.model || "the automatic model", v.context && v.context + " context", v.quality, effort === "none" ? "no thinking" : effort + " thinking",
+            memory === "auto" ? "automatic memory" : memoryText(memory) + " memory", v.sampling === "custom" ? "custom sampling" : ""].filter(Boolean).join(" · ");
+        }
+        function showPresets() {
+          const list = (dashboard && dashboard.presets) || [], key = JSON.stringify(list);
+          if (showPresets.last === key) return;
+          showPresets.last = key;
+          $("presets-count").textContent = list.length ? fmt.format(list.length) : "";
+          $("presets").innerHTML = !list.length ? '<p class="empty">No presets yet. With the settings saved as you like them, name them below to come back to them later.</p>' :
+            list.map((p) => '<div class="mrow"><i class="mark" data-m="dim" aria-hidden="true"></i><div><strong>' + esc(p.name) + '</strong><span class="sub">' + esc(presetLine(p.values || {})) +
+              '</span></div><div class="hact">' + [["use", "Use"], ["update", "Update"], ["rename", "Rename…"], ["delete", "Delete…"]].map(([act, label]) =>
+                '<button type="button" class="small" data-preset="' + act + '" data-name="' + esc(p.name) + '" aria-label="' + esc(label.replace("…", "") + " " + p.name) + '">' + label + "</button>").join("") + "</div></div>").join("");
+          gate();
+        }
+        async function presetCall(method, name, body, by) {
+          applying = by; gate();
+          let result = null;
+          try {
+            const response = await api(name == null ? "v1/presets" : "v1/presets/" + encodeURIComponent(name), { method,
+              headers: { "Content-Type": "application/json", ...(revision ? { "If-Match": revision } : {}) }, body: JSON.stringify(body || {}) });
+            const answer = await response.json();
+            if (!response.ok) throw Error(answer.error && answer.error.message || "Not done");
+            result = answer;
+            if (dashboard && answer.presets) { dashboard.presets = answer.presets; showPresets(); }
+          } catch (error) { $("preset-note").textContent = error.message; }
+          finally { applying = null; gate(); }
+          return result;
+        }
+        $("preset-save").addEventListener("click", async () => {
+          const name = $("preset-name").value.trim();
+          if (!name) { $("preset-note").textContent = "Name the preset first."; return; }
+          if (await presetCall("POST", null, { name }, "preset-save")) { $("preset-name").value = ""; $("preset-note").textContent = "Saved " + name + "."; }
+        });
+        $("preset-name").addEventListener("keydown", (event) => { if (event.key === "Enter") $("preset-save").click(); });
+        $("presets").addEventListener("click", async (event) => {
+          const b = event.target.closest && event.target.closest("button[data-preset]");
+          if (!b || b.disabled) return;
+          const name = b.dataset.name, act = b.dataset.preset, note = $("preset-note");
+          if (act === "use") {
+            if (!(await presetCall("POST", name, null, "preset"))) return;
+            note.textContent = "Using " + name + " · " + (liveState === "stopped" ? "Start loads it" : "reload to run with it"); syncedRevision = null; await refresh();
+          } else if (act === "update") {
+            if (confirm("Replace " + name + " with the settings saved now?") && await presetCall("POST", null, { name, replace: true }, "preset")) note.textContent = name + " holds the settings saved now.";
+          } else if (act === "rename") {
+            const to = (prompt("A new name for " + name, name) || "").trim();
+            if (to && to !== name && await presetCall("PATCH", name, { name: to }, "preset")) note.textContent = "Renamed " + name + " to " + to + ".";
+          } else if (act === "delete") {
+            if (confirm("Delete the preset " + name + "? The settings stay as they are.") && await presetCall("DELETE", name, null, "preset")) note.textContent = "Deleted " + name + ".";
+          }
         });
         $("st-mode").addEventListener("change", () => {
           $("st-scope").textContent = $("st-mode").value === "tradeoffs" ? "Times each quality level. Speed only: answer quality is not scored. Nothing changes until you apply." : $("st-mode").value === "memory" ? "Reloads the model at a few memory limits (10 to 20 minutes) and suggests the highest this Mac keeps without cutting or swapping. Your setting is not changed." : "Tries timing settings against the current ones; keeps one only if it is faster with the same test replies.";

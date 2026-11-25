@@ -673,7 +673,8 @@ fi
 # doctor and status for a registered GLM GGUF that serving accepts (headers and zeros): no problem, its rows; the hot copy's
 # line once a copy is there; a part missing is a problem. Lines from a server show only when it serves the model asked about.
 if command -v python3 > /dev/null; then
-    fam_gguf() { # fam_gguf <file> [parts]: Q8_0 experts and the tensors serving checks for; with parts, the first of that many
+    fam_gguf() { # fam_gguf <file> [parts [no]]: Q8_0 experts and the tensors serving checks for; with parts, the first of that
+        # many, or with no the part of that number (from 0) with the split keys and, after the first, no tensors
         python3 - "$@" <<'PY'
 import os, struct, sys
 out = bytearray(b"GGUF"); u32 = lambda v: out.extend(struct.pack("<I", v)); u64 = lambda v: out.extend(struct.pack("<Q", v))
@@ -682,9 +683,11 @@ meta = [("general.architecture", "glm5-next"), ("glm5-next.embedding_length", 25
         ("glm5-next.expert_used_count", 1), ("glm5-next.expert_feed_forward_length", 256), ("glm5-next.leading_dense_block_count", 1),
         ("glm5-next.block_count", 3), ("glm5-next.attention.head_count_kv", [0, 64, 64]), ("glm5-next.hyper_connection.count", 4)]
 if len(sys.argv) > 2: meta.append(("split.count", int(sys.argv[2])))
+if len(sys.argv) > 3: meta += [("split.no", int(sys.argv[3])), ("split.tensors.count", 9)]
 meta = [m for m in meta if m[0] != os.environ.get("FAM_DROP")]  # a key left out: a GGUF Origami refuses
-experts = ["blk.%d.ffn_%s_exps.weight" % (l, p) for l in (1, 2) for p in ("gate", "up", "down")]
-small = ["token_embd.weight", "output.weight", "blk.0.ffn_norm.weight"]
+later = len(sys.argv) > 3 and int(sys.argv[3]) > 0
+experts = [] if later else ["blk.%d.ffn_%s_exps.weight" % (l, p) for l in (1, 2) for p in ("gate", "up", "down")]
+small = [] if later else ["token_embd.weight", "output.weight", "blk.0.ffn_norm.weight"]
 size, little = 4 * 256 * 256 // 32 * 34, 1024
 u32(3); u64(len(experts) + len(small)); u64(len(meta))
 for k, v in meta:
@@ -747,7 +750,7 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' $por
     "$bin" setup --model "$tmp/fm/glm.gguf" > /dev/null 2>&1
     check 0 "GLM-5.3-Flash (GGUF" env -u ORIGAMI_MODEL "$bin" status
     # A GGUF whose setup fails is never saved as the default: the one that worked stays.
-    FAM_DROP=glm5-next.block_count fam_gguf "$tmp/fm/nogeo.gguf"
+    (FAM_DROP=glm5-next.block_count fam_gguf "$tmp/fm/nogeo.gguf")  # a subshell: sh keeps an assignment before a function
     out=$(env -u ORIGAMI_MODEL "$bin" setup --model "$tmp/fm/nogeo.gguf" 2>&1); [ $? -eq 1 ] && case "$out" in *"No model folder"*) false ;; esac || { echo "FAIL  a GGUF without its geometry set up: $out"; failures=$((failures + 1)); }
     grep -q "nogeo" "$ORIGAMI_CONFIG" && { echo "FAIL  a failed GGUF setup was saved as the default"; failures=$((failures + 1)); }
     "$bin" config unset model > /dev/null
@@ -977,6 +980,16 @@ if command -v python3 > /dev/null; then
     [ ! -e "$tmp/data/models/dr" ] && echo "ok    Delete removes a model's folder that only held the model" \
         || { echo "FAIL  Delete left $(ls -A "$tmp/data/models/dr")"; failures=$((failures + 1)); }
     "$bin" model list | grep -q "models/d[qr]" && { echo "FAIL  a deleted model stayed registered"; failures=$((failures + 1)); }
+    # A split set's part named on its own (found by its header, as ISTA-DASLab's shared Engram file) may be another
+    # build's too: Delete keeps it.
+    mkdir -p "$tmp/data/models/ds"; fam_gguf "$tmp/data/models/ds/set-00001-of-00002.gguf" 2 0; fam_gguf "$tmp/data/models/ds/shared.gguf" 2 1
+    check 0 "Added" "$bin" model add "$tmp/data/models/ds/set-00001-of-00002.gguf" --name ds
+    check 0 '"state":"running"' job -d "{\"kind\":\"delete\",\"path\":\"$tmp/data/models/ds/set-00001-of-00002.gguf\"}"
+    check 0 '"Deleted ds' ended
+    [ -f "$tmp/data/models/ds/shared.gguf" ] && [ ! -e "$tmp/data/models/ds/set-00001-of-00002.gguf" ] \
+        && echo "ok    Delete keeps a part a set found by its header" \
+        || { echo "FAIL  Delete of a set with a shared part: $(ls -A "$tmp/data/models/ds")"; failures=$((failures + 1)); }
+    rm -rf "$tmp/data/models/ds"
     rm -rf "$tmp/data/models/dq"
     for _ in $(seq 120); do curl -s -m 30 "127.0.0.1:$port_a/v1/models/found" | grep -q '"searching":true' || break; sleep 0.5; done  # the search the delete started
 else echo "skip  Delete of a model's folder (no python3)"; fi

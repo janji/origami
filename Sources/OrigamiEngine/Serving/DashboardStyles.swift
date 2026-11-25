@@ -545,6 +545,8 @@ enum DashboardStyles {
         .savebar .note { margin: 2px 0 0; }
         #save-state { font-size: 13px; }
         .restore-row { padding-bottom: 22px; }
+        .preset-new { margin-top: 14px; max-width: 60ch; }
+        #presets .hact { flex-wrap: wrap; }
         footer .wrap { padding-top: 18px; padding-bottom: calc(36px + var(--safe-bottom)); color: var(--ink-2); font-size: 11px; letter-spacing: .06em; border-top: 1px solid var(--line); }
 
         @media (max-width: 860px) {

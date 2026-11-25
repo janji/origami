@@ -74,7 +74,8 @@ package struct GGUFSource: Sendable {
         folder = parts.folder
         files = parts.files
         for file in files { try read(file, from: try LocalBytes(folder.appendingPathComponent(file))) }
-        if !partial, let count = metadata["split.count"]?.integer, count != Int64(files.count) {
+        // llama.cpp reads a file as split only when `split.count` is above 1 (some converters write 0 in a single file).
+        if !partial, let count = metadata["split.count"]?.integer, max(count, 1) != Int64(files.count) {
             throw Self.refuse("\(Self.modelPrefix(files[0])) has \(files.count) of its \(count) parts")
         }
     }
@@ -82,20 +83,78 @@ package struct GGUFSource: Sendable {
         EngineError("Origami cannot read this GGUF: \(why)", code: "model_incompatible")
     }
 
-    /// The files `init` reads for `url`, from their names alone: the folder and the model's parts in split order.
+    /// The files `init` reads for `url`: the folder and the model's parts in split order, from their names, and a part the
+    /// names lack from the headers of the files named on their own beside it or in the folder above (`completed`).
     package static func parts(_ url: URL) throws -> (folder: URL, files: [String]) {
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) else { throw refuse("\(url.path) does not exist") }
         let folder = isFolder.boolValue ? url : url.deletingLastPathComponent()
-        let all = try FileManager.default.contentsOfDirectory(atPath: folder.path).filter {
-            $0.lowercased().hasSuffix(".gguf") && !$0.lowercased().hasPrefix("mmproj") && !$0.lowercased().hasPrefix("mtp")
+        func models(_ names: [String]) -> [String] {
+            names.filter { $0.lowercased().hasSuffix(".gguf") && !$0.lowercased().hasPrefix("mmproj") && !$0.lowercased().hasPrefix("mtp") }
         }
-        let chosen = isFolder.boolValue ? Set(all.map(modelPrefix)) : [modelPrefix(url.lastPathComponent)]
+        let all = models(try FileManager.default.contentsOfDirectory(atPath: folder.path))
+        func set(_ model: String) -> [String] {
+            let named = all.filter { modelPrefix($0) == model }.sorted()
+            guard let count = named.first.flatMap({ splitName($0)?.count }), named.count < count,
+                let parts = try? named.map({ ($0, try LocalBytes(folder.appendingPathComponent($0)) as any ByteSource) })
+            else { return named }
+            let above = models((try? FileManager.default.contentsOfDirectory(atPath: folder.deletingLastPathComponent().path)) ?? [])
+            let others = (all + above.map { "../" + $0 }).filter { splitName($0) == nil }.compactMap { name in
+                (try? LocalBytes(folder.appendingPathComponent(name))).map { (name, $0 as any ByteSource) }
+            }
+            return completed(parts, others: others).map(\.file)
+        }
+        var chosen = isFolder.boolValue ? Set(all.map(modelPrefix)) : [modelPrefix(url.lastPathComponent)]
+        // A folder holding one split set and its part named on its own holds one model.
+        let sets = Set(all.filter { splitName($0) != nil }.map(modelPrefix))
+        if chosen.count > 1, sets.count == 1, let model = sets.first, Set(set(model)) == Set(all) { chosen = [model] }
         guard chosen.count == 1, let model = chosen.first else {
             throw refuse(
                 chosen.isEmpty ? "\(folder.path) holds no model .gguf file" : "\(folder.path) holds several models; pass one .gguf file")
         }
-        return (folder, all.filter { modelPrefix($0) == model }.sorted())
+        return (folder, set(model))
+    }
+
+    /// A split part's number and the set's count, from its name (`…-00002-of-00006.gguf` → 2, 6).
+    package static func splitName(_ name: String) -> (no: Int, count: Int)? {
+        guard let range = name.range(of: "-\\d+-of-\\d+\\.gguf$", options: [.regularExpression, .caseInsensitive]) else { return nil }
+        let numbers = name[range].dropFirst().dropLast(5).components(separatedBy: "-of-").compactMap { Int($0) }
+        return numbers.count == 2 ? (numbers[0], numbers[1]) : nil
+    }
+
+    /// A split set with the parts its names lack found among `others` by header: a file whose `split.no`, `split.count`
+    /// and `split.tensors.count` (llama.cpp's split keys) make it a missing part of this set. ISTA-DASLab's DeepSeek builds
+    /// share one Engram file, named on its own, as their last part. The set in split order; as given when none is missing.
+    package static func completed(
+        _ named: [(file: String, bytes: any ByteSource)], others: [(file: String, bytes: any ByteSource)]
+    ) -> [(file: String, bytes: any ByteSource)] {
+        guard let count = named.first.flatMap({ splitName($0.file)?.count }), named.count < count, !others.isEmpty,
+            let tensors = try? splitPlace(named[named.count - 1].bytes)?.tensors
+        else { return named }
+        var byNumber = Dictionary(named.compactMap { part in splitName(part.file).map { ($0.no - 1, part) } }) { first, _ in first }
+        for other in others {
+            guard let place = try? splitPlace(other.bytes), place.count == count, place.tensors == tensors,
+                (0..<Int64(count)).contains(place.no), byNumber[Int(place.no)] == nil
+            else { continue }
+            byNumber[Int(place.no)] = other
+        }
+        return byNumber.sorted { $0.key < $1.key }.map(\.value)
+    }
+
+    /// A file's own place in its split set, from its header's metadata alone; nil when it names none.
+    static func splitPlace(_ source: any ByteSource) throws -> (no: Int64, count: Int64, tensors: Int64)? {
+        let reader = GGUFReader(source)
+        guard try reader.bytes(4) == Data("GGUF".utf8), [2, 3].contains(try reader.integer(UInt32.self)) else { return nil }
+        _ = try reader.integer(UInt64.self)
+        let keys = try reader.integer(UInt64.self)
+        guard keys <= 1 << 16 else { return nil }
+        var split: [String: Int64] = [:]
+        for _ in 0..<keys where split.count < 3 {
+            let key = try reader.string()
+            if let value = try reader.value(try reader.integer(UInt32.self))?.integer, key.hasPrefix("split.") { split[key] = value }
+        }
+        guard let no = split["split.no"], let count = split["split.count"], let tensors = split["split.tensors.count"] else { return nil }
+        return (no, count, tensors)
     }
 
     /// Header only, from wherever the parts are (a Hugging Face repo by HTTP range): metadata and tensor spans,
@@ -104,7 +163,7 @@ package struct GGUFSource: Sendable {
         self.folder = folder
         files = parts.map(\.file)
         for part in parts { try read(part.file, from: part.bytes) }
-        if let count = metadata["split.count"]?.integer, count != Int64(files.count) {
+        if let count = metadata["split.count"]?.integer, max(count, 1) != Int64(files.count) {
             throw EngineError("Origami cannot read this GGUF: it has \(files.count) of its \(count) parts", code: "model_incompatible")
         }
     }

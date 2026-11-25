@@ -360,12 +360,26 @@ public enum ModelCompatibility {
             return n.hasSuffix(".gguf") && !n.hasPrefix("mmproj") && !n.hasPrefix("mtp") && !n.contains("imatrix")
         }
         let groups = Dictionary(grouping: ggufs) { file in folder(file.path) + "/" + GGUFSource.modelPrefix(name(file.path)) }
-        for (key, parts) in groups.sorted(by: { $0.key < $1.key }) {
+        // A split set's part named on its own, beside it or in the folder above (`GGUFSource.completed`), is read with it.
+        var sets: [String: [(file: String, bytes: any ByteSource)]] = [:]
+        var taken = Set<String>()
+        for (key, parts) in groups {
+            let ordered = parts.sorted { $0.path < $1.path }
+            let base = folder(ordered[0].path)
+            var named = ordered.map { (file: name($0.path), bytes: repo.bytes($0) as any ByteSource) }
+            if let count = GGUFSource.splitName(named[0].file)?.count, named.count < count {
+                let others = ggufs.filter { GGUFSource.splitName(name($0.path)) == nil && [base, folder(base)].contains(folder($0.path)) }
+                    .map { (file: folder($0.path) == base ? name($0.path) : "../" + name($0.path), hub: $0) }
+                named = GGUFSource.completed(named, others: others.map { ($0.file, repo.bytes($0.hub) as any ByteSource) })
+                taken.formUnion(others.filter { other in named.contains { $0.file == other.file } }.map(\.hub.path))
+            }
+            sets[key] = named
+        }
+        for (key, parts) in groups.sorted(by: { $0.key < $1.key }) where !(parts.count == 1 && taken.contains(parts[0].path)) {
             let ordered = parts.sorted { $0.path < $1.path }
             let source = "\(repo.repo)/\(key.hasPrefix("/") ? String(key.dropFirst()) : key)"
             do {
-                let gguf = try GGUFSource(
-                    folder: repo.url(folder(ordered[0].path)), parts: ordered.map { (name($0.path), repo.bytes($0) as any ByteSource) })
+                let gguf = try GGUFSource(folder: repo.url(folder(ordered[0].path)), parts: sets[key] ?? [])
                 reports.append(check(gguf: gguf, source: source))
             } catch {
                 reports.append(

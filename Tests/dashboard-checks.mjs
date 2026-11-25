@@ -1325,4 +1325,22 @@ check(element("notice-title").textContent === "The model did not start", "a new 
   check(/Fast: keeps 10 GB free, .* free now · copies gave back 2\.0 GB for saves · 2 saves skipped for space/.test(kept), "the disk budget per drive where storage is shown: " + kept);
 }
 
+// Presets: a row each with its settings in words; Use posts it with the page's revision; saving one waits for a draft
+// changed elsewhere to be reviewed.
+{
+  const presets = [{ name: "Long chats", values: { model: "glm-5.3-flash", context: "128k", quality: "dynamic", reasoning_effort: "high", memory_limit: "25.500000000GB", sampling: "recommended" } }];
+  run(`dashboard = { ...dashboard, presets: ${JSON.stringify(presets)} }; revision = "r-presets"; offline = false; applying = null; reloading = false; job = null; jobPost = null; conflict = false; liveState = "ready"; showPresets()`);
+  const html = element("presets").innerHTML;
+  check(/<strong>Long chats<\/strong><span class="sub">glm-5\.3-flash · 128k context · dynamic · high thinking · 25\.5 GB memory<\/span>/.test(html)
+    && /data-preset="use" data-name="Long chats"/.test(html) && /data-preset="delete"/.test(html) && element("presets-count").textContent === "1", "a preset row names its model and settings in words: " + html);
+  sent.length = 0; routes["v1/presets/Long%20chats"] = { saved: ["context"], presets };
+  await element("presets").listeners.click({ target: { closest: () => ({ dataset: { preset: "use", name: "Long chats" }, disabled: false }) } }); await settle();
+  const use = sent.find((r) => r.path === "v1/presets/Long%20chats");
+  check(use && use.method === "POST" && use.headers["If-Match"] === "r-presets" && /^Using Long chats · reload/.test(element("preset-note").textContent),
+    "Use posts the preset with the page's revision and says Reload runs it: " + element("preset-note").textContent);
+  run("conflict = true; gate()");
+  check(element("preset-save").disabled && /Settings changed elsewhere/.test(element("preset-save").title), "saving a preset waits while settings changed elsewhere");
+  run("conflict = false; gate()");
+}
+
 process.exit(failures ? 1 : 0);

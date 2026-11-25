@@ -3821,6 +3821,7 @@ expert selection and arithmetic are unchanged in exact mode. No performance gain
   former-folders.json            folders settings named before, for the storage map and `uninstall`
   volumes.json                   each named folder's volume UUID, for `origami relink`
   memory-history.json            the governor's 10-minute fits and trims (the learned memory budget), per Mac
+  presets.json                   the dashboard's presets: each name's settings as `config set` takes them (`Presets.keys`)
   store/                         the home store
   prompt-cache/                  the prompt cache unless context_dir is set (section 9)
   models/<owner>--<name>/        downloads (+ .origami-download.json {repo, revision})

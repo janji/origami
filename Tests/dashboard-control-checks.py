@@ -56,10 +56,10 @@ with tempfile.TemporaryDirectory(prefix='origami-control-') as temporary:
     log = open(root / 'server.log', 'w+')
     process = subprocess.Popen([binary, 'serve', '--config', str(config)], env=env, stdout=log, stderr=log)
     base = f'http://127.0.0.1:{port}/'
-    def call(path, body=None, revision=None):
+    def call(path, body=None, revision=None, method=None):
         headers = {'Content-Type': 'application/json', 'Origin': base.rstrip('/')}
         if revision: headers['If-Match'] = revision
-        request = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=headers)
+        request = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=15) as response: return response.status, json.load(response)
         except urllib.error.HTTPError as error: return error.code, json.load(error)
@@ -173,6 +173,44 @@ with tempfile.TemporaryDirectory(prefix='origami-control-') as temporary:
         call('v1/config', {'model': 'second'})
         check(state()['saved_settings']['context']['value'] == '32k', 'a second model retains its own defaults')
         call('v1/config', {'model': 'first'})
+        # Presets: the Setup settings kept under a name, then used, updated, renamed and deleted.
+        presets = data / 'presets.json'
+        check(state()['presets'] == [] and call('v1/presets')[1] == {'presets': []}, 'no presets at first')
+        code, made = call('v1/presets', {'name': ' Long chats '}, state()['revision'])
+        kept = made['presets'][0]['values'] if code == 200 else {}
+        check(code == 200 and [p['name'] for p in made['presets']] == ['Long chats'] and kept['model'] == 'first' and kept['context'] == '64k'
+              and kept['quality'] == 'exact' and kept['sampling'] == 'recommended' and kept['temperature'] == '' and state()['presets'] == made['presets'],
+              'a preset keeps the saved model and Setup settings under its trimmed name')
+        code, _ = call('v1/presets', {'name': 'Long chats'}, state()['revision'])
+        check(code == 409 and len(state()['presets']) == 1, 'a second preset of the same name is refused')
+        call('v1/config', {'context': '16k', 'reasoning_effort': 'high'})
+        code, _ = call('v1/presets/Long%20chats', {}, revision)
+        check(code == 409 and state()['saved_settings']['context']['value'] == '16k', 'a use based on older settings is refused')
+        call('v1/config', {'model': 'second'})
+        code, used = call('v1/presets/Long%20chats', {}, state()['revision'])
+        saved = state()['saved_settings']
+        check(code == 200 and saved['model']['value'] == 'first' and saved['context']['value'] == '64k' and saved['reasoning_effort']['value'] == kept['reasoning_effort']
+              and state()['configured_model'] == 'first', 'using a preset saves its model and settings back')
+        call('v1/config', {'context': '16k'})
+        code, updated = call('v1/presets', {'name': 'Long chats', 'replace': True}, state()['revision'])
+        check(code == 200 and updated['presets'][0]['values']['context'] == '16k', 'updating a preset keeps the settings saved now')
+        call('v1/presets', {'name': 'Other'}, state()['revision'])
+        code, _ = call('v1/presets/Long%20chats', {'name': 'Other'}, method='PATCH')
+        code2, renamed = call('v1/presets/Long%20chats', {'name': 'Short'}, method='PATCH')
+        check(code == 409 and code2 == 200 and [p['name'] for p in renamed['presets']] == ['Other', 'Short']
+              and renamed['presets'][1]['values']['context'] == '16k', 'a rename keeps the values and refuses a name in use')
+        # A hand-edited preset never changes who reaches Origami, and one whose model was removed is refused.
+        presets.write_text(json.dumps(dict(json.loads(presets.read_text()), Open={'model': 'first', 'context': '8k', 'listen': 'lan'}, Gone={'model': 'removed'})))
+        code, _ = call('v1/presets/Open', {}, state()['revision'])
+        check(code == 200 and 'listen' not in json.loads(config.read_text()) and state()['saved_settings']['context']['value'] == '8k',
+              "using a preset writes only a preset's own keys")
+        code, refusal = call('v1/presets/Gone', {}, state()['revision'])
+        check(code == 409 and 'no longer added' in refusal['error']['message'] and state()['configured_model'] == 'first', "a preset whose model is gone is refused")
+        for name in ('Other', 'Short', 'Open', 'Gone'): code, left = call('v1/presets/' + name, method='DELETE')
+        check(code == 200 and left['presets'] == [] and json.loads(presets.read_text()) == {}, 'deleting presets removes them from presets.json')
+        code, _ = call('v1/presets/Short', method='DELETE')
+        check(code == 404, 'a preset that is gone is not found')
+        call('v1/config', {'context': '64k'})
         comma = data / 'Models, archived'; comma.mkdir()
         call('v1/config', {'models_dirs': json.dumps([str(comma)])})
         check(call('v1/fs')[1]['settings']['models_dirs'][0]['path'] == str(comma), 'folder lists support commas in paths')

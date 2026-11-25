@@ -390,6 +390,13 @@ public final class TokenizerStack: Sendable {
         }
     }
 
+    /// What a thinking level becomes in a template that refuses its name: its number in Unsloth's DeepSeek-V4.1 map, then
+    /// the nearest names.
+    static let effortSubstitutes: [String: [any Sendable]] = [
+        "low": [50, "medium", "high"], "medium": [62, "high", "low"], "high": [75, "max", "medium"],
+        "xhigh": [100, "max", "high"], "max": [100, "xhigh", "high"],
+    ]
+
     public func encodeChat(messages: [[String: TemplateValue]], tools: [[String: TemplateValue]] = [], reasoningEffort: String = "medium")
         throws -> [Int]
     {
@@ -420,7 +427,20 @@ public final class TokenizerStack: Sendable {
                 ? "xhigh" : reasoningEffort == "xhigh" && !xhigh ? "max" : reasoningEffort
         }
         let tools = tools.map { $0.mapValues(Self.typedTool) }
-        var ids = try promptEncoding.encode(normalized, tools: tools, context: context, tokenizer: tokenizer)
+        var ids: [Int]
+        do {
+            ids = try promptEncoding.encode(normalized, tools: tools, context: context, tokenizer: tokenizer)
+        } catch  where thinking {
+            // A template that refuses the level's name (ISTA-DASLab's DeepSeek one takes low, high, max or 1–100) gets the
+            // level on DeepSeek's 1–100 scale, then the nearest names; one that takes none of them keeps its own error.
+            var found: [Int]?
+            for substitute in Self.effortSubstitutes[reasoningEffort] ?? [] where found == nil {
+                context["reasoning_effort"] = substitute
+                found = try? promptEncoding.encode(normalized, tools: tools, context: context, tokenizer: tokenizer)
+            }
+            guard let found else { throw error }
+            ids = found
+        }
         // A template without a thinking switch (GLM-5.3's) always opens `<think>`: thinking off closes it at once.
         if !thinking, let thinkStart, let thinkEnd, ids.last == thinkStart { ids.append(thinkEnd) }
         return ids

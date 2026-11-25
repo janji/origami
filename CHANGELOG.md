@@ -4,6 +4,30 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.8.1 (2026-11-25)
+
+**Replies:** unchanged.
+
+- **Presets.** Setup › Presets keeps the saved settings under a name and brings them back later: the model, context,
+  quality, thinking, memory limit and sampling. **Save as preset** names the settings saved now; each preset has
+  **Use** (saves its values; Reload then runs them, as with Restore last working settings), **Update** (keeps the
+  settings saved now instead), **Rename…** and **Delete…**. Tuning results come back with a preset's model and
+  context, as they are kept per model and context. Hot copy sizes and folders are not part of a preset, so using one
+  never builds or deletes a copy. Presets live in `presets.json` in the data folder; `GET /v1/presets` lists them.
+- **Other builds of the three models load** where 3.1.8 refused them (found by checking 180 public repositories'
+  headers with `inspect --family`):
+  - A split set whose last part is a file named on its own is complete: ISTA-DASLab's GSQ-RCO DeepSeek builds share
+    one `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` as their sixth part. Origami finds it beside the parts or in the
+    folder above by the split keys in its header, with no link, and `inspect --family <owner/repo>` does the same on
+    the Hub (it said "5 of its 6 parts").
+  - A single file whose header says `split.count` 0, as some converters write, is read as one file, as llama.cpp
+    does (it said "1 of its 0 parts").
+  - A chat template that refuses a thinking level's name gets the level's number on DeepSeek's scale (low 50, medium
+    62, high 75, max 100), else the nearest name it takes. ISTA-DASLab's DeepSeek template has no `medium`, so every
+    request at the default level failed. Templates that took the name render as before.
+  - A part found by its header may be other builds' part too: deleting a model keeps it, and the dashboard does not
+    offer to move such a model (its note says why).
+
 ## 3.1.8 (2026-11-25)
 
 **Replies:** unchanged at `exact`. Some level names now run other shortcuts: `dynamic` runs as itself on Qwen and GLM

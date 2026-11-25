@@ -58,7 +58,10 @@ waits for it, and a banner says so; the same banner says when conversation saves
   - **Requests**: the last ten, each with its time bar. **Saved prompts**: open, rename, keep, edit or delete.
 - **Setup.** Context, quality (only the levels this model offers), thinking and memory limit as dials,
   with this Mac's memory answering each move; a dial set to something that changes replies turns copper.
-  **Tune for this Mac** (below), sampling, and **Restore last working settings**. The bar at the bottom appears only
+  **Tune for this Mac** (below), sampling, **Presets** and **Restore last working settings**. **Presets** keep the
+  saved model, context, quality, thinking, memory limit and sampling under a name: **Save as preset**, then on each
+  **Use** (saves its values, for the next reload), **Update** (keeps the settings saved now), **Rename…** and
+  **Delete…**. Tuning results come back with a preset's model and context; hot copy sizes stay as they are. The bar at the bottom appears only
   when there is something to save: **Save** keeps a draft (the bar then offers **Reload** alone), **Save & reload**
   loads it. Settings that cannot run on this Mac (a memory limit the context does not fit in) say why and cannot be
   saved.

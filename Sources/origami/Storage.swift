@@ -113,7 +113,18 @@ enum Storage {
                     identities[name, default: []].insert("k" + key)
                     earlierModels[FamilySupport.earlierKey(folder: parts.folder, files: parts.files)] = name
                 }
-                if !isFolder(path) { item.parts = parts.files.map { Part(from: parts.folder.appendingPathComponent($0).path, to: $0) } }
+                if !isFolder(path) {
+                    let own = ownParts(parts.files)
+                    item.parts = own.map { Part(from: parts.folder.appendingPathComponent($0).path, to: $0) }
+                    let shared = parts.files.filter { !own.contains($0) }
+                    if !shared.isEmpty {
+                        needed += shared.map { resolved(parts.folder.appendingPathComponent($0).path) }
+                        item.move = nil
+                        item.note =
+                            "Shares \(shared.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")) with other builds; "
+                            + "move its files by hand"
+                    }
+                }
             } else if family {
                 keysKnown = false
             } else if let fingerprint = ModelSource.earlierFingerprint(directory: URL(fileURLWithPath: path)) {
@@ -1040,6 +1051,10 @@ enum Storage {
         return "Removed \(item.name) (\(OrigamiPlan.gigabytes(item.bytes)))."
     }
 
+    /// A GGUF model's own parts. A part named on its own (found by its header, such as ISTA-DASLab's Engram file) may be
+    /// other builds' part too, so Origami never moves or deletes it.
+    static func ownParts(_ files: [String]) -> [String] { files.count == 1 ? files : files.filter { GGUFSource.splitName($0) != nil } }
+
     /// Explicit deletion is separate from cache disable and library removal.
     static func delete(_ item: Item, settings: Settings) throws -> String {
         guard item.readable, item.deleteBlocked == nil, ["model", "pack", "hot copy", "prompts"].contains(item.role) else {
@@ -1084,7 +1099,7 @@ enum Storage {
     static func modelFiles(_ folder: String) -> [String] {
         let url = URL(fileURLWithPath: folder, isDirectory: true)
         if Models.isGGUF(folder), let parts = try? GGUFSource.parts(url) {
-            return parts.files + ["origami-model.json", ".origami-download.json"]
+            return ownParts(parts.files) + ["origami-model.json", ".origami-download.json"]
         }
         var names = [
             "config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",

@@ -17,7 +17,7 @@ It is one native binary (Swift and Metal, no Python, no MLX) with a local server
 and Ollama APIs, and a dashboard in the browser.
 
 **New here?** Start with [the guide](docs/guide.md): install, first run, every feature in short, and what is planned.
-The current release is 3.1.8 ([what changed](CHANGELOG.md)).
+The current release is 3.1.8.1 ([what changed](CHANGELOG.md)).
 
 ![The dashboard's Now tab: the model, its speed, where the last request's time went, where experts were read from, memory and health](docs/images/dashboard-now.png)
 

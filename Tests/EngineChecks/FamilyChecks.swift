@@ -251,6 +251,32 @@ func modelFamilyGeometry() throws {
     try require(
         report.family == .glm && report.architecture == "glm5-next" && report.geometry?.layers == 2 && report.verdict == .runs,
         "split set with an edited second part: \(report.verdict) \(report.reason)")
+    // A set whose last part is named on its own in the folder above (ISTA-DASLab's shared DeepSeek Engram file) is found
+    // by its split keys, and a file there whose keys name another set is not; `split.count` 0 is a single file.
+    let build = split.appendingPathComponent("build", isDirectory: true)
+    try FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
+    let parts = glmTensors(expertType: 12)
+    let keys: [(String, Any)] = [("general.architecture", "glm5next"), ("split.count", 3), ("split.tensors.count", parts.count)]
+    try familyGGUF(
+        common + [("glm5-next.block_count", 3), ("glm5-next.attention.head_count_kv", [0, 64, 64])] + keys.dropFirst(), tensors: [],
+        to: build.appendingPathComponent("glm-00001-of-00003.gguf"))
+    try familyGGUF(keys + [("split.no", 1)], tensors: Array(parts.dropLast()), to: build.appendingPathComponent("glm-00002-of-00003.gguf"))
+    try familyGGUF(
+        [("general.architecture", "glm5next"), ("split.count", 3), ("split.tensors.count", parts.count + 1), ("split.no", 2)],
+        tensors: [parts[parts.count - 1]], to: split.appendingPathComponent("another.gguf"))
+    try familyGGUF(keys + [("split.no", 2)], tensors: [parts[parts.count - 1]], to: split.appendingPathComponent("shared.gguf"))
+    let first = build.appendingPathComponent("glm-00001-of-00003.gguf")
+    try require(
+        try GGUFSource.parts(first).files == ["glm-00001-of-00003.gguf", "glm-00002-of-00003.gguf", "../shared.gguf"],
+        "the last part named on its own: \(try GGUFSource.parts(first).files)")
+    report = try ModelCompatibility.check(local: first)
+    try require(report.verdict == .runs, "a set completed from the folder above: \(report.verdict) \(report.reason)")
+    let single = root.appendingPathComponent("single.gguf")
+    try familyGGUF(
+        common + [("glm5-next.block_count", 3), ("glm5-next.attention.head_count_kv", [0, 64, 64]), ("split.count", 0)],
+        tensors: parts, to: single)
+    report = try ModelCompatibility.check(local: single)
+    try require(report.verdict == .runs, "split.count 0 in a single file: \(report.verdict) \(report.reason)")
     let dsTensors: [(String, [Int], Int)] = [
         ("token_embd.weight", [512, 256], 1), ("output.weight", [512, 256], 8),
         ("blk.0.ffn_gate_exps.weight", [4, 256, 256], 16), ("blk.0.ffn_up_exps.weight", [4, 256, 256], 16),
@@ -477,6 +503,18 @@ func familyTemplateThinking() throws {
         let effort = try tinyFamilyTokenizer(template)
         try require(try effort.encodeNormalized(user, reasoningEffort: "high") == effort.encode(expected), "effort high in \(template)")
     }
+    // A template that refuses a level's name gets its number (ISTA-DASLab's DeepSeek map has no "medium"), or else the
+    // nearest name it takes; a template that refuses every level keeps its error, and one that takes the name gets it.
+    let refusing = "{% else %}{{ raise_exception('bad effort') }}{% endif %}"
+    let numeric = try tinyFamilyTokenizer(
+        "{% set m = {'low': 50, 'high': 75} %}{% if reasoning_effort is string and reasoning_effort in m %}{{ m[reasoning_effort] }}"
+            + "{% elif reasoning_effort is integer %}{{ reasoning_effort }}" + refusing)
+    try require(try numeric.encodeNormalized(user, reasoningEffort: "medium") == numeric.encode("62"), "medium as a number")
+    try require(try numeric.encodeNormalized(user, reasoningEffort: "low") == numeric.encode("50"), "low by its name")
+    let named = try tinyFamilyTokenizer("{% if reasoning_effort in ['low', 'high'] %}{{ reasoning_effort }}" + refusing)
+    try require(try named.encodeNormalized(user, reasoningEffort: "medium") == named.encode("high"), "medium as the nearest name")
+    let none = try tinyFamilyTokenizer("{% if false %}" + refusing)
+    try require((try? none.encodeNormalized(user, reasoningEffort: "medium")) == nil, "a template refusing every level fails")
 }
 
 /// A TokenizerStack from a tiny GGUF through FamilySupport: the byte-level alphabet (GPT-2's bytes_to_unicode, ids

@@ -175,6 +175,17 @@ origami model add /path/to/model.gguf         # or keep it under a name (see bel
 Origami recognises the model from the file's own metadata and uses every tensor in the type the file stores (the
 GGUF types listed above), with the file's own tokenizer and chat template.
 
+Other builds than unsloth's load the same way, including these layouts:
+
+- **A last part named on its own.** ISTA-DASLab's GSQ-RCO DeepSeek builds share one
+  `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` as the sixth part of every build. Keep it beside the parts or in the
+  folder above them: Origami finds it by the split keys in its header (no link needed). `origami inspect --family
+  <owner/repo>` does the same on the Hub.
+- **`split.count` 0 in a single file**, as some converters write: read as one file, as llama.cpp does.
+- **A chat template that refuses a thinking level's name.** ISTA-DASLab's DeepSeek template takes `low`, `high`, `max`
+  or a number from 1 to 100, and no `medium`. Such a template gets the level's number on DeepSeek's scale (low 50,
+  medium 62, high 75, max 100), else the nearest name it takes, instead of failing the request.
+
 - **Text only.** A request with images is refused.
 - **GLM-5.3 safetensors** (FP8 or BF16) convert once into a GGUF with 2-bit experts:
   `origami model add <folder>`; add `--expert-bits 4` or `8` for Q4_K or Q8_0 experts.

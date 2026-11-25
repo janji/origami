@@ -836,6 +836,27 @@ final class ModelFront: @unchecked Sendable {
                 // One saved before `expert_bits` was retired restores without it.
                 answer(try Commands.configWriter(fresh)(values.filter { $0.key != "expert_bits" }))
             } catch { reject(ServingFailure.from(error)) }
+        // Presets: named copies of the Setup settings (`Presets`); a use saves its values, as a restore does.
+        case _ where path == "/v1/presets" || path.hasPrefix("/v1/presets/"):
+            let name = path == "/v1/presets" ? nil : String(path.dropFirst("/v1/presets/".count)).removingPercentEncoding ?? ""
+            if request.method == "GET", name == nil {
+                return answer(["presets": Presets.list((try? Settings.load(flags: flags)) ?? settings)])
+            }
+            guard fromOwnPage() else {
+                return reject(ServingFailure("Presets are changed only from this server's own dashboard", status: 403))
+            }
+            do {
+                DashboardState.mutationLock.lock()
+                defer { DashboardState.mutationLock.unlock() }
+                let fresh = try Settings.load(flags: flags)
+                // A new preset keeps, and a use replaces, the settings the page showed.
+                if request.method == "POST" { try DashboardState.check(request.headers["if-match"], settings: fresh) }
+                if request.method == "POST", name != nil, jobs.report?["state"] as? String == "running" {
+                    throw ServingFailure("Wait for the current operation before using a preset", status: 409)
+                }
+                let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] ?? [:]
+                answer(try Presets.change(request.method, name, body, settings: fresh))
+            } catch { reject(ServingFailure.from(error)) }
         // Access: who reaches this server, the addresses other devices open, and (to this Mac only) their key and its QR code.
         case "/v1/lan":
             guard request.method == "GET" else { return reject(ServingFailure("Use GET for access", status: 405)) }
@@ -1164,7 +1185,7 @@ final class ModelFront: @unchecked Sendable {
             "reload_required": reloadRequired, "pending_changes": pending.0, "pending_revert": pending.1,
             "can_restore":
                 ((try? Settings.readConfig(fresh.dataDir.appendingPathComponent("last-working.json")))?[fresh.model ?? ""] != nil),
-            "last_tuning": DashboardState.lastRun(fresh),
+            "presets": Presets.list(fresh), "last_tuning": DashboardState.lastRun(fresh),
             "tuning_proposal": (try? Settings.readConfig(Tuning.proposalFile(fresh))) ?? [:],
         ]
         if scheduler.current?.id == Self.servedID(fresh), scheduler.current?.child.configuration == DashboardState.configuration(fresh) {

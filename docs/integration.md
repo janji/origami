@@ -23,7 +23,7 @@ One request runs at a time; the others wait in a queue.
 | `POST /v1/config` | saves settings for the next start (used by the dashboard) |
 | `POST /v1/stop`, `POST /v1/start` | the same as `origami stop` and `origami start` |
 | `POST /v1/jobs`, `GET` (progress, or the last job's outcome), `DELETE` (cancel or dismiss) | dashboard jobs: add a model from a folder, file or Hugging Face repo |
-| `/v1/hot-copy`, `/v1/prompts`, `/v1/memory/learned`, `/v1/memory/wired`, `/v1/storage`, `/v1/fs`, `/v1/reload`, `/v1/restart`, `/v1/lan`, `/v1/tuning/apply`, `/v1/config/restore` | the dashboard's own controls (hot copy, saved prompts, memory, files, reload, access, tuning); not a stable API |
+| `/v1/hot-copy`, `/v1/prompts`, `/v1/memory/learned`, `/v1/memory/wired`, `/v1/storage`, `/v1/fs`, `/v1/reload`, `/v1/restart`, `/v1/lan`, `/v1/tuning/apply`, `/v1/config/restore`, `/v1/presets` | the dashboard's own controls (hot copy, saved prompts, memory, files, reload, access, tuning, presets); not a stable API |
 | `GET /v1/models/found`, `GET /v1/models/check?source=` | models found on this Mac, and whether a source would run |
 | `GET /dashboard` (and `GET /` from a browser) | the dashboard (see [dashboard.md](dashboard.md)) |
 
