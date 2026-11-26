@@ -126,9 +126,11 @@ public final class PackStore: @unchecked Sendable {
     /// The record from a hot copy holding it, the one expected to finish first (`HotCopySet`; checked on its first
     /// read), else from the model's spans: the same bytes either way. A copy whose drive is gone gives way to another
     /// copy, then to the spans. A copy holds a GGUF record without the slot's padding (`ModelSource.hotCopyRecordBytes`),
-    /// which is zero as `GGUFExperts.prepare` leaves it.
+    /// which is zero as `GGUFExperts.prepare` leaves it. A GGUF record's buffer may be a smaller size class's slot.
     package func readInternalExpert(_ key: ExpertKey, into buffer: UnsafeMutableRawBufferPointer) throws {
-        guard buffer.count == Self.expertBytes else { throw EngineError("Hot copy record buffer differs") }
+        guard buffer.count == Self.expertBytes || model.ggufExperts != nil && buffer.count < Self.expertBytes else {
+            throw EngineError("Hot copy record buffer differs")
+        }
         let index = key.layer * ModelContract.experts + key.expert
         let held = model.ggufExperts == nil ? buffer.count : model.hotCopyRecordBytes(index) ?? 0
         if (1...buffer.count).contains(held), let copies = hotLock.withLock({ hotCopies }), copies.holds(index),
@@ -370,7 +372,9 @@ public final class PackStore: @unchecked Sendable {
         layer: Int, expert: Int, into buffer: UnsafeMutableRawBufferPointer,
         source readSource: ExpertReadSource = .automatic
     ) throws {
-        guard (0..<ModelContract.layers).contains(layer), (0..<ModelContract.experts).contains(expert), buffer.count == Self.expertBytes
+        // A GGUF record may be read into a smaller size class's slot (`readGGUFExpert` checks it holds the layer's record).
+        guard (0..<ModelContract.layers).contains(layer), (0..<ModelContract.experts).contains(expert),
+            buffer.count == Self.expertBytes || model.ggufExperts != nil && buffer.count < Self.expertBytes
         else {
             throw EngineError("Invalid expert or record buffer")
         }

@@ -4,6 +4,18 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.8.2 (2026-11-26)
+
+**Replies:** unchanged.
+
+- **Low-bit Qwen builds hold about a quarter more experts in the same memory.** A GGUF whose layers' experts differ in
+  size (GSQ-RCO IQ3_XXS: 1.36 to 2.33 MB by layer) kept every expert in a slot of the largest size, so 24% of the
+  expert cache was padding. The cache now keeps up to three slot sizes, chosen from the file's own layer sizes (for
+  IQ3_XXS: 1.56, 1.97 and 2.33 MB, 4.8% padding), and splits its memory between them by their layers' bytes, so every
+  layer keeps the share of records it had. A prompt read holds its read-ahead per slot size. Models whose experts are
+  all one size, the 4-bit MLX model included, are unchanged. When the memory is too small for each size to hold one
+  layer's prompt read, the cache keeps one slot size as before (ROADMAP C5).
+
 ## 3.1.8.1 (2026-11-25)
 
 **Replies:** unchanged.

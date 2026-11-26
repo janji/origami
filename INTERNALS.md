@@ -396,13 +396,22 @@ it again.
 
 A record is a 16-byte header (magic `OGGX`, layer, expert, 0), then gate, up and down in their GGUF bytes, each from a
 16-byte boundary (ggml's kernels take 16-byte aligned weights), padding zeroed. Each layer has its own part offsets;
-every cache slot is the largest layer's record (`GGUFExperts.recordBytes`), so a smaller layer leaves the rest of its
-slot unused. The header lets each kernel that is handed only a record's buffer and offset (decode groups, prefill jobs,
-the layer command) find its layer's types. `PackStore.readOriginalExpert` writes the header and reads the three spans
+the largest layer's record is `GGUFExperts.recordBytes`. The cache keeps up to three slot sizes
+(`ExpertCache.SizeClasses.grouping`: of the sorted distinct layer sizes, the grouping into at most three classes, each
+its largest member's size, with the least padding); each layer's records go in the smallest class that holds them, so
+a smaller layer leaves at most the rest of its class's slot unused. The cache's byte limit is split between the
+classes by their layers' bytes (each layer keeps the share of records one class gave it), in whole slabs of each; each
+class has its own transient slots, CLOCK hand and reuse victims, a key's victim is always of its class, and the GPU
+table gives each class its own range of slot entries. The prompt read-ahead counts its held records per class. Classes
+are used only when each class's share holds one layer, the demand window and the transient slots; otherwise one size.
+The header lets each kernel that is handed only a record's buffer and offset (decode groups, prefill jobs, the layer
+command) find its layer's types; the kernels' bounds checks take the smallest layer's record
+(`ModelLayout.smallestExpertRecordBytes`). `PackStore.readOriginalExpert` writes the header and reads the three spans
 from the GGUF (through `SpanReadPool` when enabled), with the same identity checks as shard reads. On the GSQ-RCO
-IQ3_XXS release the records run from 1,305,616 to 2,329,616 bytes by layer (the experts average 2.84 bits per weight):
-slots of 2,329,616 bytes, 16% under the 4-bit 2,764,800, where records of their own sizes would average 37% under. The
-pruned Coder (3.33 bits per weight, 256 experts): 1,510,416 to 2,662,416 bytes, slots 4% under 4-bit.
+IQ3_XXS release (as of 2026-11-26) the records run from 1,356,816 to 2,329,616 bytes by layer in nine sizes (the experts
+average 2.84 bits per weight): one slot size of 2,329,616 bytes leaves 23.7% of the slot memory as padding, the three
+classes 1,561,616 / 1,971,216 / 2,329,616 bytes leave 4.8%. The pruned Coder (3.33 bits per weight, 256 experts):
+1,510,416 to 2,662,416 bytes.
 
 `GGUFExpertKernels` computes them on ggml's matrix kernels, as llama.cpp does: the bf16 activations widened to f32,
 gate and up (one mul_mv batch dispatch per run of consecutive ranks in decode; mul_mv up to 8 rows and mul_mm above in

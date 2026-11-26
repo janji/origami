@@ -11,6 +11,9 @@ public enum ModelLayout {
     nonisolated(unsafe) public private(set) static var group = 64
     nonisolated(unsafe) public private(set) static var experts = AffineFormat(bits: 4, group: 64)
     nonisolated(unsafe) public private(set) static var expertRecordBytes = AffineFormat(bits: 4, group: 64).expertRecordBytes
+    /// The smallest record a cache slot holds: a GGUF's smallest layer's (a smaller size class's slot can end there at a
+    /// slab's end), else `expertRecordBytes`.
+    nonisolated(unsafe) public private(set) static var smallestExpertRecordBytes = AffineFormat(bits: 4, group: 64).expertRecordBytes
     /// The GGUF expert layout (`gguf-experts`), or nil: its records are what the cache holds, and the expert paths compute
     /// them with ggml's kernels (`GGUFExpertKernels`).
     nonisolated(unsafe) public private(set) static var ggufExperts: GGUFExperts?
@@ -31,6 +34,7 @@ public enum ModelLayout {
         experts = format
         ggufExperts = gguf
         expertRecordBytes = gguf?.recordBytes ?? format.expertRecordBytes
+        smallestExpertRecordBytes = gguf?.layers.map(\.bytes).min() ?? expertRecordBytes
     }
     /// The layout of `model` (its GGUF experts included).
     public static func use(_ model: ModelSource, serving fix: Bool = false) {

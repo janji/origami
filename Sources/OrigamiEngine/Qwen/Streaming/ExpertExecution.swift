@@ -361,10 +361,14 @@ public final class ExpertExecution {
                 + configuration.readAheadOwnerBytes + configuration.decodeSlabOwnerBytes)
         self.metadata = metadata
         do {
+            // A GGUF whose layers' records differ in size keeps them in up to three slot sizes (ROADMAP C5), each class
+            // able to hold one layer's prompt read beside the demand window.
             cache = try ExpertCache(
                 device: device, ledger: ledger,
                 byteLimit: configuration.prefillCacheBytes, slotsPerSlab: configuration.slotsPerSlab,
-                maximumByteLimit: configuration.cacheBytes, reuseAdmission: configuration.reuseAdmission)
+                maximumByteLimit: configuration.cacheBytes, reuseAdmission: configuration.reuseAdmission,
+                sizes: ModelLayout.ggufExperts.map { .grouping($0.layers.map(\.bytes)) } ?? .one,
+                minimumClassRecords: 512 + configuration.demandWindow + ExpertReusePolicy.transientSlots)
             let demandOutstanding = max(configuration.demandWindow, earlyDemand ? 20 : 0) + fastSkipReserve
             let outstanding = demandOutstanding + (prerouting ? DecodePrerouting.outstandingRecords : 0)
             let lanes = configuration.readConcurrency + (prerouting ? DecodePrerouting.readLanes : 0)
@@ -621,7 +625,8 @@ public final class ExpertExecution {
         }
         readAhead = try PrefillExpertReadAhead(
             loader: loader, generation: generation,
-            configuration: configuration, layers: layers, cacheSlots: { [cache] in cache.slotLimit })
+            configuration: configuration, layers: layers, cacheSlots: { [cache] in cache.slotLimit(sizeClass: $0) },
+            layerClasses: cache.sizes.layerClasses)
     }
     package func finishPrefillReadAheadLayer(_ layer: Int) throws {
         if let readAhead, layer < readAhead.layers { try readAhead.finishLayer(layer) }

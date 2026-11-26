@@ -4,7 +4,7 @@
 Reads page-aligned record-sized ranges at random offsets of two existing files (read-only, uncached: F_NOCACHE), one
 per drive, interleaving per round: (a) whole from drive A, (b) whole from drive B, (c) split A|B sized by the drives'
 live speeds over the previous rounds, both parts in parallel, (d) split 50/50. With --concurrent N: N reads at once,
-each (b) whole from B, (c) split, or (e) spread (half whole from A, half whole from B). Prints JSON: median, p90, p99
+each (a) whole from A, (b) whole from B, (c) split, or (e) spread (half whole from A, half whole from B). Prints JSON: median, p90, p99
 milliseconds per variant, the live speeds and the bytes read from B. Stops early once B's bytes reach --max-b-gb.
 
   split_reads.py A_FILE B_FILE --record 2764800 --rounds 300 [--concurrent 4] [--max-b-gb 14]
@@ -59,7 +59,7 @@ def main():
         parts = [pool.submit(read, 0, view, first), pool.submit(read, 1, view[first:], record - first)]
         return pool.submit(lambda: [f.result() for f in parts])
 
-    variants = ("a", "b", "c", "d") if n == 1 else ("b", "c", "e")
+    variants = ("a", "b", "c", "d") if n == 1 else ("a", "b", "c", "e")
     wall = {v: [] for v in variants}
     rounds = 0
     for _ in range(args.rounds):

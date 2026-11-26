@@ -223,6 +223,132 @@ package enum ExpertReuseSelfChecks {
 
     /// 20,000 random cache states (phases, pins, bypass, held layers, protected rows, tied scores, empty and resized
     /// caches, rows between events): the free counters and per-layer victim minima give what today's full scans give.
+    /// ROADMAP C5: a mixed-size GGUF's records in up to three slot sizes. The grouping of the GSQ-RCO IQ3_XXS layers;
+    /// each record read into its class's own slot (its length, no slot overlapping another); the limit split by layers'
+    /// bytes; a full class evicts only its own records; the GPU table points each key at its own slot's address; reuse
+    /// decode and speculative admission stay in a key's class (`victimIndexMismatch` agrees); a cache too small for its
+    /// classes keeps one slot size; every charge retired.
+    package static func sizeClasses() throws {
+        // The IQ3_XXS release's records by layer (INTERNALS.md): nine sizes, 23.7% padding in one class, 4.8% in three.
+        let iq3xxs = [1_356_816, 1_459_216, 1_561_616, 1_766_416, 1_868_816, 1_920_016, 1_971_216, 2_176_016, 2_329_616]
+        let counts = [8, 6, 6, 4, 4, 7, 4, 3, 6]
+        let layerBytes = zip(iq3xxs, counts).flatMap { Array(repeating: $0, count: $1) }.shuffled()
+        let grouped = ExpertCache.SizeClasses.grouping(layerBytes)
+        try require(grouped.recordBytes == [1_561_616, 1_971_216, 2_329_616], "IQ3_XXS grouping \(grouped.recordBytes)")
+        try require(
+            zip(layerBytes, grouped.layerClasses).allSatisfy { size, c in
+                size <= grouped.recordBytes[c] && (c == 0 || size > grouped.recordBytes[c - 1])
+            }, "A layer is not in the smallest class holding it")
+        try require(ExpertCache.SizeClasses.grouping(Array(repeating: 2_329_616, count: 48)) == .one, "One size made classes")
+        try require(
+            ExpertCache.SizeClasses.grouping([1_000_000, 2_000_000] + Array(repeating: 2_000_000, count: 46)).recordBytes
+                == [1_000_000, 2_000_000], "Two sizes")
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw EngineError("Metal unavailable") }
+        let record = PackStore.expertBytes
+        let sizes = ExpertCache.SizeClasses(
+            recordBytes: [record / 2 / 16 * 16, record * 3 / 4 / 16 * 16, record],
+            layerClasses: (0..<48).map { $0 % 3 == 0 ? 0 : $0 % 3 == 1 ? 1 : 2 })
+        let ledger = try MemoryLedger(ceiling: UInt64(400 * record), transientMargin: 1_000_000)
+        try autoreleasepool {
+            // 240 full-size slots' bytes: each class gets about a third by bytes, more records in the smaller ones.
+            let limit = UInt64(240 * record)
+            let cache = try ExpertCache(
+                device: device, ledger: ledger, byteLimit: limit, maximumByteLimit: UInt64(320 * record), reuseAdmission: true,
+                sizes: sizes, minimumClassRecords: 40)
+            try require(cache.sizes == sizes, "The classes were not used")
+            let split = cache.snapshot().sizeClasses ?? []
+            try require(
+                split.count == 3 && split.map(\.byteLimit).reduce(0, +) <= limit
+                    && zip(split, sizes.recordBytes).allSatisfy { $0.recordBytes == $1 && $0.byteLimit % UInt64(8 * $1) == 0 },
+                "Limits were not split in whole slabs: \(split)")
+            try require(
+                split.map { Int($0.byteLimit) / $0.recordBytes } == (0..<3).map { cache.slotLimit(sizeClass: $0) }
+                    && cache.slotLimit == split.map({ Int($0.byteLimit) / $0.recordBytes }).min(),
+                "Slot limits differ")
+            // Fill every class to its limit, then one more record per class.
+            var spans: [(buffer: ObjectIdentifier, range: Range<Int>)] = []
+            var loaded: [Int: [ExpertKey]] = [:]
+            for c in 0..<3 {
+                let layers = (0..<48).filter { sizes.layerClasses[$0] == c }
+                for i in 0..<(cache.slotLimit(sizeClass: c) + 1) {
+                    let key = try ExpertKey(layer: layers[i % layers.count], expert: i / layers.count)
+                    let a = try cache.acquire(key)
+                    try require(a.newlyReserved, "A new key was resident")
+                    let buffer = try cache.beginRead(a.ticket)
+                    try require(buffer.length == sizes.recordBytes[c] && cache.recordBytes(key) == buffer.length, "Wrong slot length")
+                    buffer.bytes.initializeMemory(as: UInt8.self, repeating: UInt8(truncatingIfNeeded: c * 64 + i))
+                    try require(cache.completeRead(a.ticket, verified: true), "Read did not complete")
+                    spans.append((ObjectIdentifier(buffer.buffer), buffer.offset..<(buffer.offset + buffer.length)))
+                    loaded[c, default: []].append(key)
+                }
+            }
+            let snapshot = cache.snapshot()
+            try require(snapshot.evictions == 3, "Each full class should have evicted one record: \(snapshot.evictions)")
+            try require(snapshot.allocatedBytes <= limit, "Allocated past the limit")
+            // The newest record of each class is resident; its bytes are its own (no other slot overlapped it).
+            for c in 0..<3 {
+                let key = loaded[c]!.last!
+                let a = try cache.acquire(key)
+                try require(!a.newlyReserved, "Class \(c)'s last record was evicted")
+                let buffer = try cache.pin(a.ticket)
+                let marker = UInt8(truncatingIfNeeded: c * 64 + loaded[c]!.count - 1)
+                try require(buffer.bytes.allSatisfy { $0 == marker }, "Class \(c)'s record was overwritten")
+                try cache.unpinAfterGPUCompletion(a.ticket)
+            }
+            // The GPU table: each resident key at its own slot's address.
+            let table = try cache.gpuTable()
+            var addresses: Set<UInt64> = []
+            for c in 0..<3 {
+                for key in loaded[c]!.suffix(20) {
+                    let entry = table.keys.contents().load(fromByteOffset: (key.layer * 512 + key.expert) * 8, as: UInt64.self)
+                    guard entry & 0xFFFF_FFFF != 0 else { continue }  // transient bypass slots are not published
+                    let a = try cache.acquire(key)
+                    let buffer = try cache.pin(a.ticket)
+                    let address = table.slots.contents().load(fromByteOffset: Int((entry & 0xFFFF_FFFF) - 1) * 8, as: UInt64.self)
+                    try require(address == buffer.buffer.gpuAddress + UInt64(buffer.offset), "GPU table address differs")
+                    try require(addresses.insert(address).inserted, "Two keys share a GPU slot")
+                    try cache.unpinAfterGPUCompletion(a.ticket)
+                }
+            }
+            try require(addresses.count > 30, "Too few published records: \(addresses.count)")
+            // Reuse decode and speculation stay in a key's class; the indexed victims match full scans.
+            try cache.setReuseDecode(true)
+            var random = SystemRandomNumberGenerator()
+            for step in 0..<3_000 {
+                let layer = step % 48
+                _ = try cache.beginDecodeRow(layer: layer, experts: Array(Array(0..<40).shuffled(using: &random).prefix(10)))
+                let key = try ExpertKey(layer: layer, expert: Int.random(in: 0..<40, using: &random))
+                if let mismatch = cache.victimIndexMismatch(key) { throw EngineError("Class victim index: \(mismatch)") }
+                if Bool.random(using: &random) {
+                    let a = try cache.acquire(key)
+                    if a.newlyReserved {
+                        let buffer = try cache.beginRead(a.ticket)
+                        try require(buffer.length == sizes.recordBytes[sizes.layerClasses[layer]], "Reuse slot of another class")
+                        _ = cache.completeRead(a.ticket, verified: true)
+                    }
+                } else if case .admitted(let a) = try cache.acquireSpeculative(key) {
+                    let buffer = try cache.beginRead(a.ticket)
+                    try require(buffer.length == sizes.recordBytes[sizes.layerClasses[layer]], "Speculative slot of another class")
+                    _ = cache.completeRead(a.ticket, verified: true)
+                }
+            }
+            try cache.setReuseDecode(false)
+            // A smaller limit retires slabs of every class, each within its new share.
+            _ = try cache.resizeQuiescent(to: UInt64(120 * record))
+            let after = cache.snapshot()
+            try require(
+                after.allocatedBytes <= UInt64(120 * record)
+                    && zip(after.sizeClasses ?? [], split).allSatisfy { $0.byteLimit < $1.byteLimit },
+                "Resize did not shrink every class: \(after.sizeClasses ?? [])")
+            // Too small for three classes of 40 records: one slot size.
+            let small = try ExpertCache(
+                device: device, ledger: ledger, byteLimit: UInt64(64 * record), sizes: sizes, minimumClassRecords: 40)
+            try require(small.sizes == .one && small.snapshot().sizeClasses == nil, "A small cache kept classes")
+        }
+        try require(ledger.reservedBytes == 0, "Size-class cache charges were not retired: \(ledger.reservedBytes)")
+    }
+
     package static func victimIndex() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw EngineError("Metal unavailable") }
         let ledger = try MemoryLedger(ceiling: UInt64(128 * PackStore.expertBytes), transientMargin: 1_000_000)

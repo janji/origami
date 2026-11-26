@@ -1,7 +1,7 @@
 import Foundation
 import OrigamiEngine
 
-let version = "3.1.8.1"
+let version = "3.1.8.2"
 
 /// Options that set a setting; every command that reads settings accepts them. Help lists them in this order: the
 /// ones people change most first, the quality knobs last.

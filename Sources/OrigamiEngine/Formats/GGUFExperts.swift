@@ -9,7 +9,8 @@ import Metal
 /// `PackStore` reads a record's three spans straight from the GGUF.
 ///
 /// A record is a 16-byte header (magic, layer, expert, 0), then gate, up and down in their GGUF bytes, each from a 16-byte
-/// boundary (ggml's kernels take 16-byte aligned weights). Every cache slot holds the largest layer's record. The header
+/// boundary (ggml's kernels take 16-byte aligned weights). A cache slot holds the largest layer's record, or a size class's
+/// largest when the cache keeps several (`ExpertCache.SizeClasses`). The header
 /// lets every kernel that gets only a record's buffer and offset (decode groups, prefill jobs, the layer command) find its
 /// layer's types without the layer being passed through each of them.
 public struct GGUFExperts: Sendable, Equatable {
@@ -38,7 +39,7 @@ public struct GGUFExperts: Sendable, Equatable {
     public let experts: Int
     public let layers: [Layer]
     public let files: [File]
-    /// One cache slot: the largest layer's record.
+    /// The largest layer's record: the largest cache slot.
     public let recordBytes: Int
 
     /// The architecture's shape of each projection: (outputs, inputs).
@@ -176,7 +177,7 @@ public struct GGUFExperts: Sendable, Equatable {
 
     /// The layer of the record at `offset` in `buffer` (shared storage), from its header.
     func layer(of buffer: MTLBuffer, offset: Int) throws -> Layer {
-        guard offset >= 0, offset % 16 == 0, offset <= buffer.length - recordBytes else {
+        guard offset >= 0, offset % 16 == 0, offset <= buffer.length - Self.headerBytes else {
             throw EngineError("A GGUF expert record is outside its buffer")
         }
         let header = buffer.contents().advanced(by: offset)
@@ -185,6 +186,8 @@ public struct GGUFExperts: Sendable, Equatable {
         guard magic == Self.magic, (0..<layers.count).contains(layer) else {
             throw EngineError("A cache slot does not hold a GGUF expert record")
         }
+        // A smaller size class's slot holds the layer's record, not the largest one.
+        guard layers[layer].bytes <= buffer.length - offset else { throw EngineError("A GGUF expert record is outside its buffer") }
         return layers[layer]
     }
 

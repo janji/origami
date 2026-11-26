@@ -23,7 +23,8 @@ private enum GatheredExpertAssociation { nonisolated(unsafe) static var key: UIn
 /// GGUF experts (`ModelLayout.ggufExperts`) take the same entry points on ggml's kernels (`GGUFExpertKernels`): the same
 /// rank spans and reduction, f32 products; the queued (pre-encoded) group runs ggml's kernels on GPU-written addresses.
 public final class GatheredExpertDecode {
-    /// One expert record: its Metal buffer and byte offset (4-byte aligned, `PackStore.expertBytes` long).
+    /// One expert record: its Metal buffer and byte offset (4-byte aligned, `PackStore.expertBytes` long, or a GGUF
+    /// layer's own bytes in a smaller size class's slot).
     public struct Record {
         public let buffer: MTLBuffer
         public let offset: Int
@@ -152,7 +153,7 @@ public final class GatheredExpertDecode {
             ranks.allSatisfy({ (0..<10).contains($0) }),
             records.allSatisfy({
                 $0.buffer.device.registryID == device.registryID && $0.offset >= 0 && $0.offset % 4 == 0 && $0.offset <= $0.buffer.length
-                    && PackStore.expertBytes <= $0.buffer.length - $0.offset
+                    && ModelLayout.smallestExpertRecordBytes <= $0.buffer.length - $0.offset
             })
         else { throw EngineError("Gathered expert records/rank permutation invalid") }
     }

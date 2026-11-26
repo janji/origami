@@ -675,7 +675,8 @@ public final class SourceExpertLoader: @unchecked Sendable {
     private func planSplit(
         _ key: ExpertKey, entry: ExpertLoadEntry, calibration: ExpertSourceCalibration, normal: IOSource?, routed: Bool
     ) -> SplitDecision? {
-        guard let splitReader else { return nil }
+        // A smaller size class's slot holds less than a whole split plan's record: such records are read whole.
+        guard let splitReader, cache.recordBytes(key) == PackStore.expertBytes else { return nil }
         let record = PackStore.expertBytes
         let sources = splitReader.sources(key)
         let queues = sources.map { source -> IOSource in if case .pack = source { .externalSSD } else { .internalSSD } }

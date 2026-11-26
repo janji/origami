@@ -586,6 +586,7 @@ let tests: [(String, () throws -> Void)] =
         ("cache_reuse_actual_capacity_lifetime", ExpertReuseSelfChecks.actualCapacityAndLifetime),
         ("cache_reuse_cancel_metadata", ExpertReuseSelfChecks.cancellationAndMetadata),
         ("cache_victim_index", ExpertReuseSelfChecks.victimIndex),
+        ("cache_size_classes", ExpertReuseSelfChecks.sizeClasses),
         ("slot_core_size_classes", slotCoreSizeClasses),
         ("original_span_fallback_mutation", originalSpanFallbackAndMutation),
         ("pack_copies_spread_and_fall_back", packCopiesSpreadAndFallBack),

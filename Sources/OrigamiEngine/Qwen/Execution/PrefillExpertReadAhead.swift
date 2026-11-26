@@ -3,7 +3,8 @@ import Foundation
 
 /// Expert read-ahead for one whole-prefill scope. A single producer thread requests every expert record of every
 /// layer in order (index = layer * 512 + expert), keeping at most `held` speculative requests (the cache's live slot
-/// count minus the demand window, never below one layer). Routed demand may use that reserved window and takes the
+/// count minus the demand window, never below one layer), counted per record size class of the cache (each class's
+/// own slots: `ExpertCache.SizeClasses`). Routed demand may use that reserved window and takes the
 /// next free queue slot ahead of the scan. There remain at most `pipeline` unjoined reads, retired in completion order.
 /// The demand window borrows these requests instead of reading (`request`); `release` drops consumed records and
 /// `finishLayer` the layer's unused ones. Reads only: no tensor arithmetic, record layout or consumption order changes
@@ -30,11 +31,16 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
     private let configuration: ExpertExecutionConfiguration
     /// The layers it reads, `0..<layers`: a scope whose final layer skips its unread rows ends one layer early.
     package let layers: Int
-    private let count, limit, pipeline: Int
+    private let count, pipeline: Int
+    /// Each class's limit at the start (its slots less the demand window).
+    private let limits: [Int]
     /// Experts per layer the model has (`ModelLayout.routedExperts`): a pruned GGUF's others are never read.
     private let routed = ModelLayout.routedExperts
-    /// The cache's slots now: the memory governor may shrink the cache while this scope runs.
-    private let cacheSlots: (@Sendable () -> Int)?
+    /// The cache's slots now in a size class: the memory governor may shrink the cache while this scope runs.
+    private let cacheSlots: (@Sendable (_ sizeClass: Int) -> Int)?
+    /// Each layer's size class, and the requests held per class (`requests`, counted as they come and go).
+    private let layerClasses: [Int]
+    private var classRequests: [Int]
     private var requests: [Int: ExpertLoadRequest] = [:]
     /// Actual routed demand takes the producer's next free queue slot before
     /// its sequential scan, without exceeding the existing I/O queue depth.
@@ -52,12 +58,15 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
     private var requestWaitSeconds = 0.0
     private var demandBypasses = 0
 
+    /// `layerClasses`: each layer's size class in the cache (`cacheSlots` gives a class's slots); one class by default.
     package init(
         loader: SourceExpertLoader, generation: IOScheduler.Generation,
-        configuration: ExpertExecutionConfiguration, layers: Int, cacheSlots: (@Sendable () -> Int)? = nil
+        configuration: ExpertExecutionConfiguration, layers: Int, cacheSlots: (@Sendable (_ sizeClass: Int) -> Int)? = nil,
+        layerClasses: [Int] = Array(repeating: 0, count: 48)
     ) throws {
         // The cache may run below its configured size when the memory budget is lowered.
-        let slots = min(configuration.effectivePrefillCacheSlots, cacheSlots?() ?? .max)
+        let classes = (layerClasses.max() ?? 0) + 1
+        let slots = (0..<classes).map { min(configuration.effectivePrefillCacheSlots, cacheSlots?($0) ?? .max) }.min()!
         guard (1...48).contains(layers), slots >= 512 + configuration.demandWindow, configuration.demandWindow >= 2 else {
             throw EngineError(
                 "Prefill read-ahead needs \(512 + configuration.demandWindow) cache slots and a demand window of at least 2; "
@@ -67,11 +76,13 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
         self.generation = generation
         self.configuration = configuration
         self.cacheSlots = cacheSlots
+        self.layerClasses = layerClasses
+        classRequests = Array(repeating: 0, count: classes)
+        limits = (0..<classes).map { min(configuration.effectivePrefillCacheSlots, cacheSlots?($0) ?? .max) - configuration.demandWindow }
         self.layers = layers
         count = layers * 512
         // Removed dictionary handles can still be held by the producer's joins.
         // Reserve the entire old demand window for those transient references.
-        limit = slots - configuration.demandWindow
         pipeline = configuration.demandWindow - 1
         group.enter()
         DispatchQueue(label: "origami.prefill-expert-read-ahead").async { [self] in
@@ -80,9 +91,25 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
         }
     }
 
-    /// Records the producer may hold: the scope's limit, lowered while the governor keeps the cache smaller (never
-    /// below one layer, which the governor's floor of 528 slots leaves room for).
-    private var held: Int { min(limit, max(512, (cacheSlots?() ?? .max) - configuration.demandWindow)) }
+    /// Records the producer may hold in size class `c`: the scope's limit, lowered while the governor keeps the cache
+    /// smaller (never below one layer with one class, which the governor's floor of 528 slots leaves room for; a class
+    /// of several has only its share of that floor, so it follows its own slots).
+    private func held(_ c: Int) -> Int {
+        min(limits[c], max(limits.count == 1 ? 512 : 1, (cacheSlots?(c) ?? .max) - configuration.demandWindow))
+    }
+    /// Whether the producer holds its limit of the class of record `index`.
+    private func full(_ index: Int, extra: Int = 0) -> Bool {
+        let c = layerClasses[min(index, count - 1) / 512]
+        return classRequests[c] >= held(c) + extra
+    }
+    private func hold(_ index: Int, _ request: ExpertLoadRequest) {
+        if requests.updateValue(request, forKey: index) == nil { classRequests[layerClasses[index / 512]] += 1 }
+    }
+    @discardableResult private func drop(_ index: Int) -> Bool {
+        guard requests.removeValue(forKey: index) != nil else { return false }
+        classRequests[layerClasses[index / 512]] -= 1
+        return true
+    }
 
     private func produce() {
         var pending: [(index: Int, request: ExpertLoadRequest)] = []
@@ -93,7 +120,7 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
         do {
             while true {
                 condition.lock()
-                while !stopped && pending.isEmpty && demanded.isEmpty && (next >= count || requests.count >= held) {
+                while !stopped && pending.isEmpty && demanded.isEmpty && (next >= count || full(next)) {
                     // Only close() can end a finished scope; a held one polls, as the cache may grow back meanwhile.
                     if next >= count { condition.wait() } else { _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05)) }
                 }
@@ -105,7 +132,7 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
                     while next < count && next % 512 >= routed { next += 1 }
                     let urgent = demanded.min()
                     let index = urgent ?? next
-                    let canSubmit = !stopped && index < count && requests.count < held + (urgent == nil ? 0 : configuration.demandWindow)
+                    let canSubmit = !stopped && index < count && !full(index, extra: urgent == nil ? 0 : configuration.demandWindow)
                     if canSubmit {
                         if let urgent { demanded.remove(urgent) } else { next += 1 }
                     }
@@ -139,7 +166,7 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
                     pending.append((index, request))
                     condition.lock()
                     submitted += 1
-                    if !stopped && index >= floor && requests[index] == nil { requests[index] = request }
+                    if !stopped && index >= floor && requests[index] == nil { hold(index, request) }
                     maximumRetained = max(maximumRetained, requests.count)
                     maximumPending = max(maximumPending, pending.count)
                     let cancel = stopped
@@ -225,7 +252,7 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
             condition.unlock()
         }
         for key in keys {
-            if requests.removeValue(forKey: key.layer * 512 + key.expert) != nil { consumed += 1 }
+            if drop(key.layer * 512 + key.expert) { consumed += 1 }
         }
     }
     package func finishLayer(_ layer: Int) throws {
@@ -238,7 +265,7 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
         floor = (layer + 1) * 512
         demanded = demanded.filter { $0 >= floor }
         let unused = requests.keys.filter { $0 < floor }
-        for key in unused { requests.removeValue(forKey: key) }
+        for key in unused { drop(key) }
         skipped += unused.count + (next < floor ? (next..<floor).filter { !issued.contains($0) }.count : 0)
         next = max(next, floor)
     }
@@ -259,6 +286,7 @@ package final class PrefillExpertReadAhead: @unchecked Sendable {
         for request in current { loader.joinDiscarding(request) }
         condition.lock()
         requests.removeAll()
+        classRequests = classRequests.map { _ in 0 }
         demanded.removeAll()
         issued.removeAll()
         completed.removeAll()

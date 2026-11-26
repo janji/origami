@@ -6,57 +6,73 @@ import ObjectiveC
 /// host. `gpuKeys[key]` packs the record's slot + 1 (low 32 bits, 0 when absent) and the epoch it was verified in
 /// (high 32 bits); `gpuSlots[slot]` is the slot's GPU address. A command trusts only records verified before it was
 /// committed (the commit makes their bytes visible), and the records of a layer whose command is queued are not
-/// evicted until it finishes. Bypass slots are never published. An observer of `ExpertCache`'s slot core: every
-/// method runs under the core lock.
+/// evicted until it finishes. Bypass slots are never published. With several record size classes, a class's slots take
+/// their own range of the table (`base[c] + slot`). An observer of `ExpertCache`'s slot core: every method runs under the
+/// core lock.
 package final class ExpertGPUResidency: ExpertSlotObserver {
     private unowned(unsafe) let eviction: ExpertCacheEviction
-    private(set) var gpuKeys: MTLBuffer?, gpuSlots: MTLBuffer?, gpuSlotCapacity = 0
+    private(set) var gpuKeys: MTLBuffer?, gpuSlots: MTLBuffer?
     private var gpuEpoch: UInt32 = 1, gpuHeldLayers: UInt64 = 0
-    /// Per slot: its record is in `gpuKeys`.
-    private var gpuPublished: [Bool] = []
+    /// Per class, its slots' table entries: the first one's index and how many there are.
+    private var base: [Int] = [0], capacity: [Int] = [0]
+    /// The core's classes (`configure`).
+    private var classes: [ExpertSlotClass] = []
+    /// Per class and slot: its record is in `gpuKeys`.
+    private var gpuPublished: [[Bool]] = [[]]
 
     init(eviction: ExpertCacheEviction) { self.eviction = eviction }
 
+    /// Before any slab: the core's classes, each given room for the slots its largest limit allows, two slabs of
+    /// retirement holes and the transient slots.
+    func configure(classes: [ExpertSlotClass], slotsPerSlab: Int) {
+        self.classes = classes
+        capacity = classes.map {
+            Int($0.maximumByteLimit / UInt64($0.recordBytes)) + 2 * slotsPerSlab + ExpertReusePolicy.transientSlots
+        }
+        base = capacity.indices.map { c in capacity[..<c].reduce(0, +) }
+        gpuPublished = Array(repeating: [], count: classes.count)
+    }
+
     // MARK: ExpertSlotObserver
 
-    package func isHeld(_ slot: Int, key: Int?, sizeClass: Int) -> Bool {
-        guard gpuHeldLayers != 0, gpuPublished[slot], let key else { return false }
+    package func isHeld(_ slot: Int, key: Int?, sizeClass c: Int) -> Bool {
+        guard gpuHeldLayers != 0, gpuPublished[c][slot], let key else { return false }
         return gpuHeldLayers & (1 << UInt64(key / 512)) != 0
     }
-    package func didVerify(_ slot: Int, sizeClass: Int, in slots: ExpertSlotClass) { publishGPU(slot, slots) }
-    package func willForget(_ key: Int, slot: Int?, sizeClass: Int) {
+    package func didVerify(_ slot: Int, sizeClass c: Int, in slots: ExpertSlotClass) { publishGPU(slot, c, slots) }
+    package func willForget(_ key: Int, slot: Int?, sizeClass c: Int) {
         if let gpuKeys { gpuKeys.contents().storeBytes(of: UInt64(0), toByteOffset: key * 8, as: UInt64.self) }
-        if let slot { gpuPublished[slot] = false }
+        if let slot { gpuPublished[c][slot] = false }
     }
-    package func didInsertSlab(_ id: Int, sizeClass: Int, in slots: ExpertSlotClass) {
+    package func didInsertSlab(_ id: Int, sizeClass c: Int, in slots: ExpertSlotClass) {
         for index in slots.slabs[id]!.slots {
-            while gpuPublished.count <= index { gpuPublished.append(false) }
-            gpuPublished[index] = false
+            while gpuPublished[c].count <= index { gpuPublished[c].append(false) }
+            gpuPublished[c][index] = false
         }
-        publishSlab(id, slots)
+        publishSlab(id, c, slots)
     }
 
     // MARK: The table
 
-    private func publishGPU(_ index: Int, _ slots: ExpertSlotClass) {
-        guard let gpuKeys, index < gpuSlotCapacity, let slot = slots.slots[index], let key = slot.key, !eviction.bypass[index] else {
+    private func publishGPU(_ index: Int, _ c: Int, _ slots: ExpertSlotClass) {
+        guard let gpuKeys, index < capacity[c], let slot = slots.slots[index], let key = slot.key, !eviction.isBypass(index, sizeClass: c)
+        else {
             return
         }
-        gpuKeys.contents().storeBytes(of: UInt64(index + 1) | UInt64(gpuEpoch) << 32, toByteOffset: key * 8, as: UInt64.self)
-        gpuPublished[index] = true
+        gpuKeys.contents().storeBytes(of: UInt64(base[c] + index + 1) | UInt64(gpuEpoch) << 32, toByteOffset: key * 8, as: UInt64.self)
+        gpuPublished[c][index] = true
     }
-    private func publishSlab(_ id: Int, _ slots: ExpertSlotClass) {
+    private func publishSlab(_ id: Int, _ c: Int, _ slots: ExpertSlotClass) {
         guard let gpuSlots, let slab = slots.slabs[id] else { return }
-        for index in slab.slots where index < gpuSlotCapacity {
+        for index in slab.slots where index < capacity[c] {
             gpuSlots.contents().storeBytes(
-                of: slab.buffer.gpuAddress + UInt64(slots.slots[index]!.offset), toByteOffset: index * 8, as: UInt64.self)
+                of: slab.buffer.gpuAddress + UInt64(slots.slots[index]!.offset), toByteOffset: (base[c] + index) * 8, as: UInt64.self)
         }
     }
     /// The residency table (allocated on first use): per key, slot + 1 and epoch; per slot, its GPU address.
-    func table(device: MTLDevice, ledger: MemoryLedger, slots: ExpertSlotClass) throws -> (keys: MTLBuffer, slots: MTLBuffer) {
+    func table(device: MTLDevice, ledger: MemoryLedger) throws -> (keys: MTLBuffer, slots: MTLBuffer) {
         if let gpuKeys, let gpuSlots { return (gpuKeys, gpuSlots) }
-        let capacity =
-            Int(slots.maximumByteLimit / UInt64(PackStore.expertBytes)) + 2 * slots.slotsPerSlab + ExpertReusePolicy.transientSlots
+        let capacity = capacity.reduce(0, +)
         let bytes = UInt64(48 * 512 * 8 + capacity * 8)
         let reservation = try ledger.reserve(bytes: bytes, category: "decode-residency-table")
         guard let keys = device.makeBuffer(length: 48 * 512 * 8, options: .storageModeShared),
@@ -72,10 +88,11 @@ package final class ExpertGPUResidency: ExpertSlotObserver {
         memset(addresses.contents(), 0, addresses.length)
         gpuKeys = keys
         gpuSlots = addresses
-        gpuSlotCapacity = capacity
-        for id in slots.slabs.keys { publishSlab(id, slots) }
-        for index in slots.slots.indices where [.verified, .evictable, .pinned].contains(slots.slots[index]?.phase) {
-            publishGPU(index, slots)
+        for (c, slots) in classes.enumerated() {
+            for id in slots.slabs.keys { publishSlab(id, c, slots) }
+            for index in slots.slots.indices where [.verified, .evictable, .pinned].contains(slots.slots[index]?.phase) {
+                publishGPU(index, c, slots)
+            }
         }
         return (keys, addresses)
     }

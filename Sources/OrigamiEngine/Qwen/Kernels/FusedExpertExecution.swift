@@ -444,7 +444,7 @@ public final class FusedExpertExecution {
         for buffer in buffers {
             guard buffer.buffer.device.registryID == device.registryID, buffer.offset >= 0,
                 buffer.offset % 4 == 0, buffer.offset <= buffer.buffer.length,
-                PackStore.expertBytes <= buffer.buffer.length - buffer.offset
+                ModelLayout.smallestExpertRecordBytes <= buffer.buffer.length - buffer.offset
             else {
                 throw EngineError("Layer command record span is invalid")
             }
@@ -686,7 +686,8 @@ public final class FusedExpertExecution {
             guard (1...256).contains(job.rows),
                 job.gathered != nil ? job.input.isEmpty : (!job.input.isEmpty && job.input.count % 2560 == 0),
                 job.weights.device.registryID == device.registryID, job.recordOffset >= 0, job.recordOffset % 4 == 0,
-                job.recordOffset <= job.weights.length, PackStore.expertBytes <= job.weights.length - job.recordOffset
+                job.recordOffset <= job.weights.length,
+                ModelLayout.smallestExpertRecordBytes <= job.weights.length - job.recordOffset
             else {
                 throw EngineError("Invalid fused expert activation or verified record span")
             }

@@ -18,25 +18,26 @@ public struct ExpertKey: Hashable, Sendable {
 /// A generation ticket cannot publish into a recycled slot. A cancelled read
 /// retains its slab until its producer explicitly reports completion.
 public struct ExpertTicket: Hashable, Sendable {
-    fileprivate let slot: Int
+    fileprivate let sizeClass, slot: Int
     public let generation: UInt64
     public let key: ExpertKey
-    /// The slot core's ticket (Qwen's cache has one size class).
-    fileprivate var core: ExpertSlotTicket { ExpertSlotTicket(sizeClass: 0, slot: slot, generation: generation, key: key.index) }
+    /// The slot core's ticket.
+    fileprivate var core: ExpertSlotTicket { ExpertSlotTicket(sizeClass: sizeClass, slot: slot, generation: generation, key: key.index) }
 }
 
-/// A view of one complete expert record (`PackStore.expertBytes`) inside a cache slab or the replica arena.
+/// A view of one complete expert record inside a cache slab or the replica arena: `PackStore.expertBytes`, or a cache
+/// slot of a smaller size class (`ExpertCache.SizeClasses`), which holds every record of its layers.
 /// Holding it keeps the Metal buffer and its ledger charge alive, but it does not pin the slot: only a cache pin
 /// (or a LoadedExpert lease) keeps the record from being recycled.
 public final class ExpertBuffer: @unchecked Sendable {
     private let storage: ExpertSlabStorage?
     public let buffer: MTLBuffer
-    public let offset: Int
-    public let length = PackStore.expertBytes
-    fileprivate init(storage: ExpertSlabStorage, offset: Int) {
+    public let offset, length: Int
+    fileprivate init(storage: ExpertSlabStorage, offset: Int, length: Int) {
         self.storage = storage
         self.buffer = storage.buffer
         self.offset = offset
+        self.length = length
     }
     /// The replica arena's Metal resource independently carries its reservation.
     /// The LoadedExpert consumer pin protects this particular record from reuse.
@@ -45,6 +46,7 @@ public final class ExpertBuffer: @unchecked Sendable {
         storage = nil
         buffer = replicaBuffer
         self.offset = offset
+        length = PackStore.expertBytes
     }
     public var bytes: UnsafeMutableRawBufferPointer {
         UnsafeMutableRawBufferPointer(start: buffer.contents().advanced(by: offset), count: length)
@@ -56,10 +58,53 @@ public final class ExpertBuffer: @unchecked Sendable {
 /// after the nearest passed scan record), or the reuse-score policy (`ExpertReusePolicy`) in decode with reuse admission.
 /// Every mutation runs under `lock`; tickets carry a generation, so a producer can never publish into a recycled slot.
 /// Only complete verified records may be pinned for the GPU or published in the GPU residency table.
-/// The slots, tickets and slab mechanics are the model-neutral `ExpertSlotCore` (one size class); the victims are
+/// The slots, tickets and slab mechanics are the model-neutral `ExpertSlotCore`; the victims are
 /// `ExpertCacheEviction`'s, the GPU table `ExpertGPUResidency`'s; this type keeps the API and the pacing of resizes,
-/// trims and growth.
+/// trims and growth. One size class (`PackStore.expertBytes`), except for a GGUF whose layers' records differ in size:
+/// up to three classes (`SizeClasses`), the byte limit split between them by their layers' bytes, so each layer keeps the
+/// same share of records as with one class while the padding of smaller layers' slots holds more records.
 public final class ExpertCache: @unchecked Sendable {
+    /// Record size classes: each class's slot bytes, and each layer's class.
+    public struct SizeClasses: Equatable, Sendable {
+        public let recordBytes, layerClasses: [Int]
+        public init(recordBytes: [Int], layerClasses: [Int]) {
+            self.recordBytes = recordBytes
+            self.layerClasses = layerClasses
+        }
+        /// One class of `PackStore.expertBytes` (the layout's, read when asked).
+        public static var one: SizeClasses {
+            SizeClasses(recordBytes: [PackStore.expertBytes], layerClasses: Array(repeating: 0, count: 48))
+        }
+        /// Each class's share of a byte limit: its layers' count times its slot bytes.
+        var weights: [UInt64] {
+            recordBytes.indices.map { c in UInt64(layerClasses.filter { $0 == c }.count * recordBytes[c]) }
+        }
+        /// For records of `layerBytes` (per layer, each at most the largest): at most three classes, the grouping of the
+        /// sorted distinct sizes that leaves the least padding (each class is its largest member's size). One class when
+        /// the records are one size.
+        public static func grouping(_ layerBytes: [Int]) -> SizeClasses {
+            let sizes = Set(layerBytes).sorted()
+            guard layerBytes.count == 48, sizes.count > 1, let largest = sizes.last else { return .one }
+            let count = sizes.map { size in layerBytes.filter { $0 == size }.count }
+            var best: (padded: Int, ends: [Int]) = (.max, [sizes.count])
+            // Class ends (exclusive indices into `sizes`), the last always the largest size.
+            for first in 1...sizes.count {
+                for second in first...sizes.count {
+                    let ends = Array(Set([first, second, sizes.count])).sorted()
+                    var start = 0
+                    var padded = 0
+                    for end in ends {
+                        padded += sizes[end - 1] * count[start..<end].reduce(0, +)
+                        start = end
+                    }
+                    if padded < best.padded || padded == best.padded && ends.count < best.ends.count { best = (padded, ends) }
+                }
+            }
+            let bytes = best.ends.map { sizes[$0 - 1] }
+            assert(bytes.last == largest)
+            return SizeClasses(recordBytes: bytes, layerClasses: layerBytes.map { size in bytes.firstIndex { $0 >= size }! })
+        }
+    }
     /// Slot life cycle: free -> reserved -> reading (-> free when not verified) -> verified -> pinned <-> evictable.
     public typealias Phase = ExpertSlotPhase
     /// The result of a lookup: the record's ticket, its phase, and whether this call reserved it (a miss to read).
@@ -79,6 +124,12 @@ public final class ExpertCache: @unchecked Sendable {
         public let reuseTransientSlots: Int?
         /// Decode demand misses on layer 0, which has no queued guess (each one stalls a token).
         public var layerZeroMisses: UInt64 = 0
+        /// With several record size classes: each class's slot bytes and limit (nil with one).
+        public struct SizeClass: Codable, Sendable {
+            public let recordBytes: Int
+            public let byteLimit: UInt64
+        }
+        public var sizeClasses: [SizeClass]? = nil
     }
     /// The receipt of `prepareSlabs`: what was allocated, touched or wired, and the host memory seen meanwhile.
     public struct PhysicalTouch: Codable, Sendable {
@@ -105,7 +156,7 @@ public final class ExpertCache: @unchecked Sendable {
         // (ROADMAP R5). The caller joined every read producer and is the only thread that starts reads, so no record
         // is written into a slab while it is touched; a trim meanwhile only drops slabs this pass still holds alive.
         try lock.withLock {
-            guard slots.quiescent else { throw EngineError("Slab preparation requires joined readers and consumers") }
+            guard quiescentLocked else { throw EngineError("Slab preparation requires joined readers and consumers") }
         }
         let page = Int(getpagesize())
         var peak: UInt64 = 0
@@ -128,8 +179,10 @@ public final class ExpertCache: @unchecked Sendable {
         }
         func allocated() throws -> Bool {
             try lock.withLock {
-                guard slots.allocated < slots.byteLimit else { return false }
-                return try core.allocateSlabLocked(sizeClass: 0) != nil
+                // The class furthest below its limit, so a stop leaves the classes in proportion.
+                let open = classes.indices.filter { classes[$0].allocated < classes[$0].byteLimit }
+                guard let c = open.min(by: { fill($0) < fill($1) }) else { return false }
+                return try core.allocateSlabLocked(sizeClass: c) != nil
             }
         }
         var stopped = !(try roomy())
@@ -141,7 +194,7 @@ public final class ExpertCache: @unchecked Sendable {
         var pagesWired: UInt64 = 0
         var alreadyWired: UInt64 = 0
         var wireFallbacks: UInt64 = 0
-        var storages = lock.withLock { slots.slabs.values.map(\.storage) }
+        var storages = lock.withLock { classes.flatMap { $0.slabs.values.map(\.storage) } }
         for storage in storages where !stopped {
             var touched: UInt64 = 0
             let buffer = storage.buffer
@@ -165,16 +218,18 @@ public final class ExpertCache: @unchecked Sendable {
         defer { lock.unlock() }
         // A short host keeps the slabs it has; the limit follows so no read allocates more, but never below the
         // governor's minimum cache (an empty cache would leave every demand waiting for a slot).
-        let slab = UInt64(slotsPerSlab * PackStore.expertBytes)
-        let minimum = min((UInt64(ConversationPhaseBudget.minimumSlots * PackStore.expertBytes) + slab - 1) / slab * slab, slots.byteLimit)
-        if slots.allocated < slots.byteLimit { slots.byteLimit = max(slots.allocated, minimum) }
+        for slots in classes {
+            let slab = slots.slabBytes
+            let minimum = min((UInt64(slots.mandatorySlots * slots.recordBytes) + slab - 1) / slab * slab, slots.byteLimit)
+            if slots.allocated < slots.byteLimit { slots.byteLimit = max(slots.allocated, minimum) }
+        }
         // This preparation boundary joined readers/consumers. Only successfully wired slabs
         // prove residency; untouched or unwired allocations must not erase measured overhead.
-        let resident = slots.slabs.values.reduce(UInt64(0)) { $0 + UInt64($1.storage.wiredBytes) }
+        let resident = classes.reduce(UInt64(0)) { $0 + $1.slabs.values.reduce(UInt64(0)) { $0 + UInt64($1.storage.wiredBytes) } }
         ledger.reconcilePhysicalOverhead(residentOwnedBytes: resident)
         let memory = ledger.snapshot()
         var receipt = PhysicalTouch(
-            targetBytes: slots.byteLimit, allocatedBytes: slots.allocated, coveredBytes: covered,
+            targetBytes: limitLocked, allocatedBytes: allocatedLocked, coveredBytes: covered,
             pagesTouched: pages, slabsTouched: count, hostPageBytes: page,
             physicalFootprintHighWater: max(peak, memory.physicalFootprint),
             minimumAvailableMemoryEstimate: min(available, memory.availableMemoryEstimate), memory: memory)
@@ -187,8 +242,9 @@ public final class ExpertCache: @unchecked Sendable {
         return receipt
     }
     private let core: ExpertSlotCore<ExpertCacheEviction>
-    /// The core's one size class: its slabs, slots and limit.
-    private let slots: ExpertSlotClass
+    /// The size classes in use, and the core's classes: their slabs, slots and limits.
+    package let sizes: SizeClasses
+    private let classes: [ExpertSlotClass]
     private let eviction: ExpertCacheEviction
     private let residency: ExpertGPUResidency
     package let device: MTLDevice
@@ -200,29 +256,45 @@ public final class ExpertCache: @unchecked Sendable {
     /// kept out of the cache until a token boundary adds them. `growthCeiling` is the decode phase's limit (0: no growth);
     /// a trim drops them and moves `growthEpoch`, so a preparation it raced drops its own too. `growthOthers`: the budget the
     /// phase left the rest of the model (its usable less the ceiling), which growth never takes even before they reserve it.
-    private var preparedGrowth: [ExpertSlabStorage] = [], growthCeiling: UInt64 = 0, growthOthers: UInt64 = 0, growthEpoch: UInt64 = 0,
+    private var preparedGrowth: [(sizeClass: Int, storage: ExpertSlabStorage)] = [], growthCeiling: UInt64 = 0, growthOthers: UInt64 = 0,
+        growthEpoch: UInt64 = 0,
         growing = false
     private static let growthBatchBytes: UInt64 = 128 * 1_024 * 1_024
     private var layerZeroMisses: UInt64 = 0
     private var reuse: ExpertReusePolicy? { eviction.reuse }
 
+    /// `sizes`: the record size classes asked for (`SizeClasses.grouping` of a mixed-size GGUF's layers). They are used
+    /// only when each class's share of `byteLimit` holds `minimumClassRecords` records (and the 32 reuse admission needs);
+    /// otherwise every slot is `PackStore.expertBytes`, as with one class. Limits are in bytes either way.
     public init(
         device: MTLDevice, ledger: MemoryLedger, byteLimit: UInt64, slotsPerSlab: Int = 8,
-        maximumByteLimit: UInt64? = nil, reuseAdmission: Bool = false
+        maximumByteLimit: UInt64? = nil, reuseAdmission: Bool = false, sizes asked: SizeClasses = .one, minimumClassRecords: Int = 0
     ) throws {
         let maximum = maximumByteLimit ?? byteLimit
+        let enough = max(minimumClassRecords, reuseAdmission ? 32 : 0, slotsPerSlab)
+        let sizes =
+            asked.recordBytes.count > 1
+                && zip(Self.split(byteLimit, asked, slotsPerSlab: slotsPerSlab), asked.recordBytes).allSatisfy {
+                    $0 >= UInt64(enough * $1)
+                }
+            ? asked : .one
         let eviction = ExpertCacheEviction()
         let residency = ExpertGPUResidency(eviction: eviction)
+        let limits = Self.split(byteLimit, sizes, slotsPerSlab: slotsPerSlab)
+        let maxima = Self.split(maximum, sizes, slotsPerSlab: slotsPerSlab)
         let shape = ExpertSlotShape(
             layers: 48, expertsPerLayer: 512,
-            classes: [
-                .init(
-                    recordBytes: PackStore.expertBytes, slotsPerSlab: slotsPerSlab, byteLimit: byteLimit, maximumByteLimit: maximum,
-                    mandatorySlots: ConversationPhaseBudget.minimumSlots, regularFrom: ExpertReusePolicy.transientSlots,
+            classes: sizes.recordBytes.indices.map { c in
+                let layers = sizes.layerClasses.filter { $0 == c }.count
+                return .init(
+                    recordBytes: sizes.recordBytes[c], slotsPerSlab: slotsPerSlab, byteLimit: limits[c], maximumByteLimit: maxima[c],
+                    mandatorySlots: (ConversationPhaseBudget.minimumSlots * layers + 47) / 48,
+                    regularFrom: ExpertReusePolicy.transientSlots,
                     category: "expert-slabs")
-            ], layerClasses: Array(repeating: 0, count: 48))
+            }, layerClasses: sizes.layerClasses)
         core = try ExpertSlotCore(device: device, ledger: ledger, shape: shape, policy: eviction, observer: residency)
-        slots = core.classes[0]
+        self.sizes = sizes
+        classes = core.classes
         self.eviction = eviction
         self.residency = residency
         lock = core.lock
@@ -233,8 +305,40 @@ public final class ExpertCache: @unchecked Sendable {
         guard !reuseAdmission || (slotsPerSlab == 8 && byteLimit >= UInt64(32 * PackStore.expertBytes)) else {
             throw EngineError("Reuse admission requires whole 8-slot slabs and 24 transient slots")
         }
+        eviction.configure(classes: classes.count, layerClasses: sizes.layerClasses)
+        residency.configure(classes: classes, slotsPerSlab: slotsPerSlab)
         eviction.reuse = reuseAdmission ? try ExpertReusePolicy(ledger: ledger) : nil
     }
+
+    /// `total` split between the classes by their weights, in whole slabs of each, rounded down and within the class's
+    /// keys; one class: `total` itself.
+    private static func split(_ total: UInt64, _ sizes: SizeClasses, slotsPerSlab: Int) -> [UInt64] {
+        guard sizes.recordBytes.count > 1 else { return [total] }
+        let weights = sizes.weights
+        let sum = Double(weights.reduce(0, +))
+        return sizes.recordBytes.indices.map { c in
+            let slab = UInt64(slotsPerSlab * sizes.recordBytes[c])
+            let keys = UInt64(sizes.layerClasses.filter { $0 == c }.count * 512 * sizes.recordBytes[c]) / slab * slab
+            return min(UInt64(Double(total) * Double(weights[c]) / sum) / slab * slab, keys)
+        }
+    }
+    /// Sets each class's limit to its share of `total`.
+    private func splitLocked(_ total: UInt64) {
+        for (slots, bytes) in zip(classes, Self.split(total, sizes, slotsPerSlab: slotsPerSlab)) { slots.byteLimit = bytes }
+    }
+    private var allocatedLocked: UInt64 { classes.reduce(0) { $0 + $1.allocated } }
+    /// The classes' limits together (one class: its limit).
+    private var limitLocked: UInt64 { classes.reduce(0) { $0 + $1.byteLimit } }
+    private var pendingTrimLocked: Bool { classes.contains { $0.pendingTrim } }
+    private var quiescentLocked: Bool { classes.allSatisfy(\.quiescent) }
+    /// How full class `c` is against its limit.
+    private func fill(_ c: Int) -> Double { Double(classes[c].allocated) / Double(max(1, classes[c].byteLimit)) }
+    /// Every class's slabs back to its limit (or `maximumSlabs` each).
+    private func retireLocked(maximumSlabs: Int, retired: inout [ExpertSlabStorage]) {
+        for c in classes.indices { core.retireSlabsLocked(sizeClass: c, maximumSlabs: maximumSlabs, retired: &retired) }
+    }
+    /// The slot bytes of `key`'s class: what a record of it is read into.
+    package func recordBytes(_ key: ExpertKey) -> Int { sizes.recordBytes[sizes.layerClasses[key.layer]] }
 
     /// Phase switches occur after the same quiescent ownership check as resize.
     package func setReuseDecode(_ enabled: Bool) throws {
@@ -283,16 +387,18 @@ public final class ExpertCache: @unchecked Sendable {
     package func acquireSpeculative(_ key: ExpertKey, overrideScore: Bool = false) throws -> SpeculativeAdmission {
         lock.lock()
         defer { lock.unlock() }
-        if let index = core.lookup[key.index], let slot = slots.slots[index] {
+        let c = sizes.layerClasses[key.layer]
+        if let index = core.lookup[key.index], let slot = classes[c].slots[index] {
             return [.verified, .pinned, .evictable].contains(slot.phase) ? .resident : .inFlight
         }
         guard core.nextGeneration < UInt64.max else { throw EngineError("Cache generation exhausted") }
         guard let victim = try eviction.speculativeVictim(key.index, overrideScore: overrideScore, core) else { return .noSlot }
         let index = victim.index
         let ticket = core.reserveLocked(index, key: key.index)
-        eviction.didReserveSpeculative(index)
+        eviction.didReserveSpeculative(index, sizeClass: c)
         let acquisition = Acquisition(
-            ticket: ExpertTicket(slot: index, generation: ticket.generation, key: key), phase: .reserved, newlyReserved: true)
+            ticket: ExpertTicket(sizeClass: c, slot: index, generation: ticket.generation, key: key), phase: .reserved,
+            newlyReserved: true)
         return victim.overridden ? .overridden(acquisition) : .admitted(acquisition)
     }
 
@@ -310,7 +416,8 @@ public final class ExpertCache: @unchecked Sendable {
     public func acquire(_ key: ExpertKey) throws -> Acquisition {
         let acquisition = try core.acquire(key.index)
         return Acquisition(
-            ticket: ExpertTicket(slot: acquisition.ticket.slot, generation: acquisition.ticket.generation, key: key),
+            ticket: ExpertTicket(
+                sizeClass: acquisition.ticket.sizeClass, slot: acquisition.ticket.slot, generation: acquisition.ticket.generation, key: key),
             phase: acquisition.phase, newlyReserved: acquisition.newlyReserved)
     }
 
@@ -320,6 +427,7 @@ public final class ExpertCache: @unchecked Sendable {
         guard (0..<48).contains(layer) else { throw EngineError("Invalid draft layer") }
         lock.lock()
         defer { lock.unlock() }
+        let slots = classes[sizes.layerClasses[layer]]
         return (0..<512).filter { expert in
             guard let index = core.lookup[layer * 512 + expert], let slot = slots.slots[index],
                 slots.slabs[slot.slab] != nil
@@ -331,7 +439,7 @@ public final class ExpertCache: @unchecked Sendable {
     /// Exactly one read producer can transition a reservation into reading.
     public func beginRead(_ ticket: ExpertTicket) throws -> ExpertBuffer {
         let record = try core.beginRead(ticket.core)
-        return ExpertBuffer(storage: record.storage, offset: record.offset)
+        return ExpertBuffer(storage: record.storage, offset: record.offset, length: sizes.recordBytes[ticket.sizeClass])
     }
 
     /// Must be called only after every writer for the ticket has stopped touching
@@ -344,7 +452,7 @@ public final class ExpertCache: @unchecked Sendable {
 
     public func pin(_ ticket: ExpertTicket) throws -> ExpertBuffer {
         let record = try core.pin(ticket.core)
-        return ExpertBuffer(storage: record.storage, offset: record.offset)
+        return ExpertBuffer(storage: record.storage, offset: record.offset, length: sizes.recordBytes[ticket.sizeClass])
     }
 
     /// Call from command-buffer completion, never immediately after encoding.
@@ -373,7 +481,7 @@ public final class ExpertCache: @unchecked Sendable {
             lock.unlock()
             withExtendedLifetime(retired) {}
         }
-        let before = slots.allocated
+        let before = allocatedLocked
         dropGrowthLocked(retired: &retired)
         let prepared = retired.reduce(UInt64(0)) { $0 + UInt64($1.buffer.length) }
         // These detached prepared buffers cannot be observed by a reader and retire
@@ -382,17 +490,18 @@ public final class ExpertCache: @unchecked Sendable {
         let charged = ledger.reservedBytes
         let reserved = charged > prepared ? charged - prepared : 0
         let usable = ledger.usableBytes
-        let actualOthers = reserved > slots.allocated ? reserved - slots.allocated : 0
+        let allocated = allocatedLocked
+        let actualOthers = reserved > allocated ? reserved - allocated : 0
         let others = max(actualOthers, growthCeiling > 0 ? growthOthers : 0)
         let slab = UInt64(slotsPerSlab * PackStore.expertBytes)
         let target = max(minimumBytes, (usable > others ? usable - others : 0) / slab * slab)
-        if target < slots.byteLimit {
+        if target < limitLocked {
             try validateLimit(target)
             _ = resizeLocked(to: target, retired: &retired)
-        } else if slots.pendingTrim {
-            core.retireSlabsLocked(sizeClass: 0, maximumSlabs: .max, retired: &retired)
+        } else if pendingTrimLocked {
+            retireLocked(maximumSlabs: .max, retired: &retired)
         }
-        return before - slots.allocated + prepared
+        return before - allocatedLocked + prepared
     }
 
     /// A busy reader or queued GPU command can outlive the original pressure callback.
@@ -405,8 +514,8 @@ public final class ExpertCache: @unchecked Sendable {
             lock.unlock()
             withExtendedLifetime(retired) {}
         }
-        guard slots.pendingTrim, !core.slabGrowthHeld else { return }
-        core.retireSlabsLocked(sizeClass: 0, maximumSlabs: 8, retired: &retired)
+        guard pendingTrimLocked, !core.slabGrowthHeld else { return }
+        retireLocked(maximumSlabs: 8, retired: &retired)
     }
 
     /// Phase changes must be all-or-nothing with respect to the target limit.
@@ -423,7 +532,7 @@ public final class ExpertCache: @unchecked Sendable {
             withExtendedLifetime(retired) {}
         }
         try validateLimit(bytes)
-        guard slots.quiescent else {
+        guard quiescentLocked else {
             throw EngineError("Expert cache phase change has reserved, reading or pinned slots", code: "expert_phase_busy")
         }
         let result = resizeLocked(to: bytes, retired: &retired)
@@ -438,10 +547,10 @@ public final class ExpertCache: @unchecked Sendable {
         }
     }
     private func resizeLocked(to bytes: UInt64, retired: inout [ExpertSlabStorage]) -> UInt64 {
-        slots.byteLimit = bytes
+        splitLocked(bytes)
         dropGrowthLocked(retired: &retired)
-        core.retireSlabsLocked(sizeClass: 0, maximumSlabs: .max, retired: &retired)
-        return slots.allocated
+        retireLocked(maximumSlabs: .max, retired: &retired)
+        return allocatedLocked
     }
 
     package func holdSlabGrowth(_ held: Bool) {
@@ -479,12 +588,15 @@ public final class ExpertCache: @unchecked Sendable {
         let reserved = ledger.reservedBytes
         let ceiling = min(growthCeiling, usable > growthOthers ? usable - growthOthers : 0)
         let available = usable > reserved ? usable - reserved : 0
-        let (room, overflow) = slots.allocated.addingReportingOverflow(available)
+        let (room, overflow) = allocatedLocked.addingReportingOverflow(available)
         let slab = UInt64(slotsPerSlab * PackStore.expertBytes)
         let target = min(ceiling, overflow ? .max : room) / slab * slab
-        if target > slots.byteLimit {
-            slots.byteLimit = target
-            slots.pendingTrim = slots.allocated > slots.byteLimit
+        if target > limitLocked {
+            // A class that grew past its share keeps its limit.
+            for (slots, bytes) in zip(classes, Self.split(target, sizes, slotsPerSlab: slotsPerSlab)) {
+                slots.byteLimit = max(slots.byteLimit, bytes)
+                slots.pendingTrim = slots.allocated > slots.byteLimit
+            }
         }
     }
     /// A trim: prepared slabs are released (their charge and wiring with them) and a running preparation drops its own.
@@ -498,7 +610,7 @@ public final class ExpertCache: @unchecked Sendable {
         dropGrowthLocked(retired: &retired)
     }
     private func dropGrowthLocked(retired: inout [ExpertSlabStorage]) {
-        retired += preparedGrowth
+        retired += preparedGrowth.map(\.storage)
         preparedGrowth.removeAll()
         growthEpoch &+= 1
     }
@@ -508,22 +620,35 @@ public final class ExpertCache: @unchecked Sendable {
     /// the utility worker between tranches so recovery does not prefault a whole GB at once. No token thread sleeps.
     /// `attachGrowth` adds a bounded tranche at a token boundary. Returns total slabs prepared by this pass.
     @discardableResult package func prepareGrowth(minimumAvailableBytes: UInt64, wire: Bool) throws -> Int {
-        let bytes = UInt64(slotsPerSlab * PackStore.expertBytes)
         lock.lock()
         let epoch = growthEpoch
-        let top = max(slots.allocated, slots.byteLimit) + UInt64(preparedGrowth.count) * bytes
+        let allocated = allocatedLocked
+        let limit = limitLocked
+        let top = max(allocated, limit) + preparedGrowth.reduce(UInt64(0)) { $0 + UInt64($1.storage.buffer.length) }
         // Lazy growth may still reserve up to the current limit: that room is not ours.
-        let reserved = ledger.reservedBytes + (slots.byteLimit > slots.allocated ? slots.byteLimit - slots.allocated : 0)
+        let reserved = ledger.reservedBytes + (limit > allocated ? limit - allocated : 0)
         let usable = ledger.usableBytes
         // The phase's own split of a smaller budget: the rest of the model keeps what the phase left it (KV and owners grow later).
         let ceiling = min(growthCeiling, usable > growthOthers ? usable - growthOthers : 0)
-        let count =
-            growing || slots.pendingTrim || !ledger.optionalGrowthAllowed
-            ? 0 : min(usable > reserved ? (usable - reserved) / bytes : 0, ceiling > top ? (ceiling - top) / bytes : 0)
+        // The class of each slab to prepare, in order: the one furthest below its share, while its slab fits the room.
+        var plan: [Int] = []
+        if !(growing || pendingTrimLocked || !ledger.optionalGrowthAllowed) {
+            var room = min(usable > reserved ? usable - reserved : 0, ceiling > top ? ceiling - top : 0)
+            var have = classes.map { max($0.allocated, $0.byteLimit) }
+            for (c, storage) in preparedGrowth { have[c] += UInt64(storage.buffer.length) }
+            let weights = sizes.weights
+            func after(_ c: Int) -> Double { Double(have[c] + classes[c].slabBytes) / Double(weights[c]) }
+            while let c = classes.indices.min(by: { after($0) < after($1) }), classes[c].slabBytes <= room {
+                plan.append(c)
+                have[c] += classes[c].slabBytes
+                room -= classes[c].slabBytes
+            }
+        }
+        let count = plan.count
         if count > 0 { growing = true }
         lock.unlock()
         guard count > 0 else { return 0 }
-        var made: [ExpertSlabStorage] = []
+        var made: [(sizeClass: Int, storage: ExpertSlabStorage)] = []
         defer {
             lock.lock()
             growing = false
@@ -533,16 +658,16 @@ public final class ExpertCache: @unchecked Sendable {
             }
             lock.unlock()
         }
-        let batchSize = max(1, Int(Self.growthBatchBytes / bytes))
+        let batchSize = max(1, Int(Self.growthBatchBytes / UInt64(slotsPerSlab * PackStore.expertBytes)))
         var total = 0
         let page = Int(getpagesize())
         let swapStart = origami_swapout_bytes()
         func current() -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            return epoch == growthEpoch && !slots.pendingTrim
+            return epoch == growthEpoch && !pendingTrimLocked
         }
-        func hostAllowsGrowth() -> Bool {
+        func hostAllowsGrowth(_ bytes: UInt64) -> Bool {
             guard ledger.optionalGrowthAllowed else { return false }
             let reserved = ledger.reservedBytes
             let usable = ledger.usableBytes
@@ -550,7 +675,9 @@ public final class ExpertCache: @unchecked Sendable {
             if ledger.usesAvailableMemoryFloor { return origami_available_memory() >= minimumAvailableBytes + bytes }
             return MemoryPressureLevel.current()?.isElevated != true && ledger.physicalAllocationShortfall(bytes: bytes) == 0
         }
-        while total < count, current(), hostAllowsGrowth(), origami_swapout_bytes() == swapStart {
+        while total < count, current(), hostAllowsGrowth(classes[plan[total]].slabBytes), origami_swapout_bytes() == swapStart {
+            let c = plan[total]
+            let bytes = classes[c].slabBytes
             // The pool keeps no autoreleased reference: a dropped slab must free its charge at once.
             let admitted = try autoreleasepool { () throws -> Bool in
                 guard let reservation = try ledger.reservePhysicalIfAvailable(bytes: bytes, category: "expert-slabs") else { return false }
@@ -565,14 +692,14 @@ public final class ExpertCache: @unchecked Sendable {
                 } else {
                     _ = origami_touch_preserving_pages(buffer.contents(), buffer.length, page, &touched)
                 }
-                made.append(storage)
+                made.append((c, storage))
                 return true
             }
             guard admitted else { break }
             total += 1
             if made.count >= batchSize {
                 lock.lock()
-                let publish = epoch == growthEpoch && !slots.pendingTrim && ledger.optionalGrowthAllowed
+                let publish = epoch == growthEpoch && !pendingTrimLocked && ledger.optionalGrowthAllowed
                 if publish {
                     preparedGrowth += made
                     made.removeAll(keepingCapacity: true)
@@ -590,28 +717,35 @@ public final class ExpertCache: @unchecked Sendable {
     @discardableResult package func attachGrowth() -> Int {
         lock.lock()
         defer { lock.unlock() }
-        guard ledger.optionalGrowthAllowed, !core.slabGrowthHeld, !slots.pendingTrim, !preparedGrowth.isEmpty else { return 0 }
-        let bytes = UInt64(slotsPerSlab * PackStore.expertBytes)
-        let added = min(preparedGrowth.count, max(1, Int(Self.growthBatchBytes / bytes)))
-        let limit = max(slots.byteLimit, slots.allocated)
-        for storage in preparedGrowth.prefix(added) { core.insertSlabLocked(storage, sizeClass: 0) }
+        guard ledger.optionalGrowthAllowed, !core.slabGrowthHeld, !pendingTrimLocked, !preparedGrowth.isEmpty else { return 0 }
+        let added = min(preparedGrowth.count, max(1, Int(Self.growthBatchBytes / UInt64(slotsPerSlab * PackStore.expertBytes))))
+        let before = classes.map { max($0.byteLimit, $0.allocated) }
+        var grown = [UInt64](repeating: 0, count: classes.count)
+        for (c, storage) in preparedGrowth.prefix(added) {
+            core.insertSlabLocked(storage, sizeClass: c)
+            grown[c] += classes[c].slabBytes
+        }
         preparedGrowth.removeFirst(added)
-        slots.byteLimit = min(limit + UInt64(added * slotsPerSlab * PackStore.expertBytes), maximumByteLimit)
+        for c in classes.indices where grown[c] > 0 {
+            classes[c].byteLimit = min(before[c] + grown[c], classes[c].maximumByteLimit)
+        }
         return added
     }
-    /// Slots the current limit allows; the memory governor may lower it while a phase runs.
+    /// Slots the current limit allows in the smallest class (one class: all of them); the memory governor may lower it
+    /// while a phase runs. A prompt read needs a whole layer of records in its class (`slotLimit(sizeClass:)`).
     package var slotLimit: Int {
         lock.lock()
         defer { lock.unlock() }
-        return Int(slots.byteLimit) / PackStore.expertBytes
+        return classes.map { Int($0.byteLimit) / $0.recordBytes }.min()!
     }
+    package func slotLimit(sizeClass c: Int) -> Int { lock.withLock { Int(classes[c].byteLimit) / classes[c].recordBytes } }
 
     /// The residency table (allocated on first use): per key, slot + 1 and epoch; per slot, its GPU address.
     package func gpuTable() throws -> (keys: MTLBuffer, slots: MTLBuffer) {
         lock.lock()
         defer { lock.unlock() }
         if let keys = residency.gpuKeys, let addresses = residency.gpuSlots { return (keys, addresses) }
-        let table = try residency.table(device: device, ledger: ledger, slots: slots)
+        let table = try residency.table(device: device, ledger: ledger)
         eviction.markAllDirty()
         return table
     }
@@ -642,15 +776,16 @@ public final class ExpertCache: @unchecked Sendable {
     package func slabBuffers() -> (generation: UInt64, buffers: [MTLBuffer]) {
         lock.lock()
         defer { lock.unlock() }
-        return (core.slabGeneration, slots.slabs.values.map(\.buffer))
+        return (core.slabGeneration, classes.flatMap { $0.slabs.values.map(\.buffer) })
     }
 
     public func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        let all = slots.slots
-        return Snapshot(
-            allocatedBytes: slots.allocated, byteLimit: slots.byteLimit, maximumByteLimit: maximumByteLimit, slabs: slots.slabs.count,
+        let all = classes.flatMap(\.slots)
+        var snapshot = Snapshot(
+            allocatedBytes: allocatedLocked, byteLimit: limitLocked, maximumByteLimit: maximumByteLimit,
+            slabs: classes.reduce(0) { $0 + $1.slabs.count },
             activeSlots: all.compactMap { $0 }.filter { $0.phase != .free }.count,
             reservedSlots: all.compactMap { $0 }.filter { $0.phase == .reserved }.count,
             pinnedSlots: all.compactMap { $0 }.filter { $0.pins > 0 }.count,
@@ -662,5 +797,7 @@ public final class ExpertCache: @unchecked Sendable {
             reuseReplayResets: reuse?.replayResets,
             reuseBorrowedBypasses: reuse == nil ? nil : eviction.reuseBorrowedBypasses,
             reuseTransientSlots: reuse == nil ? nil : ExpertReusePolicy.transientSlots, layerZeroMisses: layerZeroMisses)
+        if classes.count > 1 { snapshot.sizeClasses = classes.map { .init(recordBytes: $0.recordBytes, byteLimit: $0.byteLimit) } }
+        return snapshot
     }
 }
