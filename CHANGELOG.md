@@ -4,6 +4,15 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.1.8.3 (2026-11-26)
+
+**Replies:** unchanged.
+
+- **A low-bit Qwen build no longer stops after its first prompt read.** With 3.1.8.2's several expert slot sizes, the
+  reply's memory preparation counted each memory slab that macOS would not lock as a full-size one; when enough of
+  them were smaller, the count went below zero and the model process stopped (signal 5) as the reply began. It now
+  counts each slab's own bytes.
+
 ## 3.1.8.2 (2026-11-26)
 
 **Replies:** unchanged.

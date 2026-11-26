@@ -531,7 +531,7 @@ public final class ExpertExecution {
             receipt.pagesWired = (receipt.pagesWired ?? 0) + (touch.pagesWired ?? 0)
             receipt.wireFallbacks = (receipt.wireFallbacks ?? 0) + (touch.wireFallbacks ?? 0)
             receipt.lastWiredBytes =
-                touch.coveredBytes - (touch.wireFallbacks ?? 0) * UInt64(configuration.slotsPerSlab * PackStore.expertBytes)
+                touch.coveredBytes - (touch.wireFallbackBytes ?? 0)
         }
         receipt.transitions += 1
         receipt.seconds += ProcessInfo.processInfo.systemUptime - started

@@ -144,6 +144,8 @@ public final class ExpertCache: @unchecked Sendable {
         public var pagesWired: UInt64? = nil
         public var slabsAlreadyWired: UInt64? = nil
         public var wireFallbacks: UInt64? = nil
+        /// The bytes of those slabs (with several size classes, slabs differ in size).
+        public var wireFallbackBytes: UInt64? = nil
     }
     /// Allocates the admitted decode cache and faults (or wires) its pages before decode, so
     /// the first tokens do not stall on page faults. Best effort: when the host's available
@@ -194,6 +196,7 @@ public final class ExpertCache: @unchecked Sendable {
         var pagesWired: UInt64 = 0
         var alreadyWired: UInt64 = 0
         var wireFallbacks: UInt64 = 0
+        var wireFallbackBytes: UInt64 = 0
         var storages = lock.withLock { classes.flatMap { $0.slabs.values.map(\.storage) } }
         for storage in storages where !stopped {
             var touched: UInt64 = 0
@@ -205,7 +208,10 @@ public final class ExpertCache: @unchecked Sendable {
                 slabsWired += 1
                 pagesWired += touched
             } else {
-                if wire { wireFallbacks += 1 }
+                if wire {
+                    wireFallbacks += 1
+                    wireFallbackBytes += UInt64(buffer.length)
+                }
                 _ = origami_touch_preserving_pages(buffer.contents(), buffer.length, page, &touched)
             }
             covered += UInt64(buffer.length)
@@ -238,6 +244,7 @@ public final class ExpertCache: @unchecked Sendable {
             receipt.pagesWired = pagesWired
             receipt.slabsAlreadyWired = alreadyWired
             receipt.wireFallbacks = wireFallbacks
+            receipt.wireFallbackBytes = wireFallbackBytes
         }
         return receipt
     }
