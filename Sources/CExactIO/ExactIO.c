@@ -36,6 +36,11 @@ origami_read_result origami_pread_exact_with(int fd, void *buffer, size_t length
         size_t remaining = length - result.bytes_read;
         // Darwin rejects read requests greater than INT_MAX.
         size_t chunk = remaining > INT_MAX ? INT_MAX : remaining;
+        // An F_NOCACHE read whose buffer or offset is not 4 KiB-aligned goes through the file cache, and Darwin drops
+        // only its first 1 MiB afterwards: the rest stays cached (a Qwen GGUF expert record read into a cache slot at
+        // `index * recordBytes`). Reads of at most 1 MiB leave nothing behind; aligned reads stay whole (direct).
+        if ((((uintptr_t)buffer + result.bytes_read) | (uint64_t)(offset + result.bytes_read)) & (ORIGAMI_UNALIGNED_PIECE_ALIGN - 1))
+            chunk = chunk > ORIGAMI_UNALIGNED_READ_PIECE ? ORIGAMI_UNALIGNED_READ_PIECE : chunk;
         ssize_t count = reader(fd, (char *)buffer + result.bytes_read, chunk,
                                (off_t)(offset + result.bytes_read), context);
         if (count < 0) {

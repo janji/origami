@@ -9,6 +9,13 @@ func wholeScheduleCommandsJoinBeforeRetirement() throws {
     try WholeExecutionSelfChecks.scheduleOwnership(store: PackStore(model: ModelSource(fixture: root, spans: [:])))
 }
 
+func wholeScheduleResidencyBuiltAtPhaseChange() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("origami-whole-residency-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try WholeExecutionSelfChecks.residencyBuiltAtPhaseChange(store: PackStore(model: ModelSource(fixture: root, spans: [:])))
+}
+
 func wholeScheduleConfigurationIsBoundedAndDefaultOff() throws {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("whole-schedule-config-" + UUID().uuidString + ".json")
     defer { try? FileManager.default.removeItem(at: url) }

@@ -29,13 +29,12 @@ A switch that is "on" with `1` is off for any other value unless the table says 
 | `ORIGAMI_NO_BFLOAT_MATRICES` | unset | Any value: run the M1 kernels (no bfloat16 matrix units) on a newer Mac, to compare or to rule them out. Same replies on M1–M4; on M5 it also turns off the matrix-unit prompt kernel. | debug |
 | `ORIGAMI_SCRATCH_COMPACTION` | on | `0` gives every temporary GPU buffer its own memory instead of reusing it after its last use (the reference layout, for comparison). Applies to all three models; arithmetic is the same either way. | debug |
 | `ORIGAMI_MEMORY_CALIBRATION` | unset | Set by the server on a model it loads at a limit `origami tune --memory` measures (all three models): its memory history goes to a throwaway file, so the trial neither uses nor changes what this Mac learned. Not for users. | internal |
-| `ORIGAMI_SPLIT_READS` | off | `1`: a demand read that several drives hold is read in parts from each at once, sized by each drive's measured speed and backlog, or whole from the drive that would finish it first. All three models; replies are the same either way; `split_reads` in the status shows what each drive delivered. Off by default: measured about 2% slower than one fast drive alone (Qwen, exact, the whole model also on the internal drive). Becomes the default or is deleted by 3.2. | experiment |
 
 ## GLM and DeepSeek switches
 
 These are read by the engine for GLM-5.3-Flash and DeepSeek-V4.1-Flash (`Sources/OrigamiEngine/Family/`).
 
-Timing switches that `origami tune` also sets. A variable fixes the value, so tuning leaves it alone:
+Timing switches (measured neutral on real turns; `origami tune` no longer compares them):
 
 | Name | Default | What it does | Status |
 |---|---|---|---|
@@ -48,11 +47,9 @@ Other experiments:
 
 | Name | Default | What it does | Status |
 |---|---|---|---|
-| `ORIGAMI_FAMILY_SAME_DRIVE_HOT_COPY` | off | `1`: allow a hot copy on the same drive as the model (single-read records). Decided by 3.2 with an interleaved real-model run: the default or deleted. | experiment |
+| `ORIGAMI_FAMILY_SAME_DRIVE_HOT_COPY` | off | `1`: allow a hot copy on the same drive as the model (single-read records). Stays an experiment until it is tested on a Mac whose models and hot copy share one drive (3.2 could not: the development Mac keeps its copy on another drive). | experiment |
 | `ORIGAMI_FAMILY_GROUPED_DECODE` | on | `0`: compute each expert projection separately instead of grouped (the exact reference path); its saved prompts are kept apart from the grouped path's. | debug |
 | `ORIGAMI_FAMILY_GROUPED_GATE_UP` | on | `0`: compute the gate and up projections separately during a reply. | debug |
-| `ORIGAMI_FAMILY_LAZY_STARTUP_WORKSPACE` | off | `1`: at load, reserve working memory for a one-token step instead of the largest prompt step; each step still reserves what it needs (starts in about 1.5 GB less). Decided by 3.2 on a 16–24 GB Mac: the default or deleted. | experiment |
-| `ORIGAMI_FAMILY_REFRESH_IDLE_OVERHEAD` | off | `1`: re-measure memory overhead between requests and refit the expert cache. Decided by 3.2 with a real-model run: the default or deleted. | experiment |
 | `ORIGAMI_FAMILY_RESIDENT_Q4_PACK` | unset | A folder holding a prepared pack of smaller always-resident weights (Q8_0 to Q4_K). **Changes replies**; answer quality is not validated. Decided by 3.2 with quality measured on checkable tasks (ROADMAP N5): the default or deleted. | experiment |
 | `ORIGAMI_FAMILY_PHASE_TIMING` | off | `1`: time each host-side phase of a request and report it in the status; log the SHA-256 digests of the state and logits a reply starts from and of each decode step's logits and the state it ends at, to compare runs. | debug |
 | `ORIGAMI_FAMILY_ROUTE_TRACE` | off | `1`: record which experts each token was routed to (bounded), with their weights, the next layer's guess and which experts were in memory, and report it in the status. | debug |
@@ -75,7 +72,7 @@ These are read by `engine-checks` and the scripts in `Tests/`, never by the serv
 | `ORIGAMI_CONVERT_GLM` | A GLM-5.3-Flash safetensors folder, to check converting a few layers. |
 | `ORIGAMI_CONVERT_LAYERS` | Which layers that check converts (default `0,3`). |
 | `ORIGAMI_SYNTHETIC_WRITE_REFERENCE` | `1`: `synthetic_glm_end_to_end` and `synthetic_deepseek_end_to_end` write their reference (`Tests/Fixtures/synthetic/`) instead of comparing; only after a change meant to alter output. |
-| `ORIGAMI_TUNING_HOST` | Set by `Tests/tuning-flow-checks.py` and read by `origami tune`: a JSON object of fixed host readings (`memory_bytes`, `swapout_bytes`, `memory_pressure`, `thermal_state`, `low_power`) in place of the Mac's, so the check does not depend on the swapping of the machine running it; `minute_seconds` shortens a minute of the tuning time limit, so the time-limit checks take seconds, and `reported_timing` makes it take each reply's first-token and writing seconds from the fixture (`usage.check_timing`) instead of the clock. |
+| `ORIGAMI_TUNING_HOST` | Set by `Tests/tuning-flow-checks.py` and `Tests/tune-memory-checks.py` and read by `origami tune`: a JSON object of fixed host readings (`memory_bytes`, `swapout_bytes`, `memory_pressure`, `thermal_state`, `low_power`) in place of the Mac's, so the check does not depend on the swapping of the machine running it; `minute_seconds` shortens a minute of the tuning time limit, so the time-limit checks take seconds, and `reported_timing` makes it take each reply's first-token and writing seconds from the fixture (`usage.check_timing`) instead of the clock. |
 | `ORIGAMI_AUTO_MEASURE_IDLE` | Seconds without a request before `memory_auto_measure` measures (default 1800). A test aid, to see it start without waiting half an hour; `Tests/auto-measure-checks.py` sets it to 1. |
 | `ORIGAMI_TEST_WORKER` | A program `origami serve` starts in place of the model process, with the same arguments. `Tests/dashboard-control-checks.py` sets it to a stub that answers as a loaded model, to check what the dashboard says about a running model without one. |
 | `ORIGAMI_TEST_MOVE_PAUSE` | A file name: while that file exists, a move that copies stops after its copy (before the originals are compared) and creates `<file>.copied`, for at most 30 s. `Tests/dashboard-control-checks.py` sets it to write a source file during a move. |

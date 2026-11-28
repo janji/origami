@@ -868,7 +868,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send(''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode() + b'data: [DONE]\n\n', 'text/event-stream')
     def do_GET(self):
         self.send(json.dumps({'status': 'ready', 'queue': {'busy': False, 'queued': 0}, 'trial': trial,
-                              'tuning': {'key': 'stub@32768', 'identity': {}, 'knobs': {}}, 'memory_learned': {'minimum_bytes': 1000000000},
+                              'tuning': {'key': 'stub@32768', 'identity': {}}, 'memory_learned': {'minimum_bytes': 1000000000},
                               'model': {'name': 'Stub-35B'}, 'memory_pressure_cuts': 2, 'memory': {'budget_bytes': 18e9, 'recovery_target_bytes': 22e9, 'temporarily_reduced': True,
                                          'last_cut': {'reason': 'the system swap counter increased', 'at': '2026-11-17T10:00:00Z'}},
                               'experts_from': {'split': {'reads': 100, 'memory': .6, 'hot_copy': .3, 'model_drive': .1},

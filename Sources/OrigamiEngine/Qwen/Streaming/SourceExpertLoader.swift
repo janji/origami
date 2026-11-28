@@ -61,11 +61,6 @@ private final class ExpertLoadEntry: @unchecked Sendable {
     var source: IOSource { io?.source ?? residentSource }
     let generation: IOScheduler.Generation
     let residentAtRequest: Bool
-    /// A demand read issued while no other demand read was in flight on a drive, of a record both drives hold: its
-    /// wait counts in `split_reads`' `lone_demand_wait_seconds`, split or not.
-    var lone = false
-    /// A demand read (or a prediction demand adopted): what `lone` is judged against.
-    var demand = false
     // These fields are loader-lock-owned and become stable before IOTicket.join.
     var io: IOTicket?
     var replica: ExpertReadReplica?
@@ -150,113 +145,9 @@ public final class SourceExpertLoader: @unchecked Sendable {
     /// Online source calibration; nil keeps the static calibration path unchanged.
     private let estimator: ExpertSourceOnlineEstimator?
     private var replicasEnabled = false
-    /// Whether the executor is in its decode phase: only decode's lone waits are counted (`setDecoding`).
-    private var decoding = false
     // Published requests may disappear from inFlight while their losing pread
     // remains live. Retain these races until the scheduler's actual joins pass.
     private var readRaces: [ExpertTicket: ExpertReadReplica] = [:]
-    /// Part reads for split reads (`SplitReads`); nil: every read is whole.
-    private var splitReader: SplitPartReader?
-    package let splitReads = SplitReadCounters()
-    /// Whether demand reads may be split or sent whole to another source (`SplitReads.enabled` at start; checks turn it
-    /// on and off). Off, a lone read is still counted (`lone_demand_waits`) and nothing else is planned or allocated.
-    package var splitsReads = SplitReads.enabled
-    /// The bytes planned on each source of a split read and not yet read (`planSplit`).
-    package let plannedBytes = SplitPlannedBytes()
-    /// Staging for split reads when no replica arena exists (replicas off, as on one drive with a hot copy): the experts
-    /// one token activates in a layer, since every miss of a layer may split; charged to the ledger at the first split
-    /// (ten records), never before.
-    private lazy var splitArena: ExpertReplicaArena? =
-        replicaArena
-        ?? (try? ExpertReplicaArena(
-            ledger: cache.ledger, device: cache.device, records: ModelContract.geometry["num_experts_per_tok"]!,
-            recordBytes: PackStore.expertBytes, lazily: true))
-
-    /// How a split read reads parts of a record from either drive: whether both drives hold `key` in a form parts can be
-    /// read from, whether a drive's read tally says it is wearing, what a source's own reads measured, a part read (its
-    /// checks left in `PartChecks`), and the assembled record's check.
-    package struct SplitPartReader: Sendable {
-        /// A record's sources now (none, or one: read whole).
-        let sources: @Sendable (ExpertKey) -> [PackStore.SplitSource]
-        let wearing: @Sendable (ExpertKey, PackStore.SplitSource) -> Bool
-        /// A source's live rate from its own completed reads, whole and part (0: not measured yet), the seconds since a
-        /// read last fed it, and its healthy rate (0: unknown).
-        let measured: @Sendable (ExpertKey, PackStore.SplitSource) -> (bytesPerSecond: Double, secondsAgo: Double, healthy: Double)
-        let read: @Sendable (ExpertKey, PackStore.SplitSource, Int, UnsafeMutableRawBufferPointer, PackStore.PartChecks) throws -> Void
-        let verify: @Sendable (ExpertKey, UnsafeRawBufferPointer, PackStore.PartChecks) throws -> Void
-        package init(
-            sources: @escaping @Sendable (ExpertKey) -> [PackStore.SplitSource],
-            wearing: @escaping @Sendable (ExpertKey, PackStore.SplitSource) -> Bool,
-            measured:
-                @escaping @Sendable (ExpertKey, PackStore.SplitSource) -> (bytesPerSecond: Double, secondsAgo: Double, healthy: Double) =
-                { _, _ in (0, .infinity, 0) },
-            read:
-                @escaping @Sendable (ExpertKey, PackStore.SplitSource, Int, UnsafeMutableRawBufferPointer, PackStore.PartChecks) throws ->
-                Void,
-            verify: @escaping @Sendable (ExpertKey, UnsafeRawBufferPointer, PackStore.PartChecks) throws -> Void
-        ) {
-            self.sources = sources
-            self.wearing = wearing
-            self.measured = measured
-            self.read = read
-            self.verify = verify
-        }
-        /// Two sources, the model's drive and the pack's (checks): `available` says whether both hold the record.
-        package init(
-            available: @escaping @Sendable (ExpertKey) -> Bool, wearing: @escaping @Sendable (ExpertKey, IOSource) -> Bool,
-            measured: @escaping @Sendable (IOSource) -> (bytesPerSecond: Double, secondsAgo: Double, healthy: Double) = { _ in
-                (0, .infinity, 0)
-            },
-            read: @escaping @Sendable (ExpertKey, IOSource, Int, UnsafeMutableRawBufferPointer, PackStore.PartChecks) throws -> Void,
-            verify: @escaping @Sendable (ExpertKey, UnsafeRawBufferPointer, PackStore.PartChecks) throws -> Void
-        ) {
-            @Sendable func queue(_ source: PackStore.SplitSource) -> IOSource {
-                if case .pack = source { .externalSSD } else { .internalSSD }
-            }
-            self.init(
-                sources: { available($0) ? [.model, .pack] : [] }, wearing: { wearing($0, queue($1)) }, measured: { measured(queue($1)) },
-                read: { key, source, offset, into, checks in try read(key, queue(source), offset, into, checks) }, verify: verify)
-        }
-        /// `store`'s part reads: the checkpoint's spans, each hot copy place holding the record and the pack queue's
-        /// copies (`PackStore.splitSources`, the live lookups). Each is measured by its own reads alone: the model's
-        /// drive by its slow-read tally (every read of the model's files, whole or part), a place and a pack copy by
-        /// their lanes (`ReadLane.measured`).
-        package init(store: PackStore) {
-            self.init(
-                sources: { store.splitSources($0) },
-                wearing: { key, source in
-                    switch source {
-                    case .model: store.modelDriveReads.wearing
-                    case .place(let set, let place): set.stores[place].reads.wearing
-                    case .pack: false
-                    }
-                },
-                measured: { key, source in
-                    switch source {
-                    case .model:
-                        let rates = store.modelDriveReads.rates
-                        return (rates.current, store.modelDriveReads.age, rates.healthy)
-                    case .place(let set, let place):
-                        let lane = set.lane(place).measured
-                        return (lane?.bytesPerSecond ?? 0, lane?.secondsAgo ?? .infinity, set.stores[place].reads.rates.healthy)
-                    case .pack:
-                        let lane = store.packLane(key)?.measured
-                        return (lane?.bytesPerSecond ?? 0, lane?.secondsAgo ?? .infinity, 0)
-                    }
-                },
-                read: { key, source, offset, into, checks in
-                    try store.readExpertPart(key, source: source, at: offset, into: into, checks: checks)
-                }, verify: { key, record, checks in try store.verifySplit(key, record: record, checks: checks) })
-        }
-    }
-    /// Sets `reader`'s part reads (before serving): they find a record's sources, so lone reads are counted, and split
-    /// the read (or send it whole to another source) when `splitsReads`.
-    package func enableSplitReads(_ reader: SplitPartReader) {
-        lock.lock()
-        splitReader = reader
-        lock.unlock()
-    }
-
     public init(
         cache: ExpertCache, scheduler: IOScheduler,
         packedAvailable: @escaping @Sendable () -> Bool = { true },
@@ -342,13 +233,6 @@ public final class SourceExpertLoader: @unchecked Sendable {
         }
     }
 
-    /// The executor's phase at its boundary: `lone_demand_wait_seconds` counts decode's waits only.
-    package func setDecoding(_ decode: Bool) {
-        lock.lock()
-        decoding = decode
-        lock.unlock()
-    }
-
     package func setReplicasEnabled(_ enabled: Bool) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -432,7 +316,6 @@ public final class SourceExpertLoader: @unchecked Sendable {
         priority: IOPriority = .demand, source preferredSource: IOSource? = nil,
         policy: ExpertSourcePolicy = .packedPreferred, calibration: ExpertSourceCalibration = .neutral
     ) throws -> ExpertLoadRequest {
-        let explicitSource = preferredSource
         let preferredSource =
             preferredSource ?? ((policy == .packedPreferred || estimator == nil) && hotInternal(key) ? IOSource.internalSSD : nil)
         lock.lock()
@@ -450,7 +333,6 @@ public final class SourceExpertLoader: @unchecked Sendable {
             // producer, one slot; the queued job is promoted and may hedge.
             if priority == .demand {
                 _ = scheduler.promote(io)
-                pending.demand = true
                 pending.replica?.markDemanded()
             }
             return ExpertLoadRequest(pending)
@@ -460,7 +342,6 @@ public final class SourceExpertLoader: @unchecked Sendable {
         let entry = ExpertLoadEntry(
             cache: cache, ticket: acquisition.ticket, source: source,
             generation: generation, residentAtRequest: !acquisition.newlyReserved)
-        entry.demand = priority == .demand
         let handle = ExpertLoadRequest(entry)
         if !acquisition.newlyReserved {
             guard [.verified, .evictable, .pinned].contains(acquisition.phase) else {
@@ -472,7 +353,7 @@ public final class SourceExpertLoader: @unchecked Sendable {
         return try startRead(
             entry, handle: handle, key: key, acquisition: acquisition, generation: generation,
             priority: priority, preferredSource: preferredSource, source: source, policy: policy, calibration: calibration,
-            speculative: false, explicitSource: explicitSource)
+            speculative: false)
     }
 
     /// Pre-routed (speculative) admission: nothing is issued for a resident or
@@ -529,37 +410,18 @@ public final class SourceExpertLoader: @unchecked Sendable {
     private func startRead(
         _ entry: ExpertLoadEntry, handle: ExpertLoadRequest, key: ExpertKey, acquisition: ExpertCache.Acquisition,
         generation: IOScheduler.Generation, priority: IOPriority, preferredSource: IOSource?, source: IOSource,
-        policy: ExpertSourcePolicy, calibration: ExpertSourceCalibration, speculative: Bool, explicitSource: IOSource? = .internalSSD
+        policy: ExpertSourcePolicy, calibration: ExpertSourceCalibration, speculative: Bool
     ) throws -> ExpertLoadRequest {
         let destination: ExpertBuffer
         do { destination = try cache.beginRead(acquisition.ticket) } catch {
             try? cache.cancel(acquisition.ticket)
             throw error
         }
-        var planned: SplitPlannedRead?
         do {
             let mirrored = hotInternal(key)
             let selecting = preferredSource == nil && policy == .earliestCompletion
             let placement = estimator?.placementCalibration(hotInternal: mirrored, recordDecision: selecting) ?? calibration
             let probe = selecting && priority == .demand ? estimator?.idleProbeSource(hotInternal: mirrored) : nil
-            // Any demand read whose caller named no drive (the hot-copy rule's default included): every source of the
-            // record is a candidate (`PackStore.splitSources`), with any source policy. Every read is counted on the
-            // source that reads it when that is known.
-            let split = planSplit(
-                key, entry: entry, calibration: calibration, normal: selecting ? nil : source,
-                routed: explicitSource == nil && priority == .demand && !speculative)
-            planned = split?.planned
-            entry.lone = split?.lone ?? false
-            let parts = split?.parts
-            let splitSource: IOSource? = parts.map { split!.queues[$0[0].source] }
-            let splitRead: (@Sendable (IOSource, UnsafeMutableRawBufferPointer) throws -> Void)? = parts.map { parts in
-                splitOperation(
-                    key, entry: entry, parts: parts, order: split!.order, sources: split!.sources, queues: split!.queues,
-                    calibration: calibration, planned: split!.planned)
-            }
-            let reader: Reader = { [reader] key, source, destination in
-                if let splitRead, source == splitSource { try splitRead(source, destination) } else { try reader(key, source, destination) }
-            }
             if replicasEnabled, let arena = replicaArena {
                 let race = ExpertReadReplica(
                     scheduler: scheduler, arena: arena, generation: generation, recordBytes: PackStore.expertBytes,
@@ -585,27 +447,17 @@ public final class SourceExpertLoader: @unchecked Sendable {
                     delay: { [estimator] primary in
                         estimator?.hedgeDelaySeconds(base: base, primary: primary, hotInternal: mirrored) ?? base
                     }
-                ) { [planned] operation, primaryCompletion in
-                    // The read's planned bytes end with its job, whether it ran or not.
-                    let completion: @Sendable (IOTicket, IOOutcome) -> Void = { ticket, outcome in
-                        planned?.endAll()
-                        primaryCompletion(ticket, outcome)
-                    }
-                    if splitSource == nil && preferredSource == nil && policy == .earliestCompletion {
+                ) { operation, completion in
+                    if preferredSource == nil && policy == .earliestCompletion {
                         return try scheduler.submitEarliest(
                             availableSources: available, estimate: placement.estimatedSeconds, idleProbeSource: probe,
                             priority: priority, generation: generation, byteCount: PackStore.expertBytes,
                             operation: operation, completion: completion)
                     }
-                    let selected = splitSource ?? preferredSource ?? available[0]
+                    let selected = preferredSource ?? available[0]
                     return try scheduler.submit(
                         source: selected, priority: priority, generation: generation,
-                        byteCount: parts?[0].length ?? PackStore.expertBytes, operation: { try operation(selected, $0) },
-                        completion: { ticket, outcome in
-                            // A split's job is charged its own part's bytes; its success is the whole record's.
-                            let whole = parts != nil && outcome == .succeeded(bytes: parts![0].length)
-                            completion(ticket, whole ? .succeeded(bytes: PackStore.expertBytes) : outcome)
-                        })
+                        byteCount: PackStore.expertBytes, operation: { try operation(selected, $0) }, completion: completion)
                 }
                 inFlight[key] = entry
                 readRaces[entry.cacheTicket] = race
@@ -616,20 +468,10 @@ public final class SourceExpertLoader: @unchecked Sendable {
                 try reader(key, source, destination.bytes)
                 try cancellation.throwIfCancelled()
             }
-            let completion: @Sendable (IOTicket, IOOutcome) -> Void = { [self, entry, planned] _, outcome in
-                planned?.endAll()
+            let completion: @Sendable (IOTicket, IOOutcome) -> Void = { [self, entry] _, outcome in
                 _ = publish(entry, key: key, generation: generation, outcome: outcome)
             }
-            if let splitSource, let parts {
-                entry.io = try scheduler.submit(
-                    source: splitSource, priority: priority, generation: generation, byteCount: parts[0].length,
-                    operation: { cancellation in try operation(splitSource, cancellation) },
-                    completion: { ticket, outcome in
-                        // A split's job is charged its own part's bytes; its success is the whole record's.
-                        completion(
-                            ticket, outcome == .succeeded(bytes: parts[0].length) ? .succeeded(bytes: PackStore.expertBytes) : outcome)
-                    })
-            } else if preferredSource == nil && policy == .earliestCompletion {
+            if preferredSource == nil && policy == .earliestCompletion {
                 entry.io = try scheduler.submitEarliest(
                     availableSources: packedAvailable() ? [.externalSSD, .internalSSD] : [.internalSSD],
                     estimate: placement.estimatedSeconds, idleProbeSource: probe, priority: priority, generation: generation,
@@ -643,187 +485,8 @@ public final class SourceExpertLoader: @unchecked Sendable {
             inFlight[key] = entry
             return handle
         } catch {
-            planned?.endAll()
             _ = cache.completeRead(acquisition.ticket, verified: false)
             throw error
-        }
-    }
-
-    /// A read's plan (`planSplit`): whether it is lone, its parts (a split, or one part: the whole record sent to another
-    /// source than the normal path's; nil: read on the normal path), the sources fastest first, the sources and each
-    /// one's queue, and the bytes it planned on them.
-    private struct SplitDecision {
-        let lone: Bool
-        let parts: [SplitReadPart]?
-        let order: [Int]
-        let sources: [PackStore.SplitSource]
-        let queues: [IOSource]
-        let planned: SplitPlannedRead
-    }
-
-    /// The plan for read `key` (loader lock held), nil without part reads. `normal`: the queue the normal path reads it
-    /// on (nil: the scheduler chooses); `routed`: a demand read whose caller named no drive (only those are planned).
-    /// With more than one source (`SplitPartReader.sources`): whether it is lone (decode, no other demand read of this
-    /// loader in flight) and, with `splitsReads`, the plan: per source its own measured rate (`SplitPartReader.measured`,
-    /// no latency) and that rate's age, else the static calibration's one-read rate and latency, never measured (the
-    /// model's files and the pack on the original curve, a place on the mirror curve); healthy from its own tally, else
-    /// the static calibration's; busy for the bytes planned on it and not yet read (`plannedBytes`) at that rate. The
-    /// plan's whole read goes on the normal path, unless the plan found the model's files or the pack best while the
-    /// normal path reads another known source: then it is a one-part read there. The bytes are counted on each part's
-    /// source, else on the normal path's source when it is known (the model's files, the pack, or the only place
-    /// holding a hot record; several places: not counted, the copies choose one at the read).
-    private func planSplit(
-        _ key: ExpertKey, entry: ExpertLoadEntry, calibration: ExpertSourceCalibration, normal: IOSource?, routed: Bool
-    ) -> SplitDecision? {
-        // A smaller size class's slot holds less than a whole split plan's record: such records are read whole.
-        guard let splitReader, cache.recordBytes(key) == PackStore.expertBytes else { return nil }
-        let record = PackStore.expertBytes
-        let sources = splitReader.sources(key)
-        let queues = sources.map { source -> IOSource in if case .pack = source { .externalSSD } else { .internalSSD } }
-        let places = sources.indices.filter { if case .place = sources[$0] { true } else { false } }
-        let normalSource: Int? =
-            switch normal {
-            case .externalSSD?: sources.firstIndex { if case .pack = $0 { true } else { false } }
-            case .internalSSD? where hotInternal(key): places.count == 1 ? places[0] : nil
-            case .internalSSD?: sources.firstIndex { if case .model = $0 { true } else { false } }
-            case nil: nil
-            }
-        func decision(lone: Bool, parts: [SplitReadPart]?, order: [Int] = []) -> SplitDecision {
-            let items =
-                parts?.map { (Self.plannedKey(sources[$0.source]), $0.length) }
-                ?? normalSource.map { [(Self.plannedKey(sources[$0]), record)] }
-            return SplitDecision(
-                lone: lone, parts: parts, order: order, sources: sources, queues: queues,
-                planned: SplitPlannedRead(items ?? [], ledger: plannedBytes))
-        }
-        guard routed, sources.count >= 2 else { return decision(lone: false, parts: nil) }
-        // A published race waits in `inFlight` only for its loser to end: not a demand read still in flight.
-        let lone =
-            decoding
-            && !inFlight.values.contains { other in
-                other.demand && other !== entry
-                    && (other.replica.map { $0.wait(timeout: 0) == nil } ?? (other.io.map { $0.join(timeout: 0) == nil } ?? false))
-            }
-        guard splitsReads else { return decision(lone: lone, parts: nil) }
-        let healthy = estimator?.calibration ?? calibration
-        let original = estimator?.placementCalibration(hotInternal: false, recordDecision: false) ?? calibration
-        let mirror = estimator?.placementCalibration(hotInternal: true, recordDecision: false) ?? calibration
-        let described = sources.indices.map { n -> SplitReadSource in
-            let measured = splitReader.measured(key, sources[n])
-            let internalSource = queues[n] == .internalSSD
-            let curve = places.contains(n) ? mirror : original
-            var source = SplitReadSource(
-                bytesPerSecond: measured.bytesPerSecond > 0
-                    ? measured.bytesPerSecond : (internalSource ? curve.internalBytesPerSecond : curve.externalBytesPerSecond)[0],
-                latencySeconds: measured.bytesPerSecond > 0
-                    ? 0 : internalSource ? curve.internalLatencySeconds : curve.externalLatencySeconds,
-                healthyBytesPerSecond: measured.healthy > 0
-                    ? measured.healthy : (internalSource ? healthy.internalBytesPerSecond : healthy.externalBytesPerSecond)[0],
-                measuredSecondsAgo: measured.bytesPerSecond > 0 ? measured.secondsAgo : .infinity,
-                wearing: splitReader.wearing(key, sources[n]))
-            source.busySeconds = Double(plannedBytes[Self.plannedKey(sources[n])]) / source.plannedBytesPerSecond
-            return source
-        }
-        let plan = SplitReads.plan(recordBytes: record, sources: described, waited: true)
-        splitReads.record(plan, sources: described, names: Self.splitNames(sources))
-        let order = described.indices.sorted { described[$0].seconds(record) < described[$1].seconds(record) }
-        switch plan {
-        case .split(let parts): return decision(lone: lone, parts: parts, order: order)
-        case .whole(let best?, _) where normalSource != nil && best != normalSource && !places.contains(best):
-            splitReads.routedWhole()
-            return decision(lone: lone, parts: [SplitReadPart(source: best, offset: 0, length: record)], order: order)
-        case .whole: return decision(lone: lone, parts: nil)
-        }
-    }
-    /// The ledger key of a split source: one per physical source (a place by its store).
-    private static func plannedKey(_ source: PackStore.SplitSource) -> AnyHashable {
-        switch source {
-        case .model: "model"
-        case .place(let set, let place): ObjectIdentifier(set.stores[place])
-        case .pack: "pack"
-        }
-    }
-    /// Each source's name in `split_reads`.
-    private static func splitNames(_ sources: [PackStore.SplitSource]) -> [String] {
-        sources.map { source -> String in
-            switch source {
-            case .model: "model_drive"
-            case .place(_, let place): "copy\(place)"
-            case .pack: "pack"
-            }
-        }
-    }
-
-    /// The read of a split record into its slot (`SplitReads.execute`): each other part on a thread of
-    /// its own outside the queues (a part waiting for a queue slot that split reads' own jobs hold would never start), staged in a replica-arena record (`splitArena` without replicas; none free, or a one-part read: into the
-    /// slot, unguarded).
-    /// The fastest part is read in place on the job's thread (covered only by the replica race, if any); a late part is re-read
-    /// after the replica hedge's static delay for its bytes; a staged part is copied in only while the race (if any)
-    /// still owns the record; every part's time trains its queue's online estimate as a whole read's does (a place's
-    /// lane too, in `HotCopySet.read`). Then the record is checked as a whole as its parts' sources check one. A split
-    /// that fails reads the record again whole from `source`, unless a replica published it meanwhile. Each part's
-    /// planned bytes end with its own read, the rest when the split returns (a staged loser still reading then is no
-    /// longer counted). A one-part read is counted only as `whole_from_other_source`.
-    private func splitOperation(
-        _ key: ExpertKey, entry: ExpertLoadEntry, parts: [SplitReadPart], order: [Int], sources: [PackStore.SplitSource],
-        queues: [IOSource], calibration: ExpertSourceCalibration, planned: SplitPlannedRead
-    ) -> @Sendable (IOSource, UnsafeMutableRawBufferPointer) throws -> Void {
-        let (reader, wholeRead, arena, counters, scheduler, estimator) = (
-            splitReader!, self.reader, parts.count > 1 ? splitArena : nil, splitReads, scheduler, estimator
-        )
-        let partSources = sources
-        let names = Self.splitNames(sources)
-        let split = parts.count > 1
-        return { [weak entry] source, destination in
-            defer { planned.endAll() }
-            let checks = PackStore.PartChecks()
-            let staging = arena?.acquire()
-            nonisolated(unsafe) let stagingBytes = staging?.bytes
-            // Weak: the race holds this closure, and the entry the race.
-            func owned(_ copy: () -> Void) -> Bool {
-                entry?.replica?.whileOwned(copy)
-                    ?? {
-                        copy()
-                        return true
-                    }()
-            }
-            do {
-                let outcome = try SplitReads.execute(
-                    parts, into: destination, order: order, staging: stagingBytes, keep: staging,
-                    lateAfter: { part in
-                        calibration.replicaDelaySeconds.map { $0 * Double(part.length) / Double(PackStore.expertBytes) }
-                            ?? 4
-                            * calibration.estimatedSeconds(
-                                source: .externalSSD, bytesIncludingNew: UInt64(part.length), jobsIncludingNew: 1, maximumConcurrent: 1)
-                    }, owns: owned
-                ) { part, offset, into in
-                    // A part's own read (a guard or fallback of its range comes from another source).
-                    let own = parts.firstIndex { $0.source == part && $0.offset == offset }
-                    defer { if let own { planned.end(own) } }
-                    let drive = queues[part]
-                    let concurrency = scheduler.runningCount(drive)
-                    let begun = DispatchTime.now().uptimeNanoseconds
-                    try reader.read(key, partSources[part], offset, into, checks)
-                    var hot = false
-                    if case .place = partSources[part] { hot = true }
-                    // Inside the read: a staged part that ends after its split trains its drive too.
-                    estimator?.observe(
-                        source: drive, bytes: into.count, seconds: Double(DispatchTime.now().uptimeNanoseconds - begun) / 1e9,
-                        concurrency: concurrency, hotInternal: hot)
-                }
-                try reader.verify(key, UnsafeRawBufferPointer(destination), checks)
-                if split { counters.record(outcome, names: names) }
-            } catch let orphaned as SplitReadOrphaned {
-                if split { counters.record(nil, names: []) }
-                throw orphaned
-            } catch let cancelled as IOOperationCancelled {
-                // Its generation or scheduler ended: no whole read after it.
-                throw cancelled
-            } catch {
-                if split { counters.record(nil, names: []) }
-                guard owned({}) else { throw SplitReadOrphaned() }
-                try wholeRead(key, source, destination)
-            }
         }
     }
 
@@ -839,8 +502,6 @@ public final class SourceExpertLoader: @unchecked Sendable {
     public func joinAndPin(_ request: ExpertLoadRequest, shouldContinue: () -> Bool = { true }) throws -> LoadedExpert {
         let entry = request.entry
         let deadline = Date(timeIntervalSinceNow: Self.stallBound)
-        let waitStarted = DispatchTime.now().uptimeNanoseconds
-        defer { if entry.lone { splitReads.waited(Double(DispatchTime.now().uptimeNanoseconds - waitStarted) / 1e9) } }
         if let race = entry.replica {
             var outcome: IOOutcome?
             while outcome == nil {

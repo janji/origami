@@ -4,13 +4,8 @@ import Foundation
 @main enum ObservationProvenanceChecks {
     struct Failure: Error { let message: String }
     static func require(_ ok: Bool, _ message: String) throws { if !ok { throw Failure(message: message) } }
-    static func tags(
-        _ settings: [String: Any] = [:], _ environment: [String: String] = [:],
-        tuning: [String: Any]? = nil
-    ) throws -> [String: String] {
-        try ObservationProvenance.tags(
-            settings: settings, environment: environment, startupTuning: tuning,
-            tuningScope: "fixture startup tuning")
+    static func tags(_ settings: [String: Any] = [:], _ environment: [String: String] = [:]) throws -> [String: String] {
+        try ObservationProvenance.tags(settings: settings, environment: environment)
     }
     static func main() throws {
         let empty = try tags()
@@ -49,26 +44,15 @@ import Foundation
             ["api_key": "fixture-a", "lan_key": "fixture-b"], ["ORIGAMI_API_KEY": "fixture-c", "HF_TOKEN": "fixture-d"])
         let secretB = try tags(["api_key": "fixture-changed"], ["ORIGAMI_UNKNOWN_CREDENTIAL": "fixture-e"])
         try require(secretA == empty && secretB == empty, "credential value or presence entered a digest")
-        let tunedA = try tags(tuning: ["overrides": ["family_spin": true]])
-        let tunedB = try tags(tuning: ["overrides": ["family_spin": false]])
-        try require(tunedA["startup_tuning_sha256"] != tunedB["startup_tuning_sha256"], "startup tuning collision")
         try require(
-            tunedA["experimental_configuration_sha256"] == tunedB["experimental_configuration_sha256"],
-            "tuning mixed into environment scope")
-        let resolved = try tags(tuning: ["overrides": ["family_spin": true], "resolved_family_knobs": ["family_spin": false]])
-        try require(resolved["startup_tuning_sha256"] != tunedA["startup_tuning_sha256"], "resolved family settings omitted")
-        try require(
-            empty["startup_tuning_sha256"] == nil && empty["provenance_schema_version"] == "2", "missing tuning invented or schema missing")
+            empty["startup_tuning_sha256"] == nil && empty["startup_tuning_scope"] == nil && empty["provenance_schema_version"] == "3",
+            "startup tuning tags back, or schema missing")
         do {
             _ = try tags(["sampling_values": ["temperature": Double.nan]])
             throw Failure(message: "nonfinite setting accepted")
         } catch is ObservationProvenance.InvalidValue {}
-        do {
-            _ = try tags(tuning: ["invalid": Double.infinity])
-            throw Failure(message: "nonfinite tuning accepted")
-        } catch is ObservationProvenance.InvalidValue {}
         print(
-            "Observation provenance: passed (exact budgets, arrays, all execution flags, tuning, redaction and deterministic serialization)"
+            "Observation provenance: passed (exact budgets, arrays, all execution flags, redaction and deterministic serialization)"
         )
     }
 }

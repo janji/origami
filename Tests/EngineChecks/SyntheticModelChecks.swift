@@ -467,6 +467,9 @@ private func syntheticPromptLoanReturned(_ family: ModelFamily) throws {
                     "messages": [["role": "user", "content": text]],
                 ]), contextTier: 16_384)
             let budget = runner.experts.budget
+            // Load reserves a one-row workspace and lends nothing past it; the prompt's state rows stay held after it
+            // ends (as any conversation's), so the steady state is the starting budget plus that workspace less them.
+            let (startWorking, startState) = (runner.workingBytes, runner.heldState)
             try require(runner.promptSlices == 1, "the reserve holds \(runner.promptSlices) slices")
             let control = GenerationControl()
             final class Seen: @unchecked Sendable {
@@ -505,10 +508,12 @@ private func syntheticPromptLoanReturned(_ family: ModelFamily) throws {
             runner.interruptWait = nil
             try require(seen.lock.withLock { seen.lent }, "\(how): the prompt borrowed nothing (working \(runner.workingBytes))")
             try require(
-                runner.workingBytes == 0 && runner.prefillSlices == runner.promptSlices && runner.experts.budget >= budget
+                runner.workingBytes == 0 && runner.prefillSlices == runner.promptSlices
+                    && runner.experts.budget + (runner.heldState - startState) >= budget + startWorking
                     && runner.experts.budget == runner.poolTarget(),
                 "\(how): working \(runner.workingBytes), \(runner.prefillSlices) slices a call, budget "
-                    + "\(runner.experts.budget) after \(budget)")
+                    + "\(runner.experts.budget) after \(budget) (state \(startState) to \(runner.heldState), "
+                    + "startup working \(startWorking))")
         }
     }
 }

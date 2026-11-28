@@ -1,6 +1,6 @@
 #!/bin/sh
 # Thread Sanitizer over the concurrency-heavy, model-free engine checks: the IO scheduler and expert loader, replicas,
-# caches, GLM/DeepSeek reads and prefetch, the hot copy and its keeper (and the serving gate it yields to), split reads,
+# caches, GLM/DeepSeek reads and prefetch, the hot copy and its keeper (and the serving gate it yields to),
 # the model drive coming back, the HTTP ingress and server, and the saved-prompt stores. A debug build with
 # -sanitize=thread in its own build folder. Many of these checks keep their records in Metal buffers: on a host without a
 # usable GPU they skip, as in engine-checks.
@@ -9,7 +9,7 @@ set -u
 build=${1:-.build/tsan}
 swift build --build-path "$build" --sanitize=thread --product engine-checks || exit 1
 bin="$build/debug/engine-checks"
-names=$("$bin" --list | grep -E '^(scheduler_|model_scheduler_|expert_loader_|expert_replica_|expert_source_atomic|cache_|demand_read_lane_|span_read_pool_|family_(prefetch|expert_prefetch|read_completion|arrival|prompt_read_ahead|early_delayed|queued_prefetch|hot_copy|wave_admission|hedged_read)|hot_copy_|model_drive_|split_read_|deepseek_engram_(reads|memo)|prefetch_observations_|http_|server_request_|serving_(lifecycle|loopback|keepalive|many_requests|connection_cap|forget_waits|cancelled_request|admission|hard_admission|body_reservation|health)|physical_admission_concurrent|conversation_|prompt_cache_|fuzz_replay_socket|gpu_wait_bounded|expert_read_stall_bounded|synthetic_(guess|background_read)_stall_bounded)' | paste -sd, -)
+names=$("$bin" --list | grep -E '^(scheduler_|model_scheduler_|expert_loader_|expert_replica_|expert_source_atomic|cache_|demand_read_lane_|span_read_pool_|family_(prefetch|expert_prefetch|read_completion|arrival|prompt_read_ahead|early_delayed|queued_prefetch|hot_copy|wave_admission|hedged_read)|hot_copy_|model_drive_|deepseek_engram_(reads|memo)|prefetch_observations_|http_|server_request_|serving_(lifecycle|loopback|keepalive|many_requests|connection_cap|forget_waits|cancelled_request|admission|hard_admission|body_reservation|health)|physical_admission_concurrent|conversation_|prompt_cache_|fuzz_replay_socket|gpu_wait_bounded|expert_read_stall_bounded|synthetic_(guess|background_read)_stall_bounded)' | paste -sd, -)
 [ -n "$names" ] || { echo "tsan-checks: no check names matched"; exit 1; }
 report="$build/tsan-report.txt"
 # TSan exits 66 at the end of a run that reported a race; halt_on_error=0 collects every report first.

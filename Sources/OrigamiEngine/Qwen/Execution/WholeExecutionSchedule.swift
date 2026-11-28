@@ -38,6 +38,8 @@ public final class WholeExecutionSchedule {
         public var lateWaitLayers: UInt64 = 0, lateWaitExperts: UInt64 = 0, tokenTailSeconds = 0.0
         /// Host work: demand windows, encoding the next layer, and residency-set rebuilds (count and time).
         public var windowSeconds = 0.0, encodeNextSeconds = 0.0, residencyRebuilds: UInt64 = 0, residencySeconds = 0.0
+        /// The phase change's residency-set build, run on another thread (`prepareDecodeResidency`): off the token path.
+        public var residencyPhaseBuilds: UInt64? = nil, residencyPhaseSeconds: Double? = nil
     }
     /// The schedule's counters plus the optional per-switch counters the executor fills in; each optional is nil
     /// when its switch is off, so reports only carry the paths that ran.
@@ -76,6 +78,8 @@ public final class WholeExecutionSchedule {
     let preencoded: Bool
     private let expertsEvent: MTLSharedEvent?, grids: MTLBuffer?, residency: MTLResidencySet?
     private var expertsValue: UInt64 = 0, residencyGeneration: UInt64?
+    /// The phase change's build of the residency set, still running or not yet joined.
+    private var residencyBuild: ResidencyBuild?
     /// Signalled after each pre-encoded layer's router: its flags and routing are final from then on.
     private let routerEvent: MTLSharedEvent?
     private var routerValue: UInt64 = 0
@@ -180,6 +184,7 @@ public final class WholeExecutionSchedule {
         // Defensive joined retirement even if a caller fails to finish after a
         // thrown error. Normal paths join explicitly and expose error counters.
         for command in inFlight { try? command.waitBounded() }
+        residencyBuild?.done.wait()
         try? ledger.release(metadata)
     }
     private func record(_ change: (inout Counts) -> Void) {
@@ -240,7 +245,8 @@ public final class WholeExecutionSchedule {
         pairWorkspace = nil
         decodeWorkspaces.removeAll()
         // The residency set keeps every slab it holds alive (and charged): empty it so a governor trim between
-        // requests frees memory. The next pre-encoded layer rebuilds it.
+        // requests frees memory. The next phase change (or pre-encoded layer) rebuilds it.
+        joinResidencyBuild()
         residency?.removeAllAllocations()
         residency?.commit()
         residencyGeneration = nil
@@ -368,6 +374,51 @@ public final class WholeExecutionSchedule {
         try joined(command, shouldContinue: shouldContinue)
         return try self.command("whole-file-kv-after-selection")
     }
+    /// Makes `residency` hold exactly `records` before a command that uses it is encoded: joins the phase change's build
+    /// (instant once it finished; a caller that did not check `residencyBuilding` waits here, on the token path, as
+    /// before), then rebuilds only when the slabs changed since. Metal makes resident only the allocations a commit adds
+    /// (measured), so a rebuild after a slab came or went costs that slab, not the set.
+    package func syncResidency(_ records: (generation: UInt64, buffers: [MTLBuffer])) {
+        guard let residency else { return }
+        let began = DispatchTime.now().uptimeNanoseconds
+        let joined = joinResidencyBuild()
+        let rebuilt = residencyGeneration != records.generation
+        if rebuilt {
+            ResidencyBuild.rebuild(residency, records.buffers)
+            residencyGeneration = records.generation
+        }
+        guard joined || rebuilt else { return }
+        assert(residencyHolds(records.buffers), "The residency set differs from the record buffers")
+        record {
+            if rebuilt { $0.residencyRebuilds += 1 }
+            $0.residencySeconds += Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
+        }
+    }
+    /// The phase change (the prompt read's end, after the decode slabs are prepared): builds the residency set for
+    /// `records` on another thread, so the reply's first tokens do not wait for it (seconds when the decode cache
+    /// was made resident afresh). Until it finishes the token loop takes the joined path (byte-identical).
+    package func prepareDecodeResidency(_ records: (generation: UInt64, buffers: [MTLBuffer])) {
+        guard let residency, residencyBuild == nil, residencyGeneration != records.generation else { return }
+        residencyBuild = ResidencyBuild(residency, records)
+    }
+    /// True while the phase change's build runs.
+    package var residencyBuilding: Bool { residencyBuild.map { $0.done.wait(timeout: .now()) == .timedOut } ?? false }
+    /// Whether the residency set holds exactly `buffers`: every buffer a pre-encoded command can use when it is committed,
+    /// and no retired slab (which it would keep alive).
+    package func residencyHolds(_ buffers: [MTLBuffer]) -> Bool {
+        guard let residency else { return buffers.isEmpty }
+        let held = Set(residency.allAllocations.map { ObjectIdentifier($0) })
+        return held == Set(buffers.map { ObjectIdentifier($0) })
+    }
+    @discardableResult private func joinResidencyBuild() -> Bool {
+        guard let build = residencyBuild else { return false }
+        build.done.wait()
+        residencyBuild = nil
+        residencyGeneration = build.generation
+        decode.residencyPhaseBuilds = (decode.residencyPhaseBuilds ?? 0) + 1
+        decode.residencyPhaseSeconds = (decode.residencyPhaseSeconds ?? 0) + build.seconds
+        return true
+    }
     /// Pre-encoded decode: queue `s`'s experts and submit. Group one is the routed experts the cache's residency table holds from before
     /// `epoch`, looked up and computed on the GPU without the host; group two (the rest) waits for the host's records and
     /// grid; then the canonical reduce and the mix, as the finish command encodes them. Every slab a record can live in is
@@ -379,18 +430,7 @@ public final class WholeExecutionSchedule {
         guard preencoded, let event = expertsEvent, let grids, let residency, (0...1).contains(tile),
             !armed.contains(where: { $0.tile == tile })
         else { throw EngineError("Pre-encoded experts outside their two-tile boundary") }
-        if residencyGeneration != records.generation {
-            let began = DispatchTime.now().uptimeNanoseconds
-            residency.removeAllAllocations()
-            residency.addAllocations(records.buffers)
-            residency.commit()
-            residency.requestResidency()
-            residencyGeneration = records.generation
-            record {
-                $0.residencyRebuilds += 1
-                $0.residencySeconds += Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
-            }
-        }
+        syncResidency(records)
         let command = try self.command("whole-decode-preencoded-experts")
         command.useResidencySet(residency)
         try gathered.encodeResidentLookup(
@@ -442,18 +482,7 @@ public final class WholeExecutionSchedule {
         epoch: UInt32, grids: MTLBuffer, offset: Int
     ) throws -> Bool {
         guard let residency else { return false }
-        if residencyGeneration != records.generation {
-            let began = DispatchTime.now().uptimeNanoseconds
-            residency.removeAllAllocations()
-            residency.addAllocations(records.buffers)
-            residency.commit()
-            residency.requestResidency()
-            residencyGeneration = records.generation
-            record {
-                $0.residencyRebuilds += 1
-                $0.residencySeconds += Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
-            }
-        }
+        syncResidency(records)
         command.useResidencySet(residency)
         try gathered.encodeResidentLookup(
             command, pairs: s[.routerPairs], table: table, layer: layer, epoch: epoch,
@@ -580,5 +609,31 @@ public final class WholeExecutionSchedule {
     }
     func flagged(_ workspace: WholeExecutionWorkspace, _ slots: [WholeExecutionWorkspace.Slot]) -> Bool {
         slots.contains { workspace[$0].contents().load(as: UInt32.self) != 0 }
+    }
+}
+
+/// One residency-set build on a global queue; the schedule reads `seconds` and touches the set again only after `done`.
+private final class ResidencyBuild: @unchecked Sendable {
+    let generation: UInt64
+    let done = DispatchGroup()
+    private(set) var seconds = 0.0
+    private let set: MTLResidencySet, buffers: [MTLBuffer]
+    init(_ set: MTLResidencySet, _ records: (generation: UInt64, buffers: [MTLBuffer])) {
+        generation = records.generation
+        self.set = set
+        buffers = records.buffers
+        done.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let began = DispatchTime.now().uptimeNanoseconds
+            Self.rebuild(self.set, self.buffers)
+            seconds = Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
+            done.leave()
+        }
+    }
+    static func rebuild(_ set: MTLResidencySet, _ buffers: [MTLBuffer]) {
+        set.removeAllAllocations()
+        set.addAllocations(buffers)
+        set.commit()
+        set.requestResidency()
     }
 }

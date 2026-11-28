@@ -325,17 +325,6 @@ package final class ExpertReadReplica: @unchecked Sendable {
         }
     }
 
-    /// Runs `body` (a write into the primary's own destination) only while the record is still the primary's: no read
-    /// has published it and the race is not cancelled. Under the lock a replica's win is published under, so a win and
-    /// such a write never overlap; false (nothing ran) once the primary lost the record.
-    package func whileOwned(_ body: () -> Void) -> Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        guard !cancelled, published == nil else { return false }
-        body()
-        return true
-    }
-
     package func markSpeculative() {
         condition.lock()
         speculative = true

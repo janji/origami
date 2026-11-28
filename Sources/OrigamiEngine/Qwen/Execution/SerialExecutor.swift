@@ -130,8 +130,6 @@ public final class SerialExecutor {
     public var packedSourceAvailable: Bool { weights.store.packedAvailable }
     /// The expert cache's counters, from any thread (status pages).
     public var expertCacheSnapshot: ExpertCache.Snapshot? { expertExecution?.cacheSnapshot }
-    /// Split-read counters (`SplitReads`); any thread.
-    package var splitReads: SplitReadCounters? { expertExecution?.splitReads }
     /// Coarse serving-thread counters; callers may take two request-boundary snapshots.
     public var prefillSchedulingSnapshot: ExpertExecution.PrefillSchedulingSnapshot? { expertExecution?.prefillSchedulingSnapshot }
     /// Full existing counters, including source bytes and slab-preparation time.
@@ -545,10 +543,18 @@ public final class SerialExecutor {
             else {
                 throw EngineError("Prospective conversation phase requires the complete whole schedule")
             }
+            // The arena's loan is only what the host has free now, by the governor's growth rule (automatic: above the
+            // floor and its slack; explicit: while macOS reports no pressure, as `ExpertCache.prepareSlabs` grows).
+            let free =
+                ledger.usesAvailableMemoryFloor
+                ? MemoryGovernorPolicy.fit(
+                    reserved: 0, available: availableMemoryBytes(), floor: ledger.availableFloorBytes,
+                    slack: MemoryGovernorPolicy.growthSlack)
+                : MemoryPressureLevel.current()?.isElevated == true ? 0 : UInt64.max
             bytes = try Self.promptCacheBytes(
                 context: contextLimit, fileBacked: fileBackedContext, input: count, residentBytes: residentBudget,
                 experts: expertExecution.configuration, usable: ledger.usableBytes, additionalOwners: diagnosticBudget,
-                heldArenaBytes: held)
+                heldArenaBytes: held, freeBytes: free)
         }
         try autoreleasepool { try expertExecution?.preparePrefillPhase(cacheBytes: bytes) }
         // A slab still retained by a GPU owner keeps its charge a moment longer: pages past the hold then take the room
@@ -568,10 +574,11 @@ public final class SerialExecutor {
     /// The expert cache while a prompt of `input` new rows (after any restored prefix) is read. Fewer than 256 keep the
     /// hot decode capacity. Longer ones are charged their real rows in whole 256-row tiles, up to one 8,192-row scope, and
     /// keep the plan's prefill cache plus what their scope leaves of the 8,192-row one, plus the key/value arena past
-    /// `heldArenaBytes` (what this conversation holds and the request can add); all under the current budget.
+    /// `heldArenaBytes` (what this conversation holds and the request can add) up to `freeBytes` (what the host has
+    /// free past the governor's floor and slack; nil lends none); all under the current budget.
     package static func promptCacheBytes(
         context: Int, fileBacked: Bool?, input: Int, residentBytes: UInt64, experts: ExpertExecutionConfiguration,
-        usable: UInt64, additionalOwners: UInt64 = 0, heldArenaBytes: UInt64? = nil
+        usable: UInt64, additionalOwners: UInt64 = 0, heldArenaBytes: UInt64? = nil, freeBytes: UInt64? = nil
     ) throws -> UInt64 {
         let rows = input < 256 ? input : min(8192, (input + 255) / 256 * 256)
         var ceiling: UInt64?
@@ -580,10 +587,13 @@ public final class SerialExecutor {
             let longest = try geometry.maximumFixedBytes(input: 8192, residentBytes: 0)
             let this = try geometry.maximumFixedBytes(input: rows, residentBytes: 0)
             let slab = UInt64(experts.slotsPerSlab * PackStore.expertBytes)
-            // The plan's prefill cache counts the whole arena; the key/value room this request cannot reach is lent too.
+            // The plan's prefill cache counts the whole arena; the key/value room this request cannot reach is lent too,
+            // but no more than the host has free (the old over-count was the margin that kept prompt reads out of pressure).
+            let scope = longest > this ? longest - this : 0
             let lent = geometry.arenaBytes - min(heldArenaBytes ?? geometry.arenaBytes, geometry.arenaBytes)
             ceiling = min(
-                experts.cacheBytes, experts.prefillCacheBytes + ((longest > this ? longest - this : 0) + lent) / slab * slab)
+                experts.cacheBytes, experts.prefillCacheBytes + (scope + lent) / slab * slab,
+                experts.prefillCacheBytes + scope / slab * slab + min(freeBytes ?? 0, lent) / slab * slab)
         }
         return try ConversationPhaseBudget.expertBytes(
             context: context, fileBacked: fileBacked, input: rows, residentBytes: residentBytes, experts: experts,
@@ -639,6 +649,10 @@ public final class SerialExecutor {
         }
         let wireFallbacks = expertExecution?.decodeSlabPreparationReceipt?.wireFallbacks ?? 0
         try autoreleasepool { try expertExecution?.prepareDecodeSlabs(shouldContinue: shouldContinue) }
+        // The decode cache is in its decode shape now: make it resident off the reply's token path (pre-encoded layers only).
+        if let expertExecution, state.pageArena?.fileStore == nil {
+            wholeSchedule?.prepareDecodeResidency(expertExecution.recordBuffers())
+        }
         if let total = expertExecution?.decodeSlabPreparationReceipt?.wireFallbacks, total > wireFallbacks {
             FileHandle.standardError.write(
                 Data(
@@ -1607,9 +1621,11 @@ extension SerialExecutor {
         // Pre-encoded layers (`decode_preencoded_layers`): from layer 2 on, each layer's experts, reduce and mix are queued behind its
         // attention before its routing is known. The host waits for the router signal, fills the records and signals,
         // and queues the next layer while the GPU runs this one. Slabs stop growing while such commands are queued.
-        // A file-backed context (256K) joins its attention's selection on the host, so it keeps the joined path.
+        // A file-backed context (256K) joins its attention's selection on the host, so it keeps the joined path, as does a
+        // token that starts while the phase change's residency set is still being built.
         let preencode =
             schedule.preencoded && state.pageArena?.fileStore == nil && earlyDemand != nil && delayPolicy == nil
+            && !schedule.residencyBuilding
         var growthHeld = false
         var armedEpoch: [UInt32] = [0, 0]
         var routerSignal: (event: MTLSharedEvent, value: UInt64)?

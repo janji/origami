@@ -20,7 +20,10 @@ typedef ssize_t (*origami_read_fn)(int, void *, size_t, off_t, void *);
 
 // Reads exactly `length` bytes at `offset` in chunks of at most INT_MAX, retrying EINTR; EOF or a short
 // read is EIO, so an incomplete record is never published. Errors are returned explicitly, never inferred
-// from errno after successful I/O.
+// from errno after successful I/O. A chunk whose buffer or offset is not 4 KiB-aligned is at most 1 MiB, so an
+// uncached (F_NOCACHE) read leaves no pages in the file cache.
+#define ORIGAMI_UNALIGNED_PIECE_ALIGN 4096
+#define ORIGAMI_UNALIGNED_READ_PIECE (1u << 20)
 origami_read_result origami_pread_exact(int fd, void *buffer, size_t length, int64_t offset);
 // Injectable reader for deterministic short-read, EOF and EINTR fault tests.
 origami_read_result origami_pread_exact_with(int fd, void *buffer, size_t length,

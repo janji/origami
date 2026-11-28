@@ -7,19 +7,15 @@ and the GPU are not used. The CLI's host safety checks stay enabled but read a f
 scaled-down Mac (8 GB, no swapping, normal pressure; ORIGAMI_TUNING_HOST), with the
 fixture's memory budget scaled to it: the flow is the same on a small CI runner that
 swaps as on a large Mac. Their policy is covered separately by the Swift policy checks.
-Then `origami tune` itself (as the dashboard runs it, --review=true) against a fixture that streams its replies, each
-ending once (a minute of the limit lasts `minute_seconds`): no candidate faster (a result, "the defaults are fastest"),
-a winner, the default limit grown to fit, an owner's limit kept with fewer candidates, the limit reached mid-run after
-a slowdown, an app's request and a server restart; each stopped run keeps its rounds and the next run continues them.
+Checked: `origami tune --tradeoffs` (the quality levels' speeds) and its refusals; the memory search has its own
+checks (Tests/tune-memory-checks.py).
 """
-import time
 import datetime
 import http.server
 import json
 import math
 import os
 import pathlib
-import socket
 import subprocess
 import sys
 import tempfile
@@ -69,8 +65,7 @@ class Fixture:
         if self.scenario not in ("legacy_recent", "legacy_between_samples"):
             requests["completed"] = self.completed
         return {"status": "ready", "queue": {"busy": False, "queued": 0}, "quality_levels": list(LEVELS),
-                "tuning": {"key": self.key, "identity": {"model": "fixture-model"},
-                           "knobs": {}, "state": "none"},
+                "tuning": {"key": self.key, "identity": {"model": "fixture-model"}},
                 "requests": requests,
                 "memory": {"budget_bytes": self.budget, "cap_bytes": 5 * GIB,
                            "target_bytes": 5 * GIB},
@@ -132,9 +127,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         fixture = self.server.fixture
-        if getattr(fixture, "down_until", 0) > time.monotonic():
-            self.close_connection = True  # restarting: no answer at all
-            return
         if self.path == "/health":
             self.reply({"status": "ready"})
         elif self.path == "/v1/dashboard":
@@ -154,9 +146,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply({"error": {"message": "Mutations are forbidden in the fixture"}}, status=405)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if hasattr(fixture, "chat"):
-            fixture.chat(self, body)
-            return
         completion_tokens = fixture.finish_request(body)
         events = [{"choices": [{"delta": {"content": "token "}}]} for _ in range(completion_tokens)]
         events.append({"choices": [], "usage": {"prompt_tokens": 25,
@@ -269,184 +258,6 @@ def run_scenario(binary, scenario):
         print("ok   " + scenario, flush=True)
 
 
-KNOBS = {name: {"value": True, "source": "default", "default": True} for name in ("gpu_keepalive", "family_spin")}
-CANDIDATES = ({"gpu_keepalive": False}, {"family_spin": False})
-
-
-class TuneFixture(Fixture):
-    """A model with two timing switches. Each reply reports its own first-token and writing seconds (`check_timing`,
-    read with `reported_timing`), so every decision is fixed by the check: `rate` tokens a second, twice that for
-    `winner`. Only the time limit runs on the clock: each reply takes `pause` seconds, more after `slow_after` candidate
-    requests; at `inject_at` candidate requests an app's request completes, or the server restarts."""
-
-    def __init__(self, root, scenario, winner=None, slow_after=None, inject_at=None, rate=100.0, short=None):
-        super().__init__(root, scenario)
-        self.winner, self.slow_after, self.inject_at, self.rate = winner, slow_after, inject_at, rate
-        self.short = short  # the candidate whose replies are one token long (each of its rounds is disrupted)
-        self.pause, self.candidate_requests, self.down_until = 0.05, 0, 0
-
-    def configure(self, port):
-        self.config_values["port"] = port
-        self.config.write_text(json.dumps(self.config_values))
-        self.config.chmod(0o600)
-        (self.data / "models.json").write_text('{"models": []}\n')
-
-    def state(self):
-        state = super().state()
-        state["tuning"]["knobs"] = KNOBS
-        return state
-
-    def chat(self, handler, body):
-        if self.down_until > time.monotonic():
-            handler.close_connection = True
-            return
-        arm = body.get("origami_tune") or {}
-        if arm:
-            self.candidate_requests += 1
-            if self.slow_after and self.candidate_requests > self.slow_after:
-                self.pause = 1.5  # the rest can never fit the longest limit
-            if self.inject_at == self.candidate_requests:
-                if self.scenario == "restart":
-                    self.down_until = time.monotonic() + 1.5
-                    self.completed = 0  # a new process counts from zero
-                    handler.close_connection = True
-                    return
-                self.append_recent("fast")  # an app's request completed meanwhile
-        self.requests.append(body)
-        tokens = 1 if self.short is not None and arm == self.short else body.get("max_tokens", 1)
-        self.append_recent(body.get("origami_mode"), tokens)
-        rate = self.rate * (2 if self.winner is not None and arm == self.winner else 1)
-        prompt = len(body["messages"][0]["content"]) // 4
-        timing = {"ttft": 0.1, "decode": (tokens - 1) / rate}
-        usage = {"choices": [], "usage": {"prompt_tokens": prompt, "prompt_tokens_details": {"cached_tokens": 0},
-                                          "completion_tokens": tokens, "check_timing": timing}}
-        payload = "".join("data: " + json.dumps(event) + "\n\n" for event in
-                          ({"choices": [{"delta": {"content": "token " * tokens}}]}, usage)) + "data: [DONE]\n\n"
-        time.sleep(self.pause)
-        handler.reply(payload.encode(), "text/event-stream")
-
-
-def run_tune(binary, root, scenario, minute, arguments=(), **options):
-    fixture = TuneFixture(root, scenario, **options)
-    server = Server(("127.0.0.1", 0), Handler)
-    server.fixture = fixture
-    fixture.configure(server.server_address[1])
-    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
-    thread.start()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("ORIGAMI_")}
-    env["ORIGAMI_TUNING_HOST"] = json.dumps({**HOST, "minute_seconds": minute, "reported_timing": True})
-    env["ORIGAMI_JOB"] = "1"  # as the dashboard runs it
-    try:
-        result = subprocess.run([binary, "tune", "--config", str(fixture.config), "--review=true", *arguments],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-    prefix = scenario + ": "
-    output = result.stdout
-    assert result.returncode == 0, prefix + output
-    assert not fixture.unexpected, prefix + repr(fixture.unexpected)
-    outcomes = [json.loads(line[len(MARKER):]) for line in output.splitlines() if line.startswith(MARKER)]
-    assert len(outcomes) == 1, prefix + "expected one explicit outcome marker\n" + output
-    outcome = outcomes[0]
-    # Every ending names what was measured, what was kept and what to do next.
-    assert "Kept:" in outcome.get("reason", "") and "Next:" in outcome["reason"], prefix + "a bare ending\n" + output
-    entries = json.loads((fixture.data / "tuning.json").read_text())["entries"] if (fixture.data / "tuning.json").exists() else {}
-    return output, outcome, fixture, entries
-
-
-def check_tune(binary):
-    count = 0
-
-    def ok(name):
-        nonlocal count
-        count += 1
-        print("ok   tune " + name, flush=True)
-
-    key, partial = "fixture-model@8192", "partial@fixture-model@8192"
-    with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-        # Nothing faster on a default limit too short for this model: the limit grows, and "the defaults are fastest" is
-        # the result, kept for the page.
-        output, outcome, _, entries = run_tune(binary, pathlib.Path(temporary), "defaults_fastest", 1.2)
-        assert outcome["outcome"] == "already_fastest" and "the defaults are fastest" in outcome["reason"], output
-        assert "the default limit grows to" in output, output
-        assert entries[key]["outcome"] == "already_fastest" and entries[key]["values"] == {} and partial not in entries, entries
-        ok("no winner: success, the defaults are fastest, recorded")
-        ok("the default limit grows to what the measurements need")
-    with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-        output, outcome, _, entries = run_tune(binary, pathlib.Path(temporary), "winner", 6, winner=CANDIDATES[0])
-        proposal = json.loads((pathlib.Path(temporary) / "data" / "tuning-proposal.json").read_text())
-        assert outcome["outcome"] == "faster" and "GPU keep-alive off" in outcome["reason"], output
-        assert proposal["entry"]["values"] == CANDIDATES[0] and key not in entries, (proposal, entries)
-        ok("a winner waits for review")
-
-    def resumed(root, first, kept):
-        """The next run continues from the kept rounds, measuring none of them again, and decides."""
-        output, outcome, fixture, entries = run_tune(binary, root, "resume", 6)
-        assert "Kept measurements dropped" not in output, first + ": " + output
-        assert "continuing: %d of 18 measurements kept from" % kept in output, first + ": " + output
-        assert outcome["outcome"] == "already_fastest" and partial not in entries, first + ": " + output
-        measured = [body.get("origami_tune") for body in fixture.requests if body.get("origami_tune")]
-        rounds = len(measured) // 3
-        assert rounds == (18 - kept) // 3, first + ": measured %d rounds again\n%s" % (rounds, output)
-
-    with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-        root = pathlib.Path(temporary)
-        output, outcome, fixture, entries = run_tune(binary, root, "owner_limit", 2, ["--minutes=3"])
-        assert "your 3-minute limit fits 1 of 2 candidates; left out: spinning off" in output, output
-        assert outcome["outcome"] == "incomplete" and "run tuning again" in outcome["reason"], output
-        assert not any(body.get("origami_tune") == CANDIDATES[1] for body in fixture.requests), "a left-out candidate ran"
-        kept = sum(len(arm["rounds"]) * 3 for arm in entries[partial]["arms"].values())
-        assert kept >= 3 and key not in entries, entries
-        resumed(root, "owner_limit", kept)
-        ok("an owner's limit is kept, with fewer candidates, and the next run continues")
-    for scenario, options, expected in (("slowdown", {"slow_after": 3}, "incomplete"),
-                                        ("app_request", {"inject_at": 4}, "aborted"),
-                                        ("restart", {"inject_at": 4}, "aborted")):
-        with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-            root = pathlib.Path(temporary)
-            output, outcome, _, entries = run_tune(binary, root, scenario, 1.2 if scenario == "slowdown" else 5, **options)
-            assert outcome["outcome"] == expected, scenario + ": " + output
-            kept = sum(len(arm["rounds"]) * 3 for arm in entries[partial]["arms"].values())
-            reason = outcome["reason"]
-            assert kept >= 3 and ("Kept: %d measurements" % kept in reason or "Kept: those measurements" in reason), scenario + ": " + output
-            if scenario == "slowdown":
-                assert "Time limit: tested" in outcome["reason"] and "Time limit reached" not in output, output
-            resumed(root, scenario, kept)
-            ok({"slowdown": "the limit reached mid-run decides from what it has, keeps it, and the next run continues",
-                "app_request": "an app's request stops it, keeping its rounds; the next run continues",
-                "restart": "a server restart stops it, keeping its rounds; the next run continues"}[scenario])
-    # Every candidate decided by kept rounds, with a winner: the default limit grows for its confirmation alone.
-    with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-        root = pathlib.Path(temporary)
-        # Stopped by an app's request at the confirmation's first request (after 2 candidates x 3 rounds x 3 requests).
-        output, outcome, _, entries = run_tune(binary, root, "confirm_stop", 6, winner=CANDIDATES[0], inject_at=19)
-        kept = sum(len(arm["rounds"]) * 3 for arm in entries[partial]["arms"].values())
-        assert outcome["outcome"] == "aborted" and kept == 18, output
-        output, outcome, _, _ = run_tune(binary, root, "confirm_resume", 0.3, winner=CANDIDATES[0])
-        assert "continuing: 18 of 18" in output and outcome["outcome"] == "faster" and "the default limit grows to" in output, output
-        ok("a run continued with every candidate decided grows the default limit to confirm the winner")
-    # A candidate left after two disrupted rounds: the ending says the disruption, not the time limit.
-    with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-        output, outcome, _, _ = run_tune(binary, pathlib.Path(temporary), "disrupted", 6, ["--minutes=6"], short=CANDIDATES[0])
-        reason = outcome["reason"]
-        assert "Moving on without applying it" in output and outcome["outcome"] == "incomplete", output
-        assert "Discarded comparisons: The reply was too short" in reason and "Time limit" not in reason and "longer limit" not in reason, output
-        ok("a candidate left after disrupted rounds is said as such, not as the time limit")
-    # Kept rounds from a Mac that has since drifted (its baseline more than 3% off) are dropped, not mixed in.
-    with tempfile.TemporaryDirectory(prefix="origami-tune-flow-") as temporary:
-        root = pathlib.Path(temporary)
-        output, outcome, _, entries = run_tune(binary, root, "app_request", 5, inject_at=4)
-        assert outcome["outcome"] == "aborted" and partial in entries, output
-        output, outcome, fixture, entries = run_tune(binary, root, "drifted", 4, rate=110.0)
-        assert "Kept measurements dropped: the baseline now writes 10% faster" in output, output
-        measured = [body for body in fixture.requests if body.get("origami_tune")]
-        assert outcome["outcome"] == "already_fastest" and len(measured) == 18 and partial not in entries, output
-        ok("kept rounds from a Mac that drifted are dropped and measured again")
-    return count
-
-
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: tuning-flow-checks.py /path/to/origami")
@@ -456,8 +267,7 @@ def main():
     for scenario in scenarios:
         run_scenario(binary, scenario)
     check_tradeoff_refusals(binary)
-    tune = check_tune(binary)
-    print(f"{len(scenarios)} model-free tuning flow scenarios and {tune} tune endings passed")
+    print(f"{len(scenarios)} model-free tuning flow scenarios passed")
 
 
 if __name__ == "__main__":

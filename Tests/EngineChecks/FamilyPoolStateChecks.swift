@@ -147,9 +147,9 @@ func familyWorkingSetPhases() throws {
             runner.fitExperts()
             let full = runner.workingBytes
             let initialMaximum = runner.poolMaximum
-            try require(full > FamilyRunner.baseWorkingBytes && runner.promptSlices > 1, "fixture has no extra slices")
+            try require(full > 0 && runner.promptSlices > 1, "fixture has no extra slices")
             func expectedMaximum(working: UInt64, addedState: UInt64 = 0) -> UInt64 {
-                initialMaximum + (mode == 1 ? 0 : full - working) - addedState
+                (mode == 1 ? initialMaximum : initialMaximum + full - working) - addedState
             }
             func checkWorkingOwner(_ stage: String) throws {
                 try require(
@@ -165,9 +165,8 @@ func familyWorkingSetPhases() throws {
             _ = try model.forward([1, 2, 3])
             try checkWorkingOwner("prefill")
             try require(
-                runner.workingAllocatedBytes > 0 && runner.workingBytes < full
-                    && runner.poolMaximum == expectedMaximum(working: runner.workingBytes),
-                "prefill retained the startup allowance or changed the explicit expert cap")
+                runner.workingAllocatedBytes > 0 && runner.poolMaximum == expectedMaximum(working: runner.workingBytes),
+                "prefill changed the explicit expert cap")
             let initialSlots = runner.experts.slotCount
             runner.beginDecode()
             try checkWorkingOwner("decode handoff")
@@ -230,7 +229,7 @@ func familyWorkingSetPhases() throws {
             _ = try model.forward([5, 6])
             try checkWorkingOwner("direct prefill")
             try require(
-                runner.workingBytes > 0 && runner.workingBytes < full
+                runner.workingBytes > 0
                     && runner.poolMaximum == expectedMaximum(working: runner.workingBytes), "direct prefill bypassed actual admission")
             // State growth and working-set loans compose without either being counted twice.
             runner.beginDecode()
@@ -271,7 +270,7 @@ func familyStateResizeAdmission() throws {
         let path = try poolModelFixture(family, in: folder)
         let deniedWeights = try FamilyWeights(gguf: GGUFSource(path), device: device)
         let deniedLedger = try MemoryLedger(
-            ceiling: FamilyRunner.baseWorkingBytes, transientMargin: 1, availableFloor: 1,
+            ceiling: 1 << 16, transientMargin: 1, availableFloor: 1,
             budgetMode: .explicit)
         do {
             _ = try makeFamilyModel(

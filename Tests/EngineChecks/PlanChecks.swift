@@ -179,6 +179,8 @@ func planPromptCacheFollowsRows() throws {
 /// request can add (`heldArenaBytes`), not the whole context's. At 128K, a 28K conversation reading 1.5K new tokens with
 /// 2,048 reply tokens keeps about 2.5 GB more cache; a conversation that fills the context keeps the old limit; and across
 /// every conversation size and reply length the owners stay within the budget, the request's pages within the hold.
+/// The loan is only what the host has free past the governor's floor and slack (`freeBytes`): ample free memory gives
+/// the full loan, none gives the old limit, and between them the limit rises with it and never lends more than it.
 func planPromptCacheLendsUnusedArena() throws {
     func require(_ value: Bool, _ message: @autoclosure () -> String) throws { if !value { throw EngineError(message()) } }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("origami-prompt-lend-\(UUID().uuidString)")
@@ -200,10 +202,10 @@ func planPromptCacheLendsUnusedArena() throws {
         experts.replicaOwnerBytes + experts.readAheadOwnerBytes + experts.layerCommandOwnerBytes + experts.reuseOwnerBytes
         + experts.decodeSlabOwnerBytes
     let perToken = geometry.pooledBytesPerToken
-    func cache(_ input: Int, held: UInt64) throws -> UInt64 {
+    func cache(_ input: Int, held: UInt64, free: UInt64? = .max) throws -> UInt64 {
         try SerialExecutor.promptCacheBytes(
             context: context, fileBacked: nil, input: input, residentBytes: resident, experts: experts, usable: usable,
-            heldArenaBytes: held)
+            heldArenaBytes: held, freeBytes: free)
     }
     // The limit before C1': the same room, under a ceiling that counted the whole arena.
     func before(_ input: Int, held: UInt64) throws -> UInt64 {
@@ -222,6 +224,23 @@ func planPromptCacheLendsUnusedArena() throws {
     try require(
         new - old == (geometry.arenaBytes - held) / slab * slab && gain >= 1.7e9 && gain <= 2.6e9,
         String(format: "28K + 1.5K + 2,048 at 128K: %.2f GB before, %.2f GB after", Double(old) / 1e9, Double(new) / 1e9))
+    // Free memory short: at the floor (none past it) or unknown, the old limit; between, monotone, never past what is free.
+    try require(
+        (try cache(input, held: held, free: 0)) == old && (try cache(input, held: held, free: nil)) == old
+            && (try cache(input, held: held, free: geometry.arenaBytes)) == new,
+        "free memory at the floor (or unknown) still lent, or ample free memory lent less than the whole loan")
+    var last = old
+    for free in stride(from: UInt64(0), through: geometry.arenaBytes, by: 64 << 20) {
+        let bytes = try cache(input, held: held, free: free)
+        try require(
+            bytes >= last && bytes - old <= free && bytes <= new
+                && (try geometry.maximumFixedBytes(input: 1536, residentBytes: resident, heldArenaBytes: held)) + owners + bytes
+                    <= usable,
+            String(
+                format: "%.2f GB free: %.2f GB (before %.2f, loan %.2f)", Double(free) / 1e9, Double(bytes) / 1e9,
+                Double(old) / 1e9, Double(new) / 1e9))
+        last = bytes
+    }
     let full = geometry.heldArenaBytes(live: UInt64(context - input) * perToken, growth: input + reply)
     try require(
         full == geometry.arenaBytes && (try cache(input, held: full)) == before(input, held: full)

@@ -126,6 +126,49 @@ func invalidReadsDoNotInvokeIO() {
     expect(state.calls == 0)
 }
 
+/// An uncached read whose buffer or offset is not 4 KiB-aligned (an expert record into a slot at `index * recordBytes`)
+/// is issued in pieces of at most 1 MiB, so it leaves none of the file's pages in the file cache; an aligned one stays whole.
+func unalignedUncachedReadsLeaveNoFileCache() throws {
+    let piece = Int(ORIGAMI_UNALIGNED_READ_PIECE)
+    let length = 1_737_594
+    var sizes: [Int] = []
+    let recorder: origami_read_fn = { _, _, count, _, context in
+        context!.assumingMemoryBound(to: [Int].self).pointee.append(count)
+        return count
+    }
+    let base = UnsafeMutableRawPointer.allocate(byteCount: length + 4 * piece, alignment: 16384)
+    defer { base.deallocate() }
+    for (shift, offset, whole) in [(16, Int64(0), false), (0, Int64(100), false), (0, Int64(16384), true)] {
+        sizes = []
+        let result = withUnsafeMutablePointer(to: &sizes) { origami_pread_exact_with(-1, base + shift, length, offset, recorder, $0) }
+        expect(result.error_code == 0 && result.bytes_read == length)
+        expect(whole ? sizes == [length] : sizes.reduce(0, +) == length && sizes.allSatisfy { $0 <= piece })
+    }
+    // The same on a real file: written uncached, read through `ExactFile` into an unaligned buffer, none of it cached.
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let fileBytes = 4 * piece
+    let fd = open(url.path, O_RDWR | O_CREAT | O_TRUNC, 0o600)
+    guard fd >= 0 else { throw EngineError("cannot create \(url.path)") }
+    defer { close(fd) }
+    _ = fcntl(fd, F_NOCACHE, 1)
+    for i in 0..<fileBytes { base.storeBytes(of: UInt8(truncatingIfNeeded: i &* 31), toByteOffset: i, as: UInt8.self) }
+    guard pwrite(fd, base, fileBytes, 0) == fileBytes, fsync(fd) == 0 else { throw EngineError("cannot write \(url.path)") }
+    func residentPages() -> Int {
+        guard let map = mmap(nil, fileBytes, PROT_READ, MAP_SHARED, fd, 0), map != MAP_FAILED else { return -1 }
+        defer { munmap(map, fileBytes) }
+        var flags = [CChar](repeating: 0, count: fileBytes / Int(getpagesize()))
+        guard mincore(map, fileBytes, &flags) == 0 else { return -1 }
+        return flags.filter { $0 & 1 != 0 }.count
+    }
+    let before = residentPages()
+    let file = try ExactFile(url: url)
+    let target = UnsafeMutableRawBufferPointer(start: base + 16, count: length)
+    try file.read(offset: 16384, into: target)
+    expect((0..<length).allSatisfy { target[$0] == UInt8(truncatingIfNeeded: (16384 + $0) &* 31) })
+    expect(before == 0 && residentPages() == 0)
+}
+
 func memoryCeilingReservationsAndReleaseAreExact() throws {
     let ledger = try MemoryLedger(ceiling: 1_000, transientMargin: 100)
     let first = try ledger.reserve(bytes: 600, category: "shared")
@@ -503,6 +546,7 @@ let tests: [(String, () throws -> Void)] =
         ("family_pool_allocation", familyPoolAllocation),
         ("family_adaptive_expert_pools", familyAdaptiveExpertPools),
         ("whole_schedule_joined_command_ownership", wholeScheduleCommandsJoinBeforeRetirement),
+        ("whole_schedule_residency_built_at_phase_change", wholeScheduleResidencyBuiltAtPhaseChange),
         ("whole_token_plan_reader_admission", WholeTokenPlanSelfChecks.readerAdmission),
         ("whole_token_plan_construction_boundaries", WholeTokenPlanSelfChecks.constructionBoundaries),
         ("whole_token_plan_convolution_tail_bytes", WholeTokenPlanSelfChecks.convolutionTailBytes),
@@ -588,6 +632,7 @@ let tests: [(String, () throws -> Void)] =
         ("short_reads_eintr", shortReadAndEINTRRetryWithoutLosingOffset),
         ("partial_read_failure", partialReadNeverSucceeds),
         ("invalid_reads", invalidReadsDoNotInvokeIO),
+        ("unaligned_uncached_reads_leave_no_file_cache", unalignedUncachedReadsLeaveNoFileCache),
         ("memory_reservations", memoryCeilingReservationsAndReleaseAreExact),
         ("memory_owners_report", memoryOwnersReportSumsToReserved),
         ("phase_workspace_admission_failure_reuse", phaseWorkspacePreservesAdmissionAcrossFailureAndReuse),
@@ -670,22 +715,6 @@ let tests: [(String, () throws -> Void)] =
         ("drive_speed_saved_reused_stale", driveSpeedSavedReusedStale),
         ("drive_speed_neutral_default", driveSpeedNeutralDefaultAndMeasuredChoice),
         ("drive_slowdown_shifts_reads", driveSlowdownShiftsReads),
-        ("split_read_planner", splitReadPlanner),
-        ("split_read_planner_live", splitReadPlannerLive),
-        ("split_read_qwen_concurrent", splitReadQwenConcurrent),
-        ("split_read_qwen_routed", splitReadQwenRouted),
-        ("split_read_family_routed", splitReadFamilyRouted),
-        ("split_read_execution", splitReadExecution),
-        ("split_read_family_fetch", splitReadFamilyFetch),
-        ("split_read_qwen_loader", splitReadQwenLoader),
-        ("split_read_trains_estimates", splitReadTrainsEstimates),
-        ("split_read_family_hedge_wins", splitReadFamilyHedgeWins),
-        ("split_read_pack_store", splitReadPackStore),
-        ("split_read_swapped_key", splitReadSwappedKey),
-        ("split_read_qwen_places", splitReadQwenPlaces),
-        ("split_read_family_places", splitReadFamilyPlaces),
-        ("split_read_queued_part_cancel", splitReadQueuedPartCancel),
-        ("split_read_first_part_in_place", splitReadFirstPartInPlace),
         ("expert_source_runtime_legacy_config", expertSourceRuntimeConfigurationAndLegacyDecoding),
         ("expert_source_queued_bytes_ties", expertSourceQueuedBytesAndStableTiesChooseOneSource),
         ("expert_source_atomic_admission", expertSourceConcurrentSelectionAndAdmissionAreAtomic),
@@ -892,6 +921,7 @@ let tests: [(String, () throws -> Void)] =
         ("family_routing_partial_top_k", familyRoutingPartialTopK),
         ("family_reference_logits", familyReferenceLogits),
         ("converter_gguf", converterGGUF),
+        ("model_format_matrix", modelFormatMatrix),
         ("gguf_experts_match_reference", ggufExpertsMatchReference),
         ("gguf_expert_manifest_bounds", ggufExpertManifestBounds),
         ("gguf_experts_hot_copy_matches_gguf", ggufExpertsHotCopyMatchesGGUF),
@@ -1008,9 +1038,7 @@ let tests: [(String, () throws -> Void)] =
         ("memory_deficit_against_learned_target", memoryDeficitAgainstLearnedTarget),
         ("available_memory_counts_speculative_once", availableMemoryCountsSpeculativePagesOnce),
         ("available_memory_invalid_counters", availableMemoryRejectsInvalidCounters),
-        ("self_tuning_decision_rule", selfTuningDecisionRule),
-        ("self_tuning_time_plan", selfTuningTimePlan),
-        ("self_tuning_staleness_precedence", selfTuningStalenessAndPrecedence),
+        ("self_tuning_staleness", selfTuningStaleness),
         ("self_tuning_memory_calibration", selfTuningMemoryCalibration),
         ("self_tuning_memory_staleness", selfTuningMemoryStaleness),
         ("memory_budget_learned_from_history", memoryBudgetLearnedFromHistory),
@@ -1086,6 +1114,13 @@ if arguments.first == "--bench-resident-precision" {
 }
 if arguments.first == "--build-resident-precision" {
     do { try buildResidentPrecisionPack(Array(arguments.dropFirst())) } catch {
+        FileHandle.standardError.write(Data("\(error)\n".utf8))
+        exit(1)
+    }
+    exit(0)
+}
+if arguments.first == "--measure-conversion-error" {
+    do { try measureConversionError(Array(arguments.dropFirst())) } catch {
         FileHandle.standardError.write(Data("\(error)\n".utf8))
         exit(1)
     }

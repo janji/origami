@@ -5,6 +5,8 @@ Usage: python3 -B Tests/tune-memory-checks.py /path/to/origami
 The fixture answers status, reloads and replies as a loaded model would. Checked: a whole run reloads at each trial limit,
 then the saved settings, and stores its result (setting an unreadable tuning.json aside, never overwriting it); Ctrl-C
 (SIGTERM, the job's Cancel) and an app's request each stop it with the saved settings reloaded and nothing stored.
+After a finished run, one line advises a larger hot copy when the copy does not hold every expert and its drive has room
+(normal; not in lower, where it holds them all). Plain `origami tune` (normal) is the same search.
 A tune process killed outright cannot restore anything itself: the front's job hook does (Tests/tuning-job-checks.py).
 Below the planned limits: when the lowest is cut, the lowest level a cut set is tried next, even if the budget grew back (lower, grown_back, lower_none), at
 most three more and never under the model's least budget (lower_minimum), with a line naming what else holds memory; when
@@ -57,8 +59,12 @@ class Fixture:
         # A cut lowers the budget by SETTLE; in grown_back it has climbed back to the limit by the trial's end.
         budget = self.limit - SETTLE if cut and self.scenario != "grown_back" else self.limit or 4 << 30
         learned = {"minimum_bytes": self.first - MINIMUM_GAP if self.scenario == "lower_minimum" and self.first else 2 * GB}
+        # The hot copy holds 400 of 1000 experts with room on its drive (in "lower" every expert): the advice line or none.
+        hot = {"role": "hot", "state": "ready", "drive": "Fast", "bytes": 20 * GB, "free_bytes": 300 * GB, "reserve_bytes": 20 * GB,
+               "size_limit": "flat", "popularity": {"experts": 1000, "held_experts": 1000 if self.scenario == "lower" else 400}}
         return {"status": "ready", "queue": {"busy": False, "queued": 0},
-                "tuning": {"key": KEY, "identity": {"model": "fixture-model"}, "knobs": {}, "state": "none"},
+                "tuning": {"key": KEY, "identity": {"model": "fixture-model"}},
+                "experts_from": {"sources": [{"role": "all", "drive": "Model"}, hot]},
                 "requests": {"completed": self.completed}, "memory": {"budget_bytes": budget},
                 "memory_learned": learned, "memory_pressure_cuts": 1 if cut else 0,
                 "memory_pressure_cut_to": self.limit - SETTLE if cut else None, "expert_cache": {"bytes": 3 << 30}}
@@ -146,7 +152,9 @@ def run(binary, scenario):
         if scenario == "time_limit":
             env["ORIGAMI_TUNING_HOST"] = json.dumps({"minute_seconds": 1})  # the 3-minute limit lasts 3 s
         try:
-            fixture.process = subprocess.Popen([binary, "tune", "--memory", "--minutes=3", "--config", str(fixture.config)],
+            # Plain `origami tune` is the memory search: "normal" runs it without --memory.
+            fixture.process = subprocess.Popen([binary, "tune", *([] if scenario == "normal" else ["--memory"]), "--minutes=3",
+                                                "--config", str(fixture.config)],
                                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             output, _ = fixture.process.communicate(timeout=170)
         finally:
@@ -178,6 +186,8 @@ def run(binary, scenario):
             if scenario in ("lower", "grown_back"):
                 assert limits == [first, settle(first)], prefix + repr(limits) + "\n" + output
                 assert ("Chosen: " + size(settle(first))) in outcomes[0]["reason"], prefix + output
+                if scenario == "lower":
+                    assert "a larger hot copy" not in output, prefix + "advice for a hot copy holding every expert\n" + output
             elif scenario == "lower_none":
                 expected = [first]
                 for _ in range(3):
@@ -200,6 +210,8 @@ def run(binary, scenario):
             assert "hold the same experts in memory, so they add nothing" in outcomes[0]["reason"], prefix + output
             # Two limits with every expert in memory are enough: the higher ones are not loaded.
             assert len(limits) == 2 and "not tried: the lower limits hold every expert in memory" in output, prefix + output
+            advice = [line for line in output.splitlines() if "a larger hot copy would" in line]
+            assert len(advice) == 1 and advice[0].startswith("Hot copy: 20.0 GB on Fast does not hold every expert, and Fast has 280.0 GB more room"), prefix + output
             entries = json.loads(tuning.read_text())["entries"]
             assert "memory@" + KEY in entries and entries["memory@" + KEY]["trials"], prefix + "result not stored"
             aside = [p for p in fixture.data.iterdir() if p.name.startswith("tuning.json.unreadable-")]

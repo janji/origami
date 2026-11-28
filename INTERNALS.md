@@ -165,7 +165,7 @@ read path: `Qwen/Streaming` (slabs, packs, the hot copy and replicas; section 6;
   - a non-exact prototype: `FamilyResidentPack` (dense weights requantized, the model's Q8_0 to Q4_K;
     `ORIGAMI_FAMILY_RESIDENT_Q4_PACK=<folder>`, logged as experimental). The research port of the DSpark draft model
     for DeepSeek-V4.1 was deleted on 2026-11-18 (drafting is parked);
-  - experiments reached only through `origami_tune` request overrides (`TuneOverrides`, for this Mac's own tuner):
+  - experiments reached only through `origami_tune` request overrides (`TuneOverrides`, for this Mac's own tools):
     `DelayedExpertContribution` (`delayed_experts`, approximate, Qwen), `QwenVerifierCostProbe` (`qwen_pair_probe`, a local diagnostic).
 - MTP support: `QwenPairSchedule` (refuses a pair step the cache cannot hold) and `PairResidencyBackoff` (how often
   the resident-only pair step is retried after a miss).
@@ -436,7 +436,7 @@ model's folder of `hot_copy_dir`, else of the data folder's store, and `Stores.p
 (`ModelSource.hotCopyRecordBytes`: header and the three parts, without the padding a cache slot adds up to the largest
 layer's record), read for a build from the GGUF (`PackStore.readHotCopyRecord`); `PackStore.readInternalExpert` reads
 it into the slot and zeroes the padding, the bytes `readGGUFExpert` leaves. The automatic size starts at 6,536 records
-of the average size. Split reads stay off (a GGUF record is read whole).
+of the average size.
 Checks: `gguf_experts_match_reference`, `gguf_expert_manifest_bounds`, `converter_gguf`,
 `gguf_queued_decode_matches_joined`, `gguf_experts_hot_copy_matches_gguf`.
 
@@ -801,7 +801,11 @@ replaced between runs).
 ### `ExactFile` and `CExactIO`
 
 `origami_pread_exact` loops `pread` in chunks of at most `INT_MAX` (Darwin's limit), retries `EINTR`, and treats EOF
-or a short read as `EIO`, so a partial record is never published. `ExactFile` keeps one descriptor (`O_CLOEXEC`,
+or a short read as `EIO`, so a partial record is never published. A chunk whose buffer or file offset is not 4 KiB-aligned
+is at most 1 MiB: Darwin serves such an `F_NOCACHE` read through the file cache and drops only its first 1 MiB after it,
+so a whole Qwen GGUF expert record (about 1.7 MB) read into a cache slot at `index * recordBytes` left the rest cached
+(GLM's and DeepSeek's slots are 16 KiB-aligned); measured, 768 KiB of every 1.75 MiB read, and nothing in 1 MiB pieces
+(`unaligned_uncached_reads_leave_no_file_cache`). Aligned reads stay whole (direct). `ExactFile` keeps one descriptor (`O_CLOEXEC`,
 optionally `F_NOCACHE`), its `FileIdentity` (device, inode, size, mtime, ctime) and the volume UUID; reads are
 bounds-checked against the size at open, and `validateIdentity` refuses a file replaced underneath. A model's own file
 is opened with its `ModelDrive` (below, "When a drive fails"), which may replace the descriptor in place. `clone(into:)` is
@@ -881,8 +885,9 @@ The slice count:
 - m = min(4, context / 2,048 rounded up, 1 + reserve / (2,048 × row bytes));
 - reserve = min(2.5 GB, memory / 32);
 - row bytes are the per-row working floats (GLM 4 (11h + e + 24), DeepSeek with Engram, top-k and candidate rows;
-  DeepSeek's Engram key/value is per 256-row chunk), counted in `workingBytes` (1.5 GB + (m - 1) slices) before the
-  expert pool is sized (GLM on 32 GB: m = 3, ~0.7 GB).
+  DeepSeek's Engram key/value is per 256-row chunk); a prompt call's working memory may reach 1.5 GB + (m - 1)
+  slices (GLM on 32 GB: m = 3, ~0.7 GB). At load only a one-row step's working memory is reserved (`makeExperts`), so
+  the expert pool starts that much larger; each call admits its actual scratch before allocating it.
 
 A prompt of more slices than m borrows the working memory for more (`planPrompt`, at the request's start): as many
 slices as the prompt has, while the extra working memory takes at most half of what the expert pool could hold with
@@ -2116,76 +2121,9 @@ adopts a race's entry after it was published but before it left the in-flight ta
 when none is left (the cache ticket still refuses a record evicted meanwhile;
 `expert_replica_late_adopter_repins`).
 
-**Split reads** (`Streaming/SplitReads.swift`, all three engines; opt-in with `ORIGAMI_SPLIT_READS=1`: they have gained
-nothing so far, 9.72 against 9.75 tok/s on one fast drive with lone decode misses and 8.68 against 8.89 with every
-demand read planned across two drives). Off, the engines still find a lone read's sources and count its wait
-(`lone_demand_waits`, `lone_demand_wait_seconds`): nothing is planned, staged or allocated. Qwen plans every demand
-read whose caller named no drive (prefill and decode); GLM and DeepSeek a decode fetch with one miss the copy holds.
-The sources are the record's live list: every hot copy place that can serve it now (`HotCopySet.sources`, a duplicate
-on a slower place included) plus the model's own files (Qwen: the checkpoint's spans, and the pack queue when a copy
-there holds it), one per physical disk (`SplitReads.onePerDisk` on `DriveSpeed.disk`, the fastest kept: two sources on
-one disk would each claim its whole bandwidth; a hot copy or a pack can sit on the model's drive). `SplitReads.plan`
-is a pure function of the record size and, per source: its live rate from that physical source's own completed reads,
-whole and part (a place or a pack copy: its lane's smoothed bytes over smoothed time, `ReadLane.measured`, once it has
-8 reads; the model's drive: its slow-read tally's current rate, `SlowDriveReads`; until measured, Qwen's static curve
-at one read, the families' planned rate and latency EWMA), that rate's age, its healthy rate (its own tally), how long
-until the work already on it is done (`busySeconds`: Qwen, the bytes its loader planned there and has not read
-(`SplitPlannedBytes`; parts and whole reads, added at plan time and given back when each part or read ends, a whole
-read the planner did not route counted on the source that reads it when that is known), at its rate; the families,
-the place's reads in flight and its share of the copies' queue, a record each, and the GGUF queue's bytes) and its
-wear. A rate older than 10 s (`SplitReads.freshSeconds`: a drive's state changes over tens of seconds) is measured
-again rather than trusted: planned at the healthy rate (else the last one), never excluded as stalled, never the
-first part unless every candidate is stale. The candidates are the sources not worn (`wear`: its files'
-`DriveReadHistory` says high or due, or the live `SlowDriveReads` share is high) and not stalled while fresh (below a
-third of its own healthy rate, `unhealthy`, the hedge rule's stall). Each can deliver rate x (T − busy − latency)
-bytes by time T; T is where the candidates together deliver the record (water-filling: sources added by start time
-while they start before T), parts on 16 KiB boundaries, a source whose part would be under a page dropped. The read is
-split when the latest part is predicted to end at least 15% (`SplitReads.margin`) before the best whole read (the
-candidate that would end it first; the measurement gained 25–40% with about 10% noise); else it is whole from that
-candidate (`small_gain`). Such a whole read goes to that source when it is not the normal path's: Qwen reads it as a
-one-part split (no staging) when it is the model's files or the pack and the normal path reads another known source;
-the families swap the lone miss between the copy and the GGUF when `copyShare` gave it the other
-(`whole_from_other_source`). A split's first part is the fastest fresh source's (at the record's end). The record's
-read is one scheduler job on the first part's drive (charged that part's bytes), so the rest of the engine sees one
-read (its slot, its hedge race, its generation, its completion); the other parts' jobs start when it runs, so a first
-source with a backlog delays them too. `SplitReads.execute` reads the first part on that job's thread straight into
-the slot. In the families (only a lone miss is split) every other part is a demand job of its own on its drive (so
-`shutdown` and `cancelAndJoin` join it; a part whose job is cancelled before it runs ends from the job's completion,
-once, and the split then fails as cancelled with no whole re-read). In Qwen, where every demand read is planned and
-several splits run at once, the other parts run on threads outside the queues: a part waiting for a queue slot that
-split reads' own jobs hold would never start (`split_read_queued_part_cancel`, `split_read_qwen_concurrent`). Either
-way the part is read into a replica-arena lease
-at the same offsets and copied in. The first part always reads in place, inline, before the wait that guards late
-parts begins, so only a record-level hedge race covers it (the families; Qwen with `tail_replicas`, which the plan
-turns on only with a pack on a second drive), as it covers a whole read. (It was once staged too when no race ran,
-for a guard of its own; that guard could never fire, since the inline read had ended before the wait began, so it
-cost one copy of its bytes for nothing.) Without the race (Qwen on one drive with hot copies, the usual case) staging
-comes from an arena of the experts one token activates in a layer (ten records), charged to the ledger at the first
-split. A staged part later than the hedge delay for its bytes is read again from the fastest other source straight
-into the slot; the first complete version of each range wins, and a staged part that ends while its guard still reads
-waits for it, so two writers never write the same bytes. A staged part is copied into the slot only inside
-`ExpertReadReplica.whileOwned`, under the lock a replica's win is published under: once a replica has published the
-record the split drops its staged bytes, waits for its reads into the slot, and fails (`SplitReadOrphaned`, no whole
-re-read), and the winner's bytes reach the slot only by the existing rule (copied once the primary job, and so every
-in-place writer, has ended; otherwise the lease is used in place and the slot freed when the primary fails). A failed
-part is read again from another source; a range every source failed fails the split, and the record is read whole as
-an ordinary read. A staged loser may outlive the job, writing only into its lease, which its job holds (asserted in
-debug builds) until it returns. The assembled record is checked as a whole read is (the copy's CRC32 on its first
-read, against the checksum its part read saw, so an in-place swap cannot change what it is checked against; Qwen's
-sampled pack digests); a mismatch drops nothing and the record is read whole, whose own check drops whichever copy is
-wrong. A key a swap took out of a copy between plan and read makes that part fail over like a failed read (or, on
-Qwen's model drive, read from the checkpoint's spans). Every completed part trains its drive as a whole read does,
-with its own bytes and time (Qwen's online estimator, the families' `learn`, copy lanes, slow-read tallies), a staged
-loser that ends after its split included; parts are not counted as records in the demand timing counters. Bytes are
-the same from every source, so output cannot change. Counters: `split_reads` in `/v1/status` and each request's notes
-(per source the rate and age the last plan used, `sources`; Qwen: `split_*` request phase counters; its
-`lone_demand_wait_seconds` counts decode only). Checks: `split_read_planner`, `split_read_planner_live` (busy, stale,
-400 random source sets), `split_read_execution`, `split_read_family_fetch`, `split_read_family_routed`,
-`split_read_family_hedge_wins` (200 runs), `split_read_qwen_loader`, `split_read_qwen_routed`,
-`split_read_qwen_concurrent` (eight concurrent reads, the planned bytes back to zero), `split_read_trains_estimates`,
-`split_read_pack_store`, `split_read_swapped_key`, `split_read_qwen_places` (the loader as one-drive serving builds
-it), `split_read_family_places`; the checks' folders share one disk, so they give each folder its own (`disk`), and
-every other check runs with one source per record, so unsplit.
+Split reads (one record read in parts from several drives, opt-in in 3.1.8) were deleted in 3.2: neutral on the one
+workload that waits on reads (GLM decode, ~3% of reads split) and nothing to win for prompt reads, which are
+GPU-bound. Every expert record is read whole from one source.
 
 **PLE and host-stage rows.** `PLERowPrefetch` de-duplicates a scope's (or token's) PLE rows and reads them concurrently
 into one charged payload: 32 dedicated threads for scopes (GCD does not give 32 concurrent blocking reads), a
@@ -2229,7 +2167,11 @@ The rules that let a command queued before routing trust this table:
   command joins (`releaseForGPU(nil)` at scope end).
 - `holdSlabGrowth(true)` while queued commands exist: no slab is added, so the residency set built from
   `slabBuffers()` covers every record a queued command can reach. The schedule rebuilds its residency set when
-  `slabGeneration` changes.
+  `slabGeneration` changes. The set is emptied between requests (it keeps its slabs alive), so the decode phase
+  change (`prepareDecode`, after the decode slabs) builds it again on another thread: making a whole decode cache
+  resident takes up to seconds, which used to land on the reply's first pre-encoded layer. Tokens that start while
+  that build runs take the joined path (byte-identical); later rebuilds cost only the slabs that came or went
+  (`decode_residency_phase_builds`/`_seconds` count the phase change's build, `decode_residency_*` the token path's).
 - Epochs restart only when no layer is held.
 
 ### The decode token pipeline with queued experts
@@ -2759,7 +2701,11 @@ requests shrinks the next phase's cache instead of failing the request.
   8,192-row scope; below 256 rows it keeps the decode cache. Its cache is the plan's prefill slots plus the scope bytes
   its rows leave of the 8,192-row charge, plus (with `elastic_decode_residency`) the key/value arena past what this
   conversation holds and the request can add (`heldArenaBytes`: its pages, the new tokens and `max_tokens`), never more
-  than the decode cache or the current budget allows. The arena then takes that hold, after the cache is sized; a
+  than the decode cache or the current budget allows. That loan is only what the host has free when the prompt read
+  starts, by the governor's growth rule: free memory past `availableFloorBytes` and 1 GB (`MemoryGovernorPolicy.growthSlack`),
+  in whole slabs; with an explicit memory limit, all of it unless macOS reports pressure. With free memory at the floor the
+  limit is the one that counted the whole arena (on a busy Mac that over-count was what kept prompt reads out of
+  pressure). The arena then takes that hold, after the cache is sized; a
   conversation that fills the context keeps the old limit. So a 600-token
   prompt gives back only what its own scope needs, and an 8,192-row one gets the plan's prefill slots as before.
   `prompt_cache_slots` and `prompt_cache_slots_below_decode` (request phase counters) show it.
@@ -2848,8 +2794,7 @@ same rule filters the advice's count and a measured limit's staleness.
 the 14 days (`MemoryHistory.days`; many on fewer days are a bad evening, not this Mac): their 20th percentile, plus
 the limit's margin over its budget, rounded down to 0.1 GB and never above the limit, is the suggestion, in
 `origami status` and in
-`memory_learned.limit_advice` (the dashboard's memory line). `origami tune` does not tune memory: its arms are
-per-request switches inside one loaded model, while a limit needs a reload and minutes of filling to show its effect. A file for another Mac starts over; the
+`memory_learned.limit_advice` (the dashboard's memory line). A file for another Mac starts over; the
 dashboard's Reset deletes it.
 
 **The measured limit.** `origami tune --memory` saves `memory@<model>@<context>` in tuning.json. Without
@@ -3791,38 +3736,25 @@ switcher), questions are never asked: commands that would ask fail unless `--yes
 
 ### `origami tune`
 
-A client of the running server, like `bench`. `--minutes` creates a deadline shared by host checks and streamed
-requests. Warm-up is discarded; subsequent baseline/candidate/control samples are adjacent, three pairs per
-candidate and up to two more on inconclusive results. Real elapsed stalls count toward speed. A candidate must
-exceed max(3%, twice the control gap) in every pair, preserve baseline replies and pass the prompt-read guard.
-Control variation above 15% or excessive baseline drift is inconclusive. Nonrepeatable baseline output never
-silently bypasses equivalence checking. The winner gets two confirmation comparisons. Low power, thermal/memory
-pressure, swap or another app's request stop the run without changing settings.
+A client of the running server, like `bench`. Without `--tradeoffs` (and with `--memory`) it is the memory search
+(below, **The measured limit**; `TuneMemory.swift`); `--minutes` creates a deadline shared by host checks and streamed
+requests. A stopped search keeps its finished trials in tuning.json as `memory-partial@<key>` and the next run within
+a day, for the same build and Mac, continues from them. After a finished search, `Tuning.hotCopyAdvice` prints one
+line when the first hot copy place's `experts_from` row holds fewer experts than its ranking counts and its drive has
+20 GB or more above the reserve.
 
-**Time plan.** After the first baseline the run plans what the comparison needs (three rounds per candidate, a
-confirmation, a round of margin): the default limit grows to fit, up to 30 minutes, and says so; an owner's
-`--minutes` is kept and the plan keeps the candidates that fit, naming the ones left out. At the limit the round in
-progress finishes and the run decides from what it has; a winner with no time left for its confirmation is not
-applied. **Kept rounds** (`TuningSession.Kept`): each completed round is saved as it ends in tuning.json as
-`partial@<key>`, so a run stopped by a request, Cancel or the limit continues from them within a day for the same
-model, context, Mac, drives, settings and build. "The defaults are fastest" is recorded as a result, and every ending
-says what was measured, what was kept and what to do next. `tune --memory` keeps its finished trials the same way
-(`memory-partial@<key>`).
+`--tradeoffs=true` uses discarded warm-ups and rotating rounds of the quality modes bounded by `--quality-floor`.
+Context, memory, expert width and selected reasoning stay fixed; results measure speed, not quality. The result goes
+to `tuning-proposal.json`, bound to the configuration revision and model/context key; `/v1/tuning/apply` revalidates
+it, saves the chosen level and reloads. Low power, thermal/memory pressure, swap or another app's request stop the run
+without changing settings. Tuning history records each comparison and interrupted run. Local `origami_tune: {}` marks
+tune's own requests (the front ends a memory trial for any other) and pauses background cache work while they run.
 
-The dashboard runs `tune --review=true`; accepted results go to `tuning-proposal.json`, bound to the configuration
-revision and model/context key. `/v1/tuning/apply` revalidates them, saves and reloads. Without review the CLI
-retains its apply-on-success behavior. `--tradeoffs=true` uses discarded warm-ups and three rotating rounds of
-quality modes bounded by `--quality-floor`. Context, memory, expert width and selected reasoning stay fixed;
-results measure speed, not quality. Local `origami_tune: {}` pauses background cache work for these comparisons;
-nonempty execution overrides still require exact mode. Benchmark requests may specify deterministic sampling even
-when normal clients are subject to `sampling_override`. Tuning history records inconclusive and interrupted runs.
-The rule version is 3, so older measured settings are not silently reused with the new rules.
-Prompt candidates add `qwen_prefill_scope` (256-token steps up to the allocated scope, at most 8,192) and
-`family_prefill_slices` (up to the allocated 2,048-token slice count, at most four). They score prompt throughput,
-guard decode speed, and compare replies; serving does no fitting. Qwen's effective saved scope enters its arithmetic
-epoch because grouping can change rounding (NUMERIC); family groups retain each slice's kernels (BITWISE).
-Temporary Qwen scope requests bypass live, frontier and disk prompt reuse, skip checkpoint capture, and discard
-their live state after completion. Prompt baselines and controls use that same policy within the existing arena.
+Until 3.2, `tune` also compared timing switches (GPU keep-alive, next-layer guesses and their depth, spinning, Qwen's
+prompt group and the family's prompt slices) request by request and applied a winner at start. On real turns they were
+neutral (14 production runs, no win), so that comparison and its application are gone: tuning.json entries it saved
+(`<key>` with `values`, `partial@<key>`) and a `performance` proposal are left in place and ignored. The engine's
+defaults are unchanged.
 
 ### Tool boundaries and mixed-format cache allocation
 
@@ -3852,7 +3784,7 @@ expert selection and arithmetic are unchanged in exact mode. No performance gain
   drive-speeds.json              this Mac's drive read speeds at 1, 4 and 8 readers, keyed by volume UUID, with when
   calibration.json               before 3.1: Qwen's drive speeds per model and drive pair (no longer read)
   routing-<fingerprint12>.json   this model's expert miss and use counts (ranks the hot copy)
-  tuning.json                    `origami tune`'s results, keyed "<fingerprint12>@<context>": values, outcome, gain, date, identity
+  tuning.json                    `origami tune`'s results: "memory@<fingerprint12>@<context>" (and its partial and automatic entries)
   tuning-history.jsonl           one line per tuning run, for `origami report`
   refresh.json                   only while `origami refresh` is unfinished: its journal
   moves/<id>.json                a model move's journal until it is finished or undone (`origami move list|recover`)
@@ -3878,7 +3810,7 @@ expert selection and arithmetic are unchanged in exact mode. No performance gain
 | `stop`, `start` | Ask the running server to unload its model (a running request gets 30 s; the front stays up and answers 503 `stopped`; kept across restarts) or to load it again and wait until it is ready (section 10, The front). |
 | `status [--json]` | The version, model, Mac, memory plan, context plan, every store, the prompt cache and the server's state. |
 | `store add <folder> [--size]`, `store remove <folder>`, `store list` | Adds a store (with a size cap), removes one (deleting only Origami's per-model folders in it, recognised by a valid store header, listed before confirmation), or lists them. |
-| `model list [--json]`, `model add <folder\|file.gguf\|org/repo> [--name] [--expert-bits 2\|4\|8]` (the last for a GLM-5.3-Flash checkpoint), `model remove <name>`, `model default <name>` | The model registry. `add` converts a bf16, FP8, NVFP4 or GGUF source once into `models/<name>-4bit` (asking first; reused when `source_identity` matches). `remove` never touches the folder; `default` writes the name into `model`. `move <name> <folder>` moves its files as the dashboard's Move does, with the server quit. |
+| `model list [--json]`, `model add <folder\|file.gguf\|org/repo> [--name] [--expert-bits 2\|4\|8] [--lossy]` (the last for a GLM-5.3-Flash checkpoint), `model remove <name>`, `model default <name>` | The model registry. `add` converts a bf16, FP8, NVFP4 or GGUF source once into `models/<name>-4bit` (asking first; reused when `source_identity` matches); a conversion that quantizes weights a second time (`CompatibilityReport.lossy`, docs/models.md's matrix) is named first and needs `--lossy` or a yes. `remove` never touches the folder; `default` writes the name into `model`. `move <name> <folder>` moves its files as the dashboard's Move does, with the server quit. |
 | `move [list]`, `move recover [<id>]` | Lists the moves a stop interrupted, or finishes or undoes them (`MoveJournal`). |
 | `relink [--yes]` | Finds the folders settings name on a drive now mounted under another name and uses the new places once confirmed (`Storage.relinks`). |
 | `service install\|remove [--label]` | Writes `~/Library/LaunchAgents/<label>.plist` (this binary's `serve` with the setting options given, folders made absolute, and this shell's `ORIGAMI_*` variables), prints it and loads it; or stops and deletes it. |

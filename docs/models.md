@@ -20,6 +20,70 @@ Origami, whose usage counts, hot copy, tuning and saved prompts start over.
 `origami inspect --family <file, folder or owner/repo>` does the same for GLM and DeepSeek from the file headers
 alone: whether the checkpoint runs, converts or is refused, and why.
 
+## What each published format becomes
+
+From the file headers alone (`origami inspect --family`, the same function `origami model add` and the dashboard's
+Add use), every published build of the three models falls into one of four classes:
+
+- **native**: read as stored, nothing converted;
+- **quantized once**: full-precision weights (BF16, F16, F32) quantized the way the format's own reference
+  conversion does it (Qwen: byte-identical to MLX's 4-bit conversion; GLM: DwarfStar's GGUF plan), and already
+  quantized weights kept as stored. No weight is quantized twice. MLX 4-bit group-64 codes rewritten onto the same
+  grid come back bit for bit, so they count here too;
+- **lossy**: some already-quantized weights are quantized a second time onto another grid. `origami model add`
+  names what goes onto what and its measured cost, and converts only with `--lossy` (or a yes at its question); the
+  dashboard's Add shows the same line and asks;
+- **refused**, with the reason.
+
+| Model | Format | Class | What happens |
+|---|---|---|---|
+| Qwen3.8-Flash-Next | MLX 4-bit group 64 or 32 (carloslfu, mlx-community) | native | |
+| | BF16 safetensors (official, fine-tunes) | quantized once | to MLX 4-bit group 64 |
+| | FP8 E4M3 with block scales (official FP8) | lossy | FP8 weights re-quantized to 4-bit group 64 |
+| | NVIDIA NVFP4 (ModelOpt) | lossy | NVFP4 experts native; the FP8 n-gram table re-quantized to 4-bit group 32; BF16 quantized once |
+| | MLX 8-bit, 2-bit, 4-bit group 128 or 32 with other widths mixed in | lossy | every tensor not already 4-bit group 64 (n-gram tables 32) re-quantized |
+| | MLX with any 3-, 5- or 6-bit module, other modes | refused | no reader for those codes |
+| | GGUF, any readable type (Q8_0 to IQ1_M, GSQ-RCO mixes) | lossy | attention, recurrent mixer, shared expert, hyper-connections, embedding, output and n-gram table re-quantized to 4-bit group 64; routed experts native under 4.5 bits per weight, else re-quantized too |
+| | GGUF of F32/F16/BF16 only | quantized once | |
+| | GGUF with Hadamard rotations folded in, or TQ/I8 types | refused | rotations not undone; no reader |
+| | GPTQ, AWQ, AutoRound, compressed-tensors, MXFP4, EXL3; pruned safetensors (288 or 384 experts) | refused | no converter, or another geometry |
+| GLM-5.3-Flash | GGUF, any type the ggml kernels read | native | |
+| | BF16 safetensors | quantized once | to a GGUF: Q2_K experts (`--expert-bits 4` or `8`: Q4_K, Q8_0), Q8_0 dense |
+| | FP8 E4M3 with block scales (official) | lossy | FP8 re-quantized: experts to Q2_K (or Q4_K, Q8_0), dense matrices to Q8_0 |
+| | GGUF in NVFP4 or raw I8, split by layer, missing parts | refused | no kernel; incomplete |
+| | MLX, NVFP4, compressed-tensors, MXFP8, quark, EXL3 safetensors | refused | the converter reads FP8, BF16, F16 and F32 only |
+| DeepSeek-V4.1-Flash | GGUF, any type the ggml kernels read (Engram table included) | native | |
+| | GGUF of forks' own types (104, 107, 143, 1010–1012), without an Engram table, or a LoRA adapter | refused | no kernel; incomplete; not a model |
+| | any safetensors (FP8, BF16, compressed-tensors, EXL3) | refused | no DeepSeek safetensors converter; its GGUFs run as stored |
+
+So every popular GLM and DeepSeek build that runs at all runs native, and every Qwen GGUF is converted lossy (ROADMAP
+D4 is the native path). On the Hub survey of 2026-11-25 (180 repos, headers only): of Qwen's 196 GGUF models
+171 are lossy, 3 quantized once (BF16) and 22 refused (16 with Hadamard rotations); of its 17 safetensors
+checkpoints 1 is native, 2 quantized once (the official BF16), 9 lossy (the official FP8, five NVFP4 builds and three
+MLX mixes) and 5 refused (an MLX mix with 6-bit modules, AutoRound, an MXFP4 build, two pruned builds); GLM's 144
+readable GGUF models and DeepSeek's 58 are native, GLM's BF16 checkpoints (3) are quantized once and its FP8 ones
+(2) lossy.
+
+**What Qwen's GGUF conversion costs** (measured offline, no model run: `engine-checks --measure-conversion-error`
+on 50 non-expert tensors of ISTA-DASLab's GSQ-RCO IQ3_XXS build, against the 4-bit MLX build's tensors of the same
+BF16 weights). Relative RMS error per tensor, median (worst):
+
+| Stored type | Tensors | Conversion vs the GGUF's own values | 4-bit MLX vs the GGUF | Stored type's own error, estimated | Converted, estimated vs BF16 |
+|---|---|---|---|---|---|
+| IQ3_S | 8 | 11.6% (15.5%) | 19.3% | 15.7% | 19.3% |
+| IQ4_XS | 8 | 10.3% (10.6%) | 13.5% | 8.8% | 13.5% |
+| IQ4_NL | 2 | 9.8% (10.0%) | 14.0% | 9.8% | 14.0% |
+| Q4_K | 8 | 10.5% (12.3%) | 13.3% | 8.2% | 13.3% |
+| Q5_K | 8 | 10.1% (12.8%) | 10.9% | 4.0% | 10.9% |
+| Q6_K | 8 | 10.9% (11.8%) | 11.1% | 2.0% | 11.1% |
+| BF16 | 8 | 10.6% (11.6%) | 10.4% | 0 | 10.4% |
+
+The BF16 tensors convert to exactly the 4-bit MLX build's values, so both come from the same BF16 weights. With no
+BF16 copy of the others, the stored type's own error is estimated as √(MLX-vs-GGUF² − conversion²), assuming the
+two quantizations' errors are independent. The conversion adds about 10% to every tensor whatever its type, so it
+costs most where the GGUF is most precise: a Q6_K tensor goes from about 2% to 11%, a Q4_K one from 8% to 13%, an
+IQ3_S one from 16% to 19%. How that shows in answers is not measured.
+
 ## Qwen3.8-Flash-Next
 
 ### Builds it runs directly
@@ -31,7 +95,8 @@ MLX builds quantized to **4-bit with group size 64 or 32** (with the PLE table a
 - group 32, such as [mlx-community/Qwen3.8-Flash-Next-4bit](https://huggingface.co/mlx-community/Qwen3.8-Flash-Next-4bit)
   (tested). Its 8-bit router is turned into floats and its norms are shifted to Origami's `1 + w` form when it loads.
 
-Other MLX builds, 2-, 4- or 8-bit affine, are converted once by `origami model add <folder>`.
+Other MLX builds, 2-, 4- or 8-bit affine, are converted once by `origami model add <folder> --lossy`: their codes
+are quantized again to 4-bit group 64 ([What each published format becomes](#what-each-published-format-becomes)).
 
 ### Checkpoints it converts once
 
@@ -47,7 +112,8 @@ in the data folder (`origami config set data_dir …` moves it) and only reads t
 
 Notes on GGUF sources:
 
-- A 4-bit GGUF gets quantized twice, so a Q8_0, Q6_K or Q5_K file gives the closest result. On one layer of a
+- Every quantized GGUF tensor gets quantized twice, so `model add` needs `--lossy` for a GGUF; the table above has
+  the measured cost. A Q8_0, Q6_K or Q5_K file gives the closest result. On one layer of a
   Q4_K_XL file, the dense Q8_0 matrices were 98% equal to the official conversion and the Q4_K experts 73%.
 - The 1- to 3-bit IQ types are read too, but a 2-bit source quantized again to 4-bit is lossy.
 - Files with Hadamard rotations folded in are refused.

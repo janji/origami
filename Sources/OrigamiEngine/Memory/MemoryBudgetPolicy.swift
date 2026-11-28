@@ -68,6 +68,8 @@ package struct MemoryGovernorPolicy: Sendable {
     private var settleUntil: TimeInterval = -.infinity
     private var growthQuietSince: TimeInterval?
     private static let gb: UInt64 = 1_000_000_000
+    /// Free memory a growth step keeps above the floor (`fit`'s slack in `step`); a prompt read's arena loan keeps it too.
+    package static let growthSlack: UInt64 = gb
     package static let recoveryInterval: TimeInterval = 20
     /// Growth past the learned start (`pastLearned`): the quiet spell before each step, the largest step, how soon after
     /// a step a cut counts against it, and the calm that forgives it.
@@ -268,7 +270,7 @@ package struct MemoryGovernorPolicy: Sendable {
             ? min(cap, held ?? cap)
             : min(
                 cap, held ?? .max, learned ?? .max,
-                Self.fit(reserved: reserved, available: available, floor: floor, slack: Self.gb))
+                Self.fit(reserved: reserved, available: available, floor: floor, slack: Self.growthSlack))
         // Cache allocation may stop on a transient pressure event before the governor
         // lowers its allowance. Retry that unfinished growth even if the allowance is
         // already at target; otherwise no later budget increase would wake the owner.

@@ -199,25 +199,6 @@ package final class HotCopy: @unchecked Sendable {
         try check(key, expected, UnsafeRawBufferPointer(into), unpinning: slot)
     }
 
-    /// Bytes `at ..< at + into.count` of record `key` (one part of a split read), under `read`'s pause, rejection and
-    /// slot-pin rules (the slot is pinned while the bytes are read, so a swap never rewrites it under the read); the
-    /// checksum the assembled record must match when its first-read check is due (nil: nothing to check), for `verify`.
-    @discardableResult
-    package func read(_ key: Int, at: Int, into: UnsafeMutableRawBufferPointer) throws -> UInt32? {
-        let (slot, expected) = try pinnedRead(key, at: at, into: into)
-        checking.withLock { unpinLocked(slot) }
-        return expected
-    }
-
-    /// A split read's record `key`, assembled from parts read here and from other sources holding the same bytes, checked
-    /// against `sum` (what `read(_:at:into:)` returned): a match counts as the record's first-read check; a mismatch
-    /// throws without dropping the record (the wrong bytes may be another source's), so the caller reads the record
-    /// whole, and that read's own check finds and drops whichever source is wrong.
-    package func verify(_ key: Int, sum: UInt32, record: UnsafeRawBufferPointer) throws {
-        guard Self.checksum(record) == sum else { throw EngineError("Split hot-copy record \(key) failed its checksum") }
-        _ = checking.withLock { verified.insert(key) }
-    }
-
     /// Reads bytes `at ..<` of `key`'s slot with the slot pinned (still pinned on return; unpinned when it throws): the
     /// slot, and its checksum when the key's first-read check is due.
     private func pinnedRead(_ key: Int, at: Int, into: UnsafeMutableRawBufferPointer) throws -> (Int, UInt32?) {

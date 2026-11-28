@@ -161,10 +161,6 @@ is automatic and replies are the same with or without it.
 - **More drives.** Tick more drives in **Change…** (or set `hot_copy_more`): the fastest drive holds the most-used
   experts, the next drive the next ones, and each read goes to the drive expected to finish first. For Qwen,
   `origami store add <folder>` also keeps a full copy of the experts on another drive.
-- **Reading from every drive at once.** An expert that several drives hold (the copy and the model's own drive) is
-  read in parts from all of them, each a share that matches its measured speed and the work it already has, or whole
-  from the one that would finish first; a drive that slows down gets no share until it is fast again
-  (an experiment, off unless `ORIGAMI_SPLIT_READS=1`).
 
 Details: [settings.md](settings.md#model-and-files).
 
@@ -212,13 +208,9 @@ Measured quality and speed: [models.md](models.md#quality-dial) and the README's
 
 ## Tuning
 
-`origami tune` (or **Tune for this Mac** in Setup) tries timing settings that leave replies unchanged on the running
-server: the GPU keep-alive, and for GLM and DeepSeek the next-layer guesses, their depth and spinning; also how prompts
-are grouped. It keeps one only if it was faster every time. It takes about 8 minutes, longer when the model needs it.
-
-- A request from an app stops it. Every finished measurement is kept, so the next run within a day continues.
-- `origami tune --recheck` checks the result still wins; `origami tune --undo` removes it.
-- `origami tune --memory` finds the fastest memory limit ([Memory](#memory)).
+`origami tune` (or **Tune for this Mac** in Setup) finds the fastest memory limit for the running model on this Mac
+([Memory](#memory)), the setting that moves its speed most, and then says whether a larger hot copy would help.
+`origami tune --tradeoffs true` times each quality level instead.
 
 Details: [dashboard.md](dashboard.md#tuning-for-this-mac).
 
@@ -272,8 +264,8 @@ These are ideas waiting for a measurement, not promises. The full list is in [RO
 
 - Testing on other Macs: 16 and 24 GB under real load, M1, M5, 64 GB or more.
 - Mixing exact and low-bit experts in one reply, and speculative decoding, where they pay.
-- Deciding the three remaining experiment switches, and measuring split reads (opt-in since 3.1.8) on more Macs
-  ([switches.md](switches.md)).
+- Testing the same-drive hot copy (`ORIGAMI_FAMILY_SAME_DRIVE_HOT_COPY`) on a Mac whose models and copy share one
+  drive ([switches.md](switches.md)).
 - Smaller speed-ups that still need measuring: kernel fusions, GPU keep-alive power use.
 
 Also planned: a signed binary and a Homebrew tap, and built-in TLS

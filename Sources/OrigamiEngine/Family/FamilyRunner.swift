@@ -67,8 +67,6 @@ package class FamilyRunner: @unchecked Sendable {
     package var benchGapSpins = false
     package var routeTrace: FamilyRouteTrace?
     package let wantsRouteTrace = ProcessInfo.processInfo.environment["ORIGAMI_FAMILY_ROUTE_TRACE"] == "1"
-    package let refreshesIdleOverhead = ProcessInfo.processInfo.environment["ORIGAMI_FAMILY_REFRESH_IDLE_OVERHEAD"] == "1"
-    package private(set) var idleOverheadRefreshes = 0
     package var shouldContinue: () -> Bool = { true }
     package private(set) var delayedExpertCounters = DelayedExpertCounters()
     private var delayedStorage: DelayedExpertStorage?
@@ -188,21 +186,19 @@ package class FamilyRunner: @unchecked Sendable {
     /// working buffers, the state and every slab are reserved in it. Automatic mode fits free memory; explicit mode
     /// targets the chosen allowance unless macOS already reports pressure. Returns free memory before the pool.
     func makeExperts(budget: UInt64?, memoryLimit: UInt64?, ledger: MemoryLedger?) throws -> UInt64 {
-        if lazyStartupWorkspace {
-            // Prove that at least one real forward plan and the mandatory expert floor fit at startup.
-            // Larger requests still admit their actual geometry before any scratch allocation.
-            let counts =
-                try scratchCompactionEnabled
-                ? ScratchLifetimeCompaction.familyPlan(scratchPlan(rows: 1), compact: true).counts
-                : scratchPlan(rows: 1)
-            let minimum = try counts.values.reduce(UInt64(0)) { total, count in
-                let bytes = UInt64(try Self.scratchLength(count))
-                let (sum, overflow) = total.addingReportingOverflow(bytes)
-                guard !overflow else { throw EngineError("Startup scratch capacity overflow", code: "insufficient_memory") }
-                return sum
-            }
-            currentWorkingBytes.store(minimum, ordering: .relaxed)
+        // Startup reserves one real one-row forward plan and the mandatory expert floor, not the largest prompt step.
+        // Larger requests admit their actual geometry before any scratch allocation (`prepareScratch`).
+        let counts =
+            try scratchCompactionEnabled
+            ? ScratchLifetimeCompaction.familyPlan(scratchPlan(rows: 1), compact: true).counts
+            : scratchPlan(rows: 1)
+        let minimum = try counts.values.reduce(UInt64(0)) { total, count in
+            let bytes = UInt64(try Self.scratchLength(count))
+            let (sum, overflow) = total.addingReportingOverflow(bytes)
+            guard !overflow else { throw EngineError("Startup scratch capacity overflow", code: "insufficient_memory") }
+            return sum
         }
+        currentWorkingBytes.store(minimum, ordering: .relaxed)
         let free = availableMemoryBytes()
         let share = ProcessInfo.processInfo.physicalMemory / 10 * 7
         let lent = lendsState ? positionStateBytes(at: contextLimit) - positionStateBytes(at: stateCapacity) : 0
@@ -425,12 +421,6 @@ package class FamilyRunner: @unchecked Sendable {
     /// Startup/maximum first-slice allowance. Once a forward plan is available only its actual page-rounded scratch
     /// remains reserved; the rest can be lent to the expert cache.
     package static let baseWorkingBytes: UInt64 = 3 << 29
-    /// Opt-in startup admission reserves a one-row plan instead of maximum prompt scratch. Each forward still
-    /// reserves its complete measured working set before allocation, trimming experts first; phase limits remain.
-    package static var lazyStartupWorkspaceRequested: Bool {
-        ProcessInfo.processInfo.environment["ORIGAMI_FAMILY_LAZY_STARTUP_WORKSPACE"] == "1"
-    }
-    package let lazyStartupWorkspace = FamilyRunner.lazyStartupWorkspaceRequested
     private let currentWorkingBytes = Atomic<UInt64>(FamilyRunner.baseWorkingBytes)
     /// The working set's current allowance, also read by the status thread.
     package var workingBytes: UInt64 { currentWorkingBytes.load(ordering: .relaxed) }
@@ -510,15 +500,6 @@ package class FamilyRunner: @unchecked Sendable {
         guard let ledger, ledger.budgetMode == .explicit else { return }
         let resident = UInt64(weights.wiredBytes) + UInt64(experts?.wiredBytes ?? 0)
         ledger.reconcilePhysicalOverhead(residentOwnedBytes: resident)
-    }
-
-    /// Optional request-boundary calibration after temporary prompt owners have retired. Uses the same
-    /// conservative wired-owner proof as phase transitions; it never assumes all reserved bytes are resident.
-    package func refreshIdleOverhead() {
-        guard refreshesIdleOverhead, command == nil, encoder == nil, delayedRead == nil else { return }
-        reconcilePhysicalAdmission()
-        if experts != nil { fitExperts() }
-        idleOverheadRefreshes += 1
     }
 
     /// Called only with no encoder. Planning reclaims space from experts before individual allocation admission;

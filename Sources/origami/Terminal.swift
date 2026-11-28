@@ -45,11 +45,11 @@ enum Terminal {
         }
     }
 
-    /// Asks a yes/no question; `yes` (from --yes) answers it. Without a terminal the answer is no.
-    static func confirm(_ question: String, yes: Bool) -> Bool {
+    /// Asks a yes/no question; `yes` (from `flag`, --yes by default) answers it. Without a terminal the answer is no.
+    static func confirm(_ question: String, yes: Bool, flag: String = "--yes") -> Bool {
         if yes { return true }
         guard interactive else {
-            print("\(question) (pass --yes to confirm)")
+            print("\(question) (pass \(flag) to confirm)")
             return false
         }
         print("\(question) [y/N] ", terminator: "")

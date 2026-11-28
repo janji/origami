@@ -12,14 +12,14 @@ public struct ArithmeticDigest: Sendable, Equatable {
     /// (`PromptCanary.adopt`; their canary is still checked). nil once they changed.
     public let before: String?
     public static let qwen = ArithmeticDigest(
-        name: "qwen", value: "3c7cf269a0cf2228a85642b931c59dd14522a00e9522f69d6d6e5ef7732a83e8",
+        name: "qwen", value: "f71e358ef29d0be5008414065baa7f8c69362b7b7b0021f36d28a0774eb029eb",
         before: nil)
     public static let qwenGGUF = ArithmeticDigest(
-        name: "qwen_gguf", value: "80c54dcc7e8cc69bb2bc4ce08ae3ea5ff23b448591b77f0867b0e4cde15c414d",
+        name: "qwen_gguf", value: "12e51c01db25501ede56e1a813c2cedf966989ffd18c2b2e3748614b9beec694",
         before: nil)
     public static let family = ArithmeticDigest(
-        name: "family", value: "220daf7b984cc339f1f7a497b08021873fb9d37c84813e793a6478a9da2ceea0",
-        before: "83f737875a3242733c5d4b1d5748e28d592a589506ffccb881ee9d4388355d90")
+        name: "family", value: "a0168d45ba84e76dde23830e37075d5ab907eb2795e65a36b573eea31b3c60b1",
+        before: nil)
     /// The engine that runs a model: Qwen's two by where its experts are read from, or GLM's and DeepSeek's.
     public static func forQwen(ggufExperts: Bool) -> ArithmeticDigest { ggufExperts ? qwenGGUF : qwen }
     public static let all = [qwen, qwenGGUF, family]

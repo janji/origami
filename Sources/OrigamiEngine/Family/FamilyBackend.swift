@@ -87,7 +87,6 @@ extension FamilyRunner {
             "expert_read_gb": Double(c.readBytes) / 1e9, "expert_read_seconds": c.readSeconds,
             "prompt_read_ahead": c.readAheads, "prompt_read_ahead_used": c.readAheadUsed, "prompt_read_ahead_late": c.readAheadLate,
             "expert_prefetches": c.prefetches, "expert_prefetch_used": c.prefetchUsed,
-            "split_reads": experts.splitReads.report,
         ]
         if let shrank = experts.shrank { notes["expert_cache_shrank"] = shrank }
         return notes
@@ -99,8 +98,6 @@ extension FamilyRunner {
         var notes: [String: Any] = [
             "family": g.family.rawValue, "expert_slots": experts.slotCount,
             "family_dense_wired_bytes": weights.wiredBytes,
-            "family_idle_overhead_refresh": refreshesIdleOverhead,
-            "family_idle_overhead_refreshes": idleOverheadRefreshes,
             "expert_prefetch_late": c.prefetchLate,
             "expert_prefetch_cancelled": c.prefetchCancelled, "expert_prefetch_read_gb": Double(c.prefetchBytes) / 1e9,
             "expert_prefetch_wasted_gb": Double(c.prefetchWastedBytes) / 1e9,
@@ -118,7 +115,6 @@ extension FamilyRunner {
             "expert_unwire_failures": wiring.unwireFailures,
             "working_admitted_bytes": workingBytes, "working_allocated_bytes": workingAllocatedBytes,
             "working_retained_bytes": workingRetainedBytes,
-            "lazy_startup_workspace": lazyStartupWorkspace,
             "scratch_compaction_enabled": scratchCompactionEnabled, "scratch_compaction_saved_bytes": scratchCompactionSavedBytes,
             "family_grouped_decode": Self.groupsDecodeExperts, "family_grouped_gate_up": Self.groupsGateUp,
             "expert_prefetch_recall": c.predicted > 0 ? Double(c.predictedRight) / Double(c.predicted) : 0,
@@ -374,7 +370,6 @@ public final class FamilyServingBackend: ServingBackendStopping, ServingPromptCo
         do { try lockBounded() } catch { throw ServingFailure.from(error) }
         defer { lock.unlock() }
         guard !busy else { throw ServingFailure("Engine is busy", status: 503, type: "engine_busy") }
-        (model as? FamilyRunner)?.refreshIdleOverhead()
         publishStatus("request_start")
         busy = true
         tuning = request.tune != nil

@@ -8,7 +8,7 @@ import Foundation
 ///
 /// The front adds to the model's status, before the table reads it: `mac_now` (`thermal_state`, `low_power`) and
 /// `memory_holders` (the largest other apps, `ProcessMemory.others`, while `memoryShort`), both kept in the status; and
-/// for the table alone `job` (a job running) and `last_tuning` (the last tuning run, while none is applied). Every field
+/// for the table alone `job` (a job running). Every field
 /// a rule reads is listed with it (`reads`) and checked against a status as the servers build it.
 public enum SlowedBy {
     typealias Found = (text: String, fix: String, since: String?)
@@ -93,7 +93,7 @@ public enum SlowedBy {
         ("hot_copy_short", [source + "bytes", source + "budget_bytes"], hotCopyShort),
         ("hot_copy_drive_slow", [source + "since_rewrite.high", source + "since_rewrite.share"], hotCopyDriveSlow),
         ("mac_hot", ["mac_now.thermal_state"], macHot),
-        ("low_power", ["mac_now.low_power", "tuning.knobs.gpu_keepalive.value", "tuning.knobs.gpu_keepalive.source"], lowPower),
+        ("low_power", ["mac_now.low_power"], lowPower),
         ("saves_paused", ["prompt_cache.saves_paused"], savesPaused),
         (
             "prompt_read_again",
@@ -104,7 +104,6 @@ public enum SlowedBy {
         ),
         ("queue", ["queue.queued"], queue),
         ("memory_limit_low", ["memory.budget_mode", advice + "limit_bytes", advice + "suggested_bytes", advice + "stale"], limitLow),
-        ("not_tuned", ["tuning.state", "tuning.entry", "tuning.key", "tuning.knobs", "last_tuning.key"], notTuned),
     ]
 
     // MARK: the rules
@@ -364,13 +363,11 @@ public enum SlowedBy {
         )
     }
 
-    /// Low Power Mode: a slower chip, and for GLM and DeepSeek no GPU keep-alive (its automatic setting turns it off).
+    /// Low Power Mode: a slower chip (and for GLM and DeepSeek no GPU keep-alive: its automatic setting turns it off).
     static func lowPower(_ s: [String: Any]) -> Found? {
         guard (s["mac_now"] as? [String: Any])?["low_power"] as? Bool == true else { return nil }
-        let knob = ((s["tuning"] as? [String: Any])?["knobs"] as? [String: Any])?["gpu_keepalive"] as? [String: Any]
-        let keepAlive = knob?["value"] as? Bool == false && knob?["source"] as? String == "default"
         return (
-            "Low Power Mode is on: macOS slows the chip" + (keepAlive ? ", and Origami turns its GPU keep-alive off" : ""),
+            "Low Power Mode is on: macOS slows the chip",
             "Turn Low Power Mode off in System Settings › Battery (Energy on a desktop Mac).", nil
         )
     }
@@ -431,18 +428,6 @@ public enum SlowedBy {
         return (
             "Your memory limit of \(size(limit)) is under the \(size(suggested)) a measurement found this Mac keeps for Origami",
             "Use \(size(suggested)) on the Memory line, or `origami config set memory_limit \(value)`.", nil
-        )
-    }
-
-    /// Advice: never tuned for this Mac (no entry, and no run that found the defaults fastest).
-    static func notTuned(_ s: [String: Any]) -> Found? {
-        guard let t = s["tuning"] as? [String: Any], t["state"] as? String == "none", t["entry"] == nil || t["entry"] is NSNull,
-            !((t["knobs"] as? [String: Any]) ?? [:]).isEmpty
-        else { return nil }
-        if let last = s["last_tuning"] as? [String: Any], last["key"] as? String == t["key"] as? String { return nil }
-        return (
-            "Not tuned for this Mac yet: tuning may find faster settings with the same replies",
-            "Tune for this Mac in Setup (about 8 minutes, while nothing else runs).", nil
         )
     }
 

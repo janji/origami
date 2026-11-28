@@ -427,31 +427,23 @@ enum DashboardScript {
             : now ? "Writing speed · average of the " + replies + (warming ? " · warming up, so slower than usual at first" : "") : status && status.status === "ready" && !reloading ? "A test reply takes a few seconds:" : "No current measurement";
           $("measure").textContent = "Measure";
         }
-        // The self-tuner (`origami tune`, run as a job): what the running model's `tuning` says, and Tune, Re-check and Undo.
+        // Tuning (`origami tune`, run as a job): the memory search, or each quality level's speed with a level to apply.
         function showSelfTune(s) {
-          const t = s.tuning, e = t && t.entry;
-          $("selftune").hidden = !t || !Object.keys(t.knobs || {}).length;
+          const t = s.tuning;
+          $("selftune").hidden = !t;
           if ($("selftune").hidden) return;
           const run = dashboard && dashboard.last_tuning, relevant = run && run.key === t.key;
-          // Nothing faster than what runs is a result: "Tuned: defaults are fastest (date)", from the run or the saved entry.
-          const fastest = (x) => "Tuned: " + (e && e.values && Object.keys(e.values).length ? e.label + " stays fastest" : "defaults are fastest") + (x && x.date ? " (" + String(x.date).slice(0, 10) + ")" : "");
-          const labels = { too_noisy: "Inconclusive · settings unchanged", incomplete: "Incomplete · settings unchanged", aborted: "Interrupted · settings unchanged", already_fastest: fastest(run), faster: "Improvement measured", comparison: "Comparison ready" };
-          $("st-line").textContent = t.state === "unreadable" ? "Tuning file could not be read" : t.state === "stale" ? "Setup changed · tune again" : t.state === "recheck" ? "Re-check · " + (t.reason || "setup updated") : relevant ? labels[run.outcome] || "" : e ? e.outcome === "faster" ? "Applied · +" + Math.round((e.gain || 0) * 100) + "%" : fastest(e) : "";
+          const labels = { incomplete: "Incomplete · settings unchanged", aborted: "Interrupted · settings unchanged", comparison: "Comparison ready" };
+          $("st-line").textContent = relevant ? labels[run.outcome] || "" : "";
           $("st-go").textContent = "Run tuning";
-          $("st-check").hidden = !e || t.state === "stale" || !e.values || !Object.keys(e.values).length;
-          $("st-undo").hidden = !e;
-          if (relevant && ["too_noisy", "incomplete", "aborted"].includes(run.outcome) && !running()) $("st-note").textContent = run.reason || (run.measured && (run.measured.notes || [])[0]) || "No reliable improvement measured.";
+          if (relevant && ["incomplete", "aborted"].includes(run.outcome) && !running()) $("st-note").textContent = run.reason || "No complete comparison measured.";
           const p = dashboard && dashboard.tuning_proposal;
-          if (!p || p.key !== t.key || p.revision !== revision) { $("st-result").innerHTML = ""; return; }
-          if (p.kind === "performance") {
-            const entry = p.entry || {}, values = Object.entries(entry.values || {}).map(([k,v]) => esc(k.replace(/_/g," ")) + ": " + esc(v)).join(" · ");
-            $("st-result").innerHTML = '<p>+' + Math.round((entry.gain || 0) * 100) + '% ' + (entry.measured && entry.measured.objective === 'prompt' ? 'prompt speed' : 'writing speed') + ' measured</p><p class="note">' + values + '</p>' + (p.sets_aside ? '<p class="note">' + esc(p.sets_aside) + '</p>' : '') + '<button type="button" data-tune-apply="">Apply &amp; reload</button>';
-          } else {
-            $("st-result").innerHTML = '<p class="note">Speed measurements only; answer quality is not scored. Large variation makes close speed differences unreliable.</p><table><thead><tr><th>Mode</th><th>tok/s</th><th>First token</th><th>Samples</th><th>Variation</th><th></th></tr></thead><tbody>' + (p.results || []).map(r => {
-              const valid = Number.isFinite(r.decode_tps) && r.decode_tps > 0 && Number.isFinite(r.first_token_seconds) && r.first_token_seconds >= 0 && Number.isFinite(r.spread) && r.spread >= 0 && Number.isInteger(r.samples) && r.samples >= 2;
-              return '<tr><td>' + esc(r.quality) + '</td><td>' + (valid ? one.format(r.decode_tps) : '—') + '</td><td>' + (valid ? one.format(r.first_token_seconds) + ' s' : '—') + '</td><td>' + (Number.isInteger(r.samples) && r.samples >= 0 ? fmt.format(r.samples) : '—') + '</td><td>' + (valid ? Math.round(r.spread * 100) + '%' : 'Not measured') + '</td><td><button type="button" data-tune-apply="' + esc(r.quality) + '"' + (valid ? '' : ' data-why="At least two complete speed measurements are required" data-blocked disabled title="At least two complete speed measurements are required"') + '>Apply</button></td></tr>';
-            }).join("") + '</tbody></table>';
-          }
+          // A proposal of an older build's timing comparison (kind "performance") is not offered.
+          if (!p || p.kind !== "tradeoffs" || p.key !== t.key || p.revision !== revision) { $("st-result").innerHTML = ""; return; }
+          $("st-result").innerHTML = '<p class="note">Speed measurements only; answer quality is not scored. Large variation makes close speed differences unreliable.</p><table><thead><tr><th>Mode</th><th>tok/s</th><th>First token</th><th>Samples</th><th>Variation</th><th></th></tr></thead><tbody>' + (p.results || []).map(r => {
+            const valid = Number.isFinite(r.decode_tps) && r.decode_tps > 0 && Number.isFinite(r.first_token_seconds) && r.first_token_seconds >= 0 && Number.isFinite(r.spread) && r.spread >= 0 && Number.isInteger(r.samples) && r.samples >= 2;
+            return '<tr><td>' + esc(r.quality) + '</td><td>' + (valid ? one.format(r.decode_tps) : '—') + '</td><td>' + (valid ? one.format(r.first_token_seconds) + ' s' : '—') + '</td><td>' + (Number.isInteger(r.samples) && r.samples >= 0 ? fmt.format(r.samples) : '—') + '</td><td>' + (valid ? Math.round(r.spread * 100) + '%' : 'Not measured') + '</td><td><button type="button" data-tune-apply="' + esc(r.quality) + '"' + (valid ? '' : ' data-why="At least two complete speed measurements are required" data-blocked disabled title="At least two complete speed measurements are required"') + '>Apply</button></td></tr>';
+          }).join("") + '</tbody></table>';
         }
         // Memory in plain words, for Health > Memory and Setup's Memory limit line: how much Origami uses and may use (the
         // title), who decided that figure (`who`), and what to know or do (`lines`), with the limit a button can set (`use`)
@@ -670,7 +662,7 @@ enum DashboardScript {
           hold($("apply"), !ready || !changed() || starting || !!applying, by("apply"));
           hold($("reset"), !changed() || starting || !!applying, false, !changed() ? "Nothing changed" : "");
           hold($("measure"), measuring || !serving, measuring, liveState === "stopped" ? "The model is stopped: Start it first" : "The model is not ready");
-          ["st-go", "st-check", "st-undo"].forEach((id) => hold($(id), running() || !!jobPost || !serving || !front, jobFor("tune") && tuneBy === id));
+          hold($("st-go"), running() || !!jobPost || !serving || !front, jobFor("tune") && tuneBy === "st-go");
           hold($("ml-reset"), !!applying, applying === "ml-reset");
           hold($("notice-retry"), !!applying || reloading || liveState === "stopping", by("notice-retry"));
           // Stop and unload, Start once stopped, Try again after a failed start: it turns while the model unloads or loads
@@ -905,10 +897,10 @@ enum DashboardScript {
         }
         function closeAdd() { $("add").hidden = true; $("add-open").setAttribute("aria-expanded", "false"); $("add-base-row").hidden = true; $("add-base").value = ""; addSource = null; addTo = null; $("add-info").textContent = ""; $("add-go").hidden = true; $("add-to").hidden = true; }
         // Where a download or conversion is written: the folder chosen with the browser, else the data folder's models folder.
-        let addTo = null, addDestination = null;
+        let addTo = null, addDestination = null, addLossy = null;
         // What adding a model would do, from its headers: run as it is, convert once, or download; and whether there is room.
         async function checkSource(source) {
-          addSource = source; $("add-go").hidden = true; $("add-to").hidden = true; $("add-source").setAttribute("aria-invalid", "false");
+          addSource = source; addLossy = null; $("add-go").hidden = true; $("add-to").hidden = true; $("add-source").setAttribute("aria-invalid", "false");
           if (!source) { $("add-info").textContent = ""; $("add-base-row").hidden = true; return; }
           if (baseChoices(source) && $("add-base").value) return baseChosen();
           $("add-info").textContent = "Checking…"; checking = source; gate();
@@ -922,7 +914,8 @@ enum DashboardScript {
             const what = hub ? "downloads " + disk(c.bytes) + (converts ? ", then converts once" : "") : converts ? "converts once" + (c.needs_bytes > 1e10 ? ", writing about " + disk(c.needs_bytes - 1e10) : "") : "runs as it is";
             const room = c.needs_bytes > 1e10 ? " to " + (addTo ? addTo + " on " : "") + driveLabel(c.drive) + ", which has " + disk(c.free_bytes) + " free" : "";
             addDestination = c.destination || null; $("add-to").hidden = !(c.needs_bytes > 1e10);
-            $("add-info").textContent = c.family + ": " + what + room + "." + (c.fits === false ? " Not enough room: it needs " + disk(c.needs_bytes) + ", 10 GB to spare included." : "");
+            $("add-info").textContent = c.family + ": " + what + room + "." + (c.lossy ? " " + c.lossy : "") + (c.fits === false ? " Not enough room: it needs " + disk(c.needs_bytes) + ", 10 GB to spare included." : "");
+            addLossy = c.lossy || null;
             $("add-go").hidden = false; addFits = c.fits !== false;
             $("add-go").textContent = hub ? "Download and add" : converts ? "Convert and add" : "Add model";
           } catch (error) { if (source === addSource) $("add-info").textContent = "Could not reach Origami."; }
@@ -1700,12 +1693,6 @@ enum DashboardScript {
               (building ? '<span class="hbar" data-m="warn" aria-hidden="true"><span style="width:' + share(p.done_bytes, p.total_bytes) + '"></span></span>' : ""),
               building ? gbs(p.done_bytes).replace(" GB", "") + " of " + gbs(p.total_bytes) + (p.seconds_left != null ? " · about " + soon(p.seconds_left) + " left" : "") : worn ? esc(worn.text || "") : hot.state === "ready" ? "" : esc(hot.detail || ""), go("library", "Change…", "experts")));
           } else if (from.no_hot_copy) rows.push(row("none", "Hot copy", "None", esc(from.no_hot_copy), ""));
-          const t = s.tuning;
-          const proposal = dashboard && dashboard.tuning_proposal, waits = !!t && !!proposal && proposal.key === t.key && proposal.revision === revision;
-          const lastRun = dashboard && dashboard.last_tuning, tuned = !!t && (!!t.entry || !!lastRun && lastRun.key === t.key && lastRun.outcome === "already_fastest");
-          if (t && Object.keys(t.knobs || {}).length) rows.push(row(waits || ["recheck", "stale", "unreadable"].includes(t.state) ? "warn" : tuned ? "ok" : "none", "Tuning",
-            waits ? proposal.kind === "performance" ? "<b>+" + Math.round(((proposal.entry && proposal.entry.gain) || 0) * 100) + "%</b> measured · not applied yet" : "<b>Comparison ready</b> · nothing applied"
-              : esc($("st-line").textContent || "Not tuned for this Mac yet"), "", go("setup", waits ? "Review…" : tuned ? "Open…" : "Tune…", "selftune")));
           if (access) rows.push(row(access.listening === "lan" && !access.key_required ? "warn" : "ok", "Access", access.listening === "lan" ? "<b>This network</b> · " + (access.key_required ? "other devices need the key" : "no key: any device on it can use Origami and change its settings")
             : "<b>This Mac only</b>", "", go("settings", "Change…")));
           swap("health", rows.join(""));
@@ -2223,14 +2210,16 @@ enum DashboardScript {
           if (ask) { if (confirm(ask + " Add it?")) await startJob({ ...body, acknowledged: true }, button, note); else note.textContent = "Not added."; }
         }
         $("add-go").addEventListener("click", () => { const base = !$("add-base-row").hidden && $("add-base").value;
-          startJob({ kind: "add", source: addSource, ...(base ? { base } : addTo ? { to: addTo } : {}) }, $("add-go"), $("add-info")); });
+          // A lossy conversion goes ahead only once agreed to here (`model add --lossy`).
+          if (addLossy && !base && !confirm(addLossy + " Convert it with this loss?")) { $("add-info").textContent = "Not added."; return; }
+          startJob({ kind: "add", source: addSource, ...(base ? { base } : addTo ? { to: addTo } : {}), ...(addLossy && !base ? { lossy: true } : {}) }, $("add-go"), $("add-info")); });
         $("add-base").addEventListener("change", () => checkSource(addSource));
         $("add-open").addEventListener("click", () => { if ($("add").hidden || $("add-row").hidden) openAdd(""); else { closeAdd(); fillPicker(); } });
-        [["st-go", "tune"], ["st-check", "recheck"], ["st-undo", "undo"]].forEach(([id, mode]) => $(id).addEventListener("click", () => {
-          if (mode === "undo" && !confirm("Remove the tuned settings? Origami reloads with its defaults.")) return;
-          if (mode === "tune" && $("st-mode").value === "memory" && !confirm(MEMORY_ASK)) return;
-          tuneBy = id; $("st-note").textContent = ""; startJob({ kind: "tune", mode: mode === "tune" ? $("st-mode").value || "tune" : mode, minutes: +$("st-budget").value || undefined, quality_floor: $("st-floor").value || undefined }, $(id), $("st-note"));
-        }));
+        $("st-go").addEventListener("click", () => {
+          const mode = $("st-mode").value || "memory";
+          if (mode === "memory" && !confirm(MEMORY_ASK)) return;
+          tuneBy = "st-go"; $("st-note").textContent = ""; startJob({ kind: "tune", mode, minutes: +$("st-budget").value || undefined, quality_floor: $("st-floor").value || undefined }, $("st-go"), $("st-note"));
+        });
         $("ml-reset").addEventListener("click", async () => {
           applying = "ml-reset"; gate();
           let ok = false;
@@ -2844,7 +2833,7 @@ enum DashboardScript {
           const idle = !offline && !busy && !edits && !conflict && !switching && (dashboard ? dashboard.can_tune && !dashboard.reload_required : liveState === "ready");
           // No silently disabled action: the reason stands next to tuning and the memory search, with Reload when that is it.
           const why = idle ? "" : tuneBlock(edits, switching, needsReload) || "Available when the loaded model is idle", reloadFirst = why === RELOAD_FIRST;
-          ["st-go", "st-check", "st-undo", "measure"].forEach(id => { hold($(id), !idle || measuring, id === "measure" ? measuring : running() && job.kind === "tune" && tuneBy === id); $(id).title = why; });
+          ["st-go", "measure"].forEach(id => { hold($(id), !idle || measuring, id === "measure" ? measuring : running() && job.kind === "tune" && tuneBy === id); $(id).title = why; });
           $("st-why").textContent = why ? why + "." : ""; $("st-reload").hidden = !reloadFirst;
           $("pending").hidden = !needsReload || offline; $("pending-text").textContent = needsReload ? pendingText() : "";
           $("pending-discard").hidden = !(dashboard && Object.keys(dashboard.pending_revert || {}).length);
@@ -2979,7 +2968,7 @@ enum DashboardScript {
           }
         });
         $("st-mode").addEventListener("change", () => {
-          $("st-scope").textContent = $("st-mode").value === "tradeoffs" ? "Times each quality level. Speed only: answer quality is not scored. Nothing changes until you apply." : $("st-mode").value === "memory" ? "Reloads the model at a few memory limits (10 to 20 minutes) and suggests the highest this Mac keeps without cutting or swapping. Your setting is not changed." : "Tries timing settings against the current ones; keeps one only if it is faster with the same test replies.";
+          $("st-scope").textContent = $("st-mode").value === "tradeoffs" ? "Times each quality level. Speed only: answer quality is not scored. Nothing changes until you apply." : "Reloads the model at a few memory limits (10 to 20 minutes) and suggests the highest this Mac keeps without cutting or swapping. Your setting is not changed.";
           gate();
         });
         $("st-result").addEventListener("click", async event => {

@@ -4,6 +4,33 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.2.1 (2026-11-28)
+
+**Replies:** unchanged. Saved prompts of every model are read again once (the reading code under all three engines
+changed).
+
+- **Qwen with GGUF experts no longer fills the Mac's file cache while it reads.** macOS keeps everything past the first
+  1 MiB of an uncached read whose buffer is not page-aligned, and Qwen's expert slots are not: about 0.7 MB of every
+  1.7 MB expert read stayed in the file cache (2 → 14 GB during a 24K-token prompt read), macOS reported memory
+  pressure, and Origami's memory budget was cut by 3–8 GB at nearly every turn. Such reads now go in pieces of at
+  most 1 MiB (the same bytes). GLM and DeepSeek slots were already aligned (ROADMAP C7).
+- **Qwen: the first reply after a prompt read no longer stalls about 2 s** while the expert cache is made resident for
+  the GPU; that now happens on another thread as the reply begins (ROADMAP B8).
+- **Qwen: a prompt read lends unused key/value room to the expert cache only while the Mac has it free** above the
+  memory governor's floor and 1 GB; on a busy Mac it keeps the earlier, safer limit (ROADMAP C1').
+- **GLM and DeepSeek reserve working memory for one step at load instead of 1.5 GB**, so the expert cache starts about
+  2.3 GB larger (`ORIGAMI_FAMILY_LAZY_STARTUP_WORKSPACE` is now always on).
+- **`origami model add` names a conversion that quantizes weights a second time** (what goes onto what, and its
+  measured cost where one exists) and converts only with `--lossy` or a yes; the dashboard's Add shows the same line
+  and asks. `docs/models.md` lists every published format of the three models as native, quantized once, lossy or
+  refused. Every quantized Qwen GGUF is converted lossily today (about 10% added error per non-expert tensor).
+- **`origami tune` is the memory measurement** (`--memory` means the same; `--tradeoffs true` still times the quality
+  levels), and says in one line when a larger hot copy would help. The comparison of timing switches is gone (14
+  production runs found no win), with `--recheck`, `--undo`, `--review`, the dashboard's Re-check and Undo and the
+  `not_tuned` advice. Older saved results are ignored.
+- **Removed:** split reads (`ORIGAMI_SPLIT_READS`, opt-in since 3.1.8: neutral on GLM's decode, and prompt reads are not
+  bound by the drive) and `ORIGAMI_FAMILY_REFRESH_IDLE_OVERHEAD` (neutral), with their status fields.
+
 ## 3.2.0 (2026-11-28)
 
 **Replies:** changed once for requests with tools (the tool list and past tool calls are written into the prompt as

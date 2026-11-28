@@ -631,6 +631,37 @@ func converterGGUF() throws {
 
     let converter = try CheckpointConverter(gguf: GGUFSource(source), support: support, checkContract: false)
     try require(converter.sourceKind == "GGUF (F32/Q8_0)", "source kind \(converter.sourceKind)")
+    // The header-only classification (docs/models.md's matrix) names what the conversion quantizes, from names alone:
+    // the tensors `init(gguf:)` quantizes in this fixture, and no other. Here only the Q8_0 embeddings are quantized a
+    // second time; an all-float GGUF is quantized once, not lossy.
+    let kept: Set<String> = [
+        "token_embd.weight", "output.weight", "output_hc_down.weight", "output_hc_up.weight", "per_layer_token_embd.weight",
+        "blk.1.ple_key.weight", "blk.1.ple_value.weight",
+    ]
+    let perLayer = [
+        "hc_attn_up", "hc_ffn_up", "ffn_gate_shexp", "ffn_up_shexp", "ffn_down_shexp", "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps",
+    ]
+    let quantizedNames =
+        kept.union((0..<4).flatMap { i in perLayer.map { "blk.\(i).\($0).weight" } })
+        .union(["blk.0.hc_attn_down_inject.weight", "blk.0.hc_ffn_down_inject.weight", "blk.0.attn_qkv_gate.weight"])
+        .union((1..<4).flatMap { i in ["blk.\(i).hc_attn_down.weight", "blk.\(i).hc_ffn_down.weight"] })
+        .union(["blk.1.attn_qkv.weight", "blk.1.attn_gate.weight", "blk.2.attn_qkv.weight", "blk.2.attn_gate.weight"])
+        .union((0..<3).map { "blk.\($0).ssm_out.weight" })
+        .union(["attn_q", "attn_k", "attn_v", "attn_output"].map { "blk.3.\($0).weight" })
+    let predicted = Set(try GGUFSource(source).tensors.keys.filter { CheckpointConverter.ggufQuantizes($0, nativeExperts: false) })
+    try require(
+        predicted == quantizedNames,
+        "quantized tensors predicted from names differ: \(predicted.symmetricDifference(quantizedNames).sorted())")
+    try require(
+        CheckpointConverter.ggufLoss(try GGUFSource(source), experts: 2)
+            == "re-quantizes 1 tensors stored as Q8_0 ×1 (token embeddings) onto 4-bit affine group 64",
+        "Q8_0 loss: \(CheckpointConverter.ggufLoss(try GGUFSource(source), experts: 2) ?? "none")")
+    let floatsOnly = root.appendingPathComponent("floats", isDirectory: true)
+    try FileManager.default.createDirectory(at: floatsOnly, withIntermediateDirectories: true)
+    try write(
+        tensors.map { $0.name == "token_embd.weight" ? ($0.name, $0.shape, 0, embed.withUnsafeBytes { Data($0) }) : $0 },
+        to: floatsOnly.appendingPathComponent("tiny-F32.gguf"))
+    try require(CheckpointConverter.ggufLoss(try GGUFSource(floatsOnly), experts: 2) == nil, "an all-float GGUF named lossy")
     try converter.convert(to: destination)
     try require(
         try String(contentsOf: destination.appendingPathComponent("chat_template.jinja"), encoding: .utf8) == "{{ messages }}"
@@ -723,6 +754,12 @@ func converterGGUF() throws {
         try write(variant, to: folder.appendingPathComponent("tiny-experts.gguf"), experts: UInt32(experts))
         let gguf = try GGUFSource(folder)
         let native = try CheckpointConverter(gguf: gguf, support: support, checkContract: false)
+        try require(
+            CheckpointConverter.ggufLoss(gguf, experts: 2)
+                == (native.expertManifest != nil
+                    ? "re-quantizes 1 tensors stored as Q8_0 ×1 (token embeddings) onto 4-bit affine group 64; the routed experts stay as stored"
+                    : "re-quantizes 13 tensors stored as Q4_0 ×12, Q8_0 ×1 (routed experts, token embeddings) onto 4-bit affine group 64"),
+            "\(GGUFQuant.name(type)) banks of \(experts) experts: loss \(CheckpointConverter.ggufLoss(gguf, experts: 2) ?? "none")")
         try require(
             (native.expertManifest != nil) == (type == 42 || experts == 1)
                 && (type == 2 && experts == 2

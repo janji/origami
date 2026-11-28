@@ -68,8 +68,8 @@ check 0 "Usage: origami <command>" "$bin" --help
 # The first screen is the way to a running server; each command lists its own options first, and only serve and setup
 # every setting.
 check 0 "1. origami setup" "$bin"
-check 0 "tune --memory         Find this Mac's fastest memory limit" "$bin" --help
-check 0 "--memory                    reload at a few memory limits" "$bin" tune --help
+check 0 "tune                  Find this Mac's fastest memory limit" "$bin" --help
+check 0 "--memory                    what tune does without --tradeoffs" "$bin" tune --help
 check 0 "origami model add <experts.gguf> --base <model> [--name <name>] [--yes]" "$bin" model --help
 check 0 "and every other setting as --<key> <value>" "$bin" status --help
 "$bin" status --help | grep -q -- "--tail-skip" && { echo "FAIL  status --help lists the quality knobs"; failures=$((failures + 1)); }
@@ -124,8 +124,10 @@ check 1 "No ready Origami server" "$bin" bench
 check 1 "No ready Origami server" "$bin" tune
 check 2 "--minutes needs a value" "$bin" tune --minutes
 check 2 "--minutes is a number of minutes" "$bin" tune --minutes abc
-check 2 "--minutes is 3 to 30" "$bin" tune --minutes 99
-check 2 "--review is true or false" "$bin" tune --review maybe
+check 2 "--minutes is 3 to 60" "$bin" tune --minutes 99
+check 2 "--minutes is 3 to 30 with --tradeoffs" "$bin" tune --tradeoffs true --minutes 45
+# The timing-switch comparison is gone: its options are unknown now.
+check 2 "--recheck" "$bin" tune --recheck
 check 2 "--tradeoffs is true or false" "$bin" tune --tradeoffs sure
 # tune measures the server as it runs: a setting given to it would only mislabel the result.
 check 2 "--context would only mislabel the result" "$bin" tune --context 32k
@@ -574,6 +576,23 @@ PY
     check 0 '"needs_bytes":9355848930816' curl -s -m 20 -G 127.0.0.1:$port_a/v1/models/check --data-urlencode "source=$tmp/glm-big"
     check 0 '"fits":false' curl -s -m 20 -G 127.0.0.1:$port_a/v1/models/check --data-urlencode "source=$tmp/glm-big"
     check 1 "Converting needs 9355.8 GB free there" "$bin" model add "$tmp/glm-big"
+    # Its FP8 twin is quantized a second time: the check and `model add` name that, and nothing converts without --lossy.
+    cp -R "$tmp/glm-big" "$tmp/glm-fp8"
+    python3 - "$tmp/glm-fp8" <<'PY'
+import json, struct, sys
+d = sys.argv[1]; c = json.load(open(d + "/config.json")); c["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+json.dump(c, open(d + "/config.json", "w"))
+with open(d + "/model.safetensors", "r+b") as f:
+    n = struct.unpack("<Q", f.read(8))[0]; h = json.loads(f.read(n))
+    t = h["model.layers.0.mlp.experts.0.up_proj.weight"]; t["dtype"] = "F8_E4M3"  # one byte a weight: a shorter span
+    t["data_offsets"][1] = t["data_offsets"][0] + t["shape"][0] * t["shape"][1]
+    blob = json.dumps(h, separators=(",", ":")).encode().ljust(n)  # compact, so it fits the old header
+    assert len(blob) == n
+    f.seek(8); f.write(blob)
+PY
+    check 0 '"lossy":"Lossy: it re-quantizes 1 FP8 E4M3 tensors' curl -s -m 20 -G 127.0.0.1:$port_a/v1/models/check --data-urlencode "source=$tmp/glm-fp8"
+    check 1 "pass --lossy to accept" "$bin" model add "$tmp/glm-fp8" --yes
+    check 1 "Converting needs" "$bin" model add "$tmp/glm-fp8" --lossy
 else echo "skip  the GLM conversion's room (no python3)"; fi
 check 0 "own page" curl -s -m 5 -X POST 127.0.0.1:$port_a/v1/jobs -H "Origin: http://example.com" -H "Content-Type: application/json" -d '{"kind":"add","source":"a/b"}'
 check 0 "source must be" curl -s -m 5 -X POST 127.0.0.1:$port_a/v1/jobs -H "Content-Type: application/json" -d '{"kind":"add","source":"--yes"}'

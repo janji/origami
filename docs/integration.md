@@ -32,8 +32,8 @@ the dashboard's Now tab and `origami status` show it: `[{"id", "text", "fix", "s
 `text` says what, `fix` what to do (or that it recovers by itself, and when), `since` (ISO 8601) when it began or was
 first seen. The ids: `drive_gone`, `job`, `memory_low`, `memory_limit_not_kept`, `warming_up`, `memory_full`, `model_drive_slow`, `model_drive_due`,
 `drive_not_allowed`, `copy_drive_gone`, `hot_copy_building`, `hot_copy_no_room`, `hot_copy_failed`, `hot_copy_short`,
-`hot_copy_drive_slow`, `mac_hot`, `low_power`, `saves_paused`, `prompt_read_again`, `queue`, `memory_limit_low`,
-`not_tuned`; more may come, so show `text` and `fix` rather than matching ids. `/v1/status` also carries what the list reads from this Mac: `mac_now` (`thermal_state`, 0 to 3 as macOS reports it, and `low_power`) and, while the memory budget is 1 GB or more under what Origami may use (`memory.target_bytes`), `memory_holders` (the three largest other apps, `[{"name", "bytes"}]`).
+`hot_copy_drive_slow`, `mac_hot`, `low_power`, `saves_paused`, `prompt_read_again`, `queue`, `memory_limit_low`
+(`not_tuned` until 3.2); more may come, so show `text` and `fix` rather than matching ids. `/v1/status` also carries what the list reads from this Mac: `mac_now` (`thermal_state`, 0 to 3 as macOS reports it, and `low_power`) and, while the memory budget is 1 GB or more under what Origami may use (`memory.target_bytes`), `memory_holders` (the three largest other apps, `[{"name", "bytes"}]`).
 `memory.owners` names what holds Origami's reserved memory: bytes per owner (the expert cache, key/value storage,
 saved-prompt snapshots, HTTP buffers and so on, by the engine's own names), summing to `memory.reserved_bytes`;
 `memory.owners_without_buffer` is the part of them reserved ahead with no buffer yet. What is reserved but not yet in

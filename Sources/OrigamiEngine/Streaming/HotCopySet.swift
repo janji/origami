@@ -10,16 +10,7 @@ package struct ReadLane: Sendable {
     /// Bytes per read, smoothed as `serviceSeconds` is: with it, the drive's rate per read (`HotCopySet.laneRates`).
     package var serviceBytes = 0.0
     package var lastSelected: UInt64 = 0
-    /// When it last served a read (uptime seconds).
-    package var lastServed = 0.0
     package init() {}
-
-    /// Its drive's rate per read (smoothed bytes over smoothed time, so parts and whole records train it alike) and the
-    /// seconds since a read last fed it, once it has 8 reads; nil before.
-    package var measured: (bytesPerSecond: Double, secondsAgo: Double)? {
-        guard reads >= 8, serviceSeconds > 0 else { return nil }
-        return (serviceBytes / serviceSeconds, max(0, Double(DispatchTime.now().uptimeNanoseconds) / 1e9 - lastServed))
-    }
 
     /// A read of `bytes` done in `seconds`: the smoothed time moves an eighth of the way to it (each sample clamped to
     /// a quarter to four times the estimate, so one stall or one cached read does not swing it).
@@ -29,7 +20,6 @@ package struct ReadLane: Sendable {
         serviceSeconds = reads == 0 ? sample : prior + (sample - prior) / 8
         serviceBytes = reads == 0 ? Double(bytes) : serviceBytes + (Double(bytes) - serviceBytes) / 8
         reads &+= 1
-        lastServed = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
     }
 }
 
@@ -94,8 +84,6 @@ package final class HotCopySet: @unchecked Sendable {
             }
         }
     }
-    /// Store `index`'s lane now (reads in flight, reads done, smoothed time per read): a split's view of that drive.
-    package func lane(_ index: Int) -> ReadLane { lock.withLock { lanes[index] } }
 
     private func claim(_ key: Int, bytes: Int, excluding tried: Set<Int>) -> Int? {
         lock.withLock {
@@ -116,31 +104,20 @@ package final class HotCopySet: @unchecked Sendable {
     /// model's own files.
     @discardableResult
     package func read(_ key: Int, into: UnsafeMutableRawBufferPointer) throws -> Int {
-        try read(key, at: nil, into: into).store
-    }
-
-    /// Bytes `at ..< at + into.count` of record `key` (a split read's part), as `read` picks a store, unchecked: the
-    /// store that read them and the checksum `verify` checks the assembled record against (nil: none due). A part's
-    /// time trains its store's lane as a whole read's does, with its own bytes.
-    package func read(_ key: Int, at: Int?, store only: Int? = nil, into: UnsafeMutableRawBufferPointer) throws -> (
-        store: Int, sum: UInt32?
-    ) {
-        // `only`: a split part planned on that store; it fails (and fails over) once the store no longer holds the key.
-        var tried = Set(only.map { only in stores.indices.filter { $0 != only } } ?? [])
+        var tried = Set<Int>()
         var failure: Error?
         while let index = claim(key, bytes: into.count, excluding: tried) {
             tried.insert(index)
             let started = DispatchTime.now().uptimeNanoseconds
             do {
-                var sum: UInt32?
-                if let at { sum = try stores[index].read(key, at: at, into: into) } else { try stores[index].read(key, into: into) }
+                try stores[index].read(key, into: into)
                 let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
                 lock.withLock {
                     lanes[index].inFlight -= 1
                     lanes[index].served(seconds: seconds, bytes: into.count)
                     activity?.counter.ended(activity!.first + index, bytes: into.count)
                 }
-                return (index, sum)
+                return index
             } catch {
                 lock.withLock {
                     lanes[index].inFlight -= 1
@@ -150,10 +127,5 @@ package final class HotCopySet: @unchecked Sendable {
             }
         }
         throw failure ?? EngineError("No copy holds record \(key)")
-    }
-
-    /// Checks the assembled record `key` against each store's checksum that `read(_:at:into:)` returned (`HotCopy.verify`).
-    package func verify(_ key: Int, sums: [Int: UInt32], record: UnsafeRawBufferPointer) throws {
-        for (index, sum) in sums.sorted(by: { $0.key < $1.key }) { try stores[index].verify(key, sum: sum, record: record) }
     }
 }

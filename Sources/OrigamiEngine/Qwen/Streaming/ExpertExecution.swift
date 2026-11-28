@@ -323,7 +323,6 @@ public final class ExpertExecution {
                 try store.readExpert(layer: key.layer, expert: key.expert, into: destination, source: .packed)
             }
         }
-        loader.enableSplitReads(SourceExpertLoader.SplitPartReader(store: store))
     }
     /// Injected exact reader supports deterministic fault/cancellation tests.
     /// `prerouting` adds DecodePrerouting.readLanes lanes and outstandingRecords
@@ -590,7 +589,6 @@ public final class ExpertExecution {
         try cache.setReuseDecode(next == .decode)
         cache.setPrefillScan(next == .prefill)
         try loader.setReplicasEnabled(next == .decode && configuration.tailReplicas)
-        loader.setDecoding(next == .decode)
         if phase != next {
             phaseTransitions += 1
             phase = next
@@ -991,8 +989,6 @@ public final class ExpertExecution {
         value.prefillScheduling = prefillScheduling
         return value
     }
-    /// Split-read counters (`SplitReads`); any thread.
-    package var splitReads: SplitReadCounters { loader.splitReads }
     /// Record read times by drive; any thread.
     package var readTimes: SourceExpertLoader.ReadTimes { loader.readTimes }
     /// Counters of the online source calibration; nil when the configuration leaves it off.

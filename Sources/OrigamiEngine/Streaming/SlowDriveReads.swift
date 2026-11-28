@@ -34,13 +34,7 @@ package final class SlowDriveReads: @unchecked Sendable {
     /// The last hour per minute.
     private var minutes: [(minute: Int, busy: Double, slow: Double)] = []
     private var running = 0, mark = 0.0, pendingSeconds = 0.0
-    /// Set from the files' read history (`DriveReadLog.record`): `since_rewrite` says high or due.
-    private var historyWear = false
 
-    /// Whether these files are being worn into their slow state: the history says high or due, or the live share is
-    /// high. Split reads put no part on such a drive.
-    package var wearing: Bool { lock.withLock { historyWear } || snapshot().high }
-    package func markWear(_ on: Bool) { lock.withLock { historyWear = on } }
     /// Sets the healthy rate's floor: the drive's saved measurement (`DriveSpeed.rate(depth: 1)`); 0 clears it (the
     /// measurement was dropped or is stale).
     package func floorHealthy(_ rate: Double) {
@@ -55,8 +49,6 @@ package final class SlowDriveReads: @unchecked Sendable {
     package var rates: (current: Double, healthy: Double) {
         lock.withLock { (window.seconds > 0 ? window.bytes / window.seconds : 0, healthy.rate) }
     }
-    /// Seconds since a read last fed the current rate (`.infinity`: never): how stale `rates.current` is.
-    package var age: Double { lock.withLock { window.seconds > 0 ? max(0, clock() - window.at) : .infinity } }
 
     /// `clock`: seconds, monotonic (checks pass their own).
     package init(clock: @escaping () -> Double = { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }) { self.clock = clock }
@@ -292,7 +284,6 @@ package final class DriveReadLog: @unchecked Sendable {
             entry.slowSeconds += snapshot.slowSeconds - (before?.slowSeconds ?? 0)
             entry.high = snapshot.high
             if snapshot.high, entry.slowAfter == nil { entry.slowAfter = entry.bytes }
-            reads.markWear(entry.high || entry.due)
             // The drive's saved measurement floors its healthy rate (`drive-speeds.json`, beside this file); none (dropped
             // as wrong, or stale): no floor.
             let speeds = DriveSpeeds.read(file.deletingLastPathComponent().appendingPathComponent("drive-speeds.json"))

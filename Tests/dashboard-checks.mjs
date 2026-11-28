@@ -696,37 +696,25 @@ check(element("chip-text").textContent === "Loading" && element("power").innerHT
 routes["v1/jobs"] = [{ error: { message: "not here" } }, 404]; routes["v1/status"] = { status: "ready", version: "2.3.3-dev", model: { name: "GLM-5.3-Flash", fingerprint: "glm3" }, requests: { recent: [] } };
 run("reloading = false"); await run("refresh()"); await settle();
 check(element("power").hidden, "a one-model server's page shows no Stop");
-// The self-tuner's line follows the running model's `tuning`; its buttons start the tune job; the learned memory line.
-const knobs = { gpu_keepalive: { value: true, source: "default", default: true } };
+// The tuning panel follows the running model's `tuning` (its key); Run tuning starts the memory search after asking.
 const tuneLine = (tuning) => { run(`showSelfTune(${JSON.stringify({ tuning })})`); return element("st-line").textContent; };
 check(tuneLine(undefined) === "" && element("selftune").hidden, "an older server (no tuning) shows no tuner");
-check(tuneLine({ state: "none", entry: null, knobs }) === "" && !element("selftune").hidden && element("st-go").textContent === "Run tuning"
-  && element("st-check").hidden && element("st-undo").hidden, "not tuned: Tune for this Mac only");
-const entry = { values: { gpu_keepalive: false }, outcome: "faster", gain: 0.12, label: "GPU keep-alive off", date: "2026-11-01T12:00:00Z" };
-check(/^Applied · \+12%$/.test(tuneLine({ state: "current", entry, knobs })) && element("st-go").textContent === "Run tuning"
-  && !element("st-check").hidden && !element("st-undo").hidden, "tuned faster: the date, the gain and the setting; Re-check and Undo");
-check(tuneLine({ state: "current", entry: { ...entry, values: {}, outcome: "already_fastest", gain: 0 }, knobs }) === "Tuned: defaults are fastest (2026-11-01)" && element("st-check").hidden,
-  "already fastest: a result with its date, nothing to re-check");
-check(tuneLine({ state: "current", entry: { ...entry, outcome: "already_fastest", gain: 0 }, knobs }) === "Tuned: GPU keep-alive off stays fastest (2026-11-01)",
-  "a tuned setting nothing beat stays, with its date");
-check(tuneLine({ state: "recheck", reason: "macOS was updated", entry, knobs }) === "Re-check · macOS was updated" && !element("st-check").hidden, "an update asks for a re-check");
-check(/Setup changed/.test(tuneLine({ state: "stale", reason: "another Mac", entry, knobs })) && element("st-go").textContent === "Run tuning" && element("st-check").hidden,
-  "a result for another setup is not applied: tune again");
-check(/could not be read/.test(tuneLine({ state: "unreadable", entry: null, knobs })), "a broken file says the defaults are used");
-routes["v1/jobs"] = { job: { kind: "tune", title: "Tuning for this Mac", state: "running", stage: "Round 1 of 3", lines: [], seconds: 5, started: 5000, percent: 0.1 } };
+check(tuneLine({ key: "tune-key" }) === "" && !element("selftune").hidden && element("st-go").textContent === "Run tuning"
+  && !/st-check|st-undo/.test(readFileSync(process.argv[2], "utf8")), "a running model: Run tuning only, no Re-check or Undo");
+routes["v1/jobs"] = { job: { kind: "tune", title: "Finding the fastest memory limit", state: "running", stage: "Loading at 21.0GB", lines: [], seconds: 5, started: 5000, percent: 0.1 } };
 run("initial = current(); modelChoice = modelInitial; smSaved = null; reloading = false");
-tuneLine({ state: "none", entry: null, knobs }); await fire("st-go"); await settle();
-check(JSON.parse(sent.filter((r) => r.path === "v1/jobs" && r.method === "POST").pop().body).mode === "tune" && run("job.kind") === "tune"
-  && element("st-go").attrs["aria-busy"] === "true" && element("st-go").disabled && element("st-check").disabled, "Tune starts the job; its button turns, the others wait");
-run(`showJob(${JSON.stringify({ kind: "tune", title: "Tuning for this Mac", state: "done", stage: "done", lines: ["Tuned: writing +12% with GPU keep-alive off."], seconds: 480, started: 5000 })})`);
-check(element("job-stage").textContent === "Tuned: writing +12% with GPU keep-alive off." && !element("st-go").disabled, "done: the tuner's own last line, and the buttons are back");
-confirmed = []; confirmAnswer = false; await fire("st-undo"); await settle();
-check(confirmed.length === 1 && !sent.some((r) => r.body && r.body.includes('"undo"')), "Undo asks first");
+const tuneJobPosts = () => sent.filter((r) => r.path === "v1/jobs" && r.method === "POST").length, postsBeforeTune = tuneJobPosts();
+tuneLine({ key: "tune-key" }); confirmed = []; confirmAnswer = false; await fire("st-go"); await settle();
+check(confirmed.length === 1 && tuneJobPosts() === postsBeforeTune, "the memory search asks first");
+confirmAnswer = true; await fire("st-go"); await settle(); confirmAnswer = false;
+check(JSON.parse(sent.filter((r) => r.path === "v1/jobs" && r.method === "POST").pop().body).mode === "memory" && run("job.kind") === "tune"
+  && element("st-go").attrs["aria-busy"] === "true" && element("st-go").disabled, "Run tuning starts the memory search; its button turns");
+run(`showJob(${JSON.stringify({ kind: "tune", title: "Finding the fastest memory limit", state: "done", stage: "done", lines: ["Measured: 3 trials. Next: nothing."], seconds: 480, started: 5000 })})`);
+check(element("job-stage").textContent === "Measured: 3 trials. Next: nothing." && !element("st-go").disabled, "done: the tuner's own last line, and the button is back");
 // A successful process exit is not a successful tuning outcome. Terminal reasons must not trigger completion work.
 run("let tuningCompletions = 0; const savedJobDone = jobDone; jobDone = () => { tuningCompletions += 1; }");
 for (const [state, outcome, reason] of [["interrupted", "aborted", "The loaded model changed. Settings unchanged."],
-  ["incomplete", "incomplete", "The time limit ended before every mode was measured."],
-  ["incomplete", "too_noisy", "Measurements varied too much to confirm an improvement."]]) {
+  ["incomplete", "incomplete", "The time limit ended before every mode was measured."]]) {
   const started = 5100 + sent.length + reason.length;
   run(`showJob(${JSON.stringify({ kind: "tune", title: "Comparing quality modes", state: "running", stage: "Measuring", lines: [], seconds: 20, started, percent: 0.7 })})`);
   const sentBeforeOutcome = sent.length;
@@ -746,7 +734,7 @@ run("jobDone = savedJobDone; const savedTuneDashboard = dashboard, savedTuneRevi
 const comparisonRow = { quality: "dynamic", decode_tps: 1.2, first_token_seconds: 3, samples: 2, spread: 0.45 };
 const showComparison = (result) => {
   run(`dashboard = ${JSON.stringify({ tuning_proposal: { kind: "tradeoffs", key: "tune-key", revision: "tune-fixture", results: [result] } })}`);
-  tuneLine({ key: "tune-key", state: "none", entry: null, knobs });
+  tuneLine({ key: "tune-key" });
   return element("st-result").innerHTML;
 };
 let comparisonHTML = showComparison(comparisonRow);
@@ -758,13 +746,12 @@ for (const invalid of [{ ...comparisonRow, samples: 1 }, { ...comparisonRow, dec
   comparisonHTML = showComparison(invalid);
   check(/data-blocked disabled/.test(comparisonHTML), "incomplete or invalid measurements cannot be applied");
 }
-// A tuned prompt group says before Apply that it sets the saved Qwen prompts aside.
-run(`dashboard = ${JSON.stringify({ tuning_proposal: { kind: "performance", key: "tune-key", revision: "tune-fixture", entry: { gain: 0.12, values: { qwen_prefill_scope: 768 } },
-  sets_aside: "Applying it sets aside this model's 3 saved prompts (4.2 GB): the new prompt group starts their cache afresh, so the next prompts are read in full." } })}`);
-tuneLine({ key: "tune-key", state: "none", entry: null, knobs });
-check(/sets aside this model.{1,6}s 3 saved prompts \(4\.2 GB\)[\s\S]*data-tune-apply/.test(element("st-result").innerHTML), "a tuned prompt group names the saved prompts it sets aside, before Apply");
+// An older build's timing proposal (kind "performance") is not offered.
+run(`dashboard = ${JSON.stringify({ tuning_proposal: { kind: "performance", key: "tune-key", revision: "tune-fixture", entry: { gain: 0.12, values: { gpu_keepalive: false } } } })}`);
+tuneLine({ key: "tune-key" });
+check(element("st-result").innerHTML === "", "an older build's timing proposal shows nothing to apply");
 run("dashboard = { last_tuning: { key: 'tune-key', outcome: 'incomplete', reason: 'Two measurements per mode are needed.' } }");
-check(tuneLine({ key: "tune-key", state: "none", entry: null, knobs }) === "Incomplete · settings unchanged"
+check(tuneLine({ key: "tune-key" }) === "Incomplete · settings unchanged"
   && element("st-note").textContent === "Two measurements per mode are needed.", "the tuning panel keeps the incomplete outcome and reason");
 run("dashboard = savedTuneDashboard; revision = savedTuneRevision;");
 const learned = (m) => { run(`showLearned(${JSON.stringify({ memory_learned: m })})`); return element("ml-text").textContent; };
@@ -790,9 +777,9 @@ routes["v1/memory/learned"] = { reset: true }; await fire("ml-reset"); await set
 check(sent.some((r) => r.path === "v1/memory/learned" && r.method === "POST") && /^Forgotten/.test(element("ml-text").textContent), "Forget the learned start forgets it");
 // The page itself: Storage and folders is one closed section; the drive buttons the card replaced are gone.
 const html = readFileSync(process.argv[2], "utf8");
-// A tuning run needs about five minutes on the slowest model to compare anything: no shorter limit is offered, and the
-// default one grows to what the model's measurements need.
-check(/<select id="st-budget"><option value="" selected>About 8 min \(more if needed\)<\/option><option value="8">8 min<\/option>/.test(html), "the tuning time limit starts at 8 min, growing if needed");
+// A quality comparison's time limit starts at 8 min (the memory search sets its own); the memory search is the first choice.
+check(/<select id="st-budget"><option value="" selected>8 min<\/option>/.test(html) && /<select id="st-mode"><option value="memory">/.test(html),
+  "the tuning time limit starts at 8 min; the memory search comes first");
 check(/<div id="view-library" hidden>/.test(html) && !/Use as store|Hot copy here|Rebuild elsewhere|<h2>Drives<\/h2>/.test(html), "Storage has its own view; obsolete drive action buttons are absent");
 
 // Shared snapshot: draft preservation, revision conflicts and action eligibility.
@@ -1069,6 +1056,17 @@ check(confirmed.length === 0 && /router differs/.test(element("add-info").textCo
 confirmAnswer = false; routes["v1/jobs"] = { job: null }; run("jobPost = null; jobLive = null"); await settle();
 element("add-base").value = ""; await run('checkSource("owner/name")'); await settle();
 check(element("add-base-row").hidden, "a download offers no base");
+// A conversion that quantizes weights a second time: the check's line is shown, and only a yes adds it, with --lossy.
+const plainCheck = routes["v1/models/check"];
+routes["v1/models/check"] = { verdict: "converts", family: "Qwen", bytes: 5e10, needs_bytes: 0, fits: true, lossy: "Lossy: it re-quantizes 9 tensors. Measured cost: not measured." };
+await run('checkSource("/m/q.gguf")'); await settle();
+check(/converts once\. Lossy: it re-quantizes 9 tensors/.test(element("add-info").textContent), "a lossy conversion is named before the add");
+confirmed = []; confirmAnswer = false; let lossyPosts = addPosts().length; fire("add-go"); await settle();
+check(confirmed.length === 1 && /re-quantizes 9 tensors/.test(confirmed[0]) && addPosts().length === lossyPosts && element("add-info").textContent === "Not added.",
+  "declined, nothing is posted");
+confirmed = []; confirmAnswer = true; fire("add-go"); await settle();
+check(addPosts().length === lossyPosts + 1 && addPosts().pop().lossy === true, "a yes posts the add with lossy");
+confirmAnswer = false; routes["v1/models/check"] = plainCheck; routes["v1/jobs"] = { job: null }; run("jobPost = null; jobLive = null"); await settle();
 // The source edited while its check is pending: that check's answer brings no Add back, so A is never posted under B.
 let releaseCheck; const keptCheck = routes["v1/models/check"];
 routes["v1/models/check"] = () => new Promise((done) => { releaseCheck = () => done(answer({ verdict: "runs", family: "Qwen", bytes: 1e11, needs_bytes: 0, fits: true })); });

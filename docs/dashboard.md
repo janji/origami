@@ -140,48 +140,28 @@ files for reuse.
 
 ## Tuning for this Mac
 
-`origami tune` (or **Tune for this Mac** in the dashboard's Setup tab) measures the running model's
-timing-only switches against its current settings on this Mac, in about 8 minutes, and keeps a switch only if it was
-faster in every round with identical replies. After its first measurement it knows how long this model needs: the
-default limit then grows to fit (up to 30 minutes, saying so); a limit you choose (`--minutes`, or the dashboard's
-Time limit) is kept, and the run measures the candidates that fit and names the ones left out. The switches are the GPU keep-alive, and GLM's and DeepSeek's
-next-layer expert guesses, their depth and spinning.
+`origami tune` (or **Tune for this Mac** in the dashboard's Setup tab) finds this Mac's fastest memory limit for the
+running model and context ([below](#the-fastest-memory-limit); `origami tune --memory` says the same). Measured on real
+turns, the memory the expert cache gets and the size of the hot copy are what move a reply's speed by more than 5%;
+the timing switches earlier versions compared (GPU keep-alive, next-layer guesses, spinning, prompt grouping) did not,
+so 3.2 no longer compares them, and a result an older version saved for them is ignored. After the memory
+measurement, when the model's hot copy does not hold every expert and its drive has room, tune says in one line that a
+larger hot copy would read more of them from it.
 
-- Origami applies the result whenever it serves that model and context on this Mac; your own settings still win.
-- `origami tune --recheck` checks the result still beats the defaults (offered after a macOS update); `--undo`
-  removes it.
 - It starts only while the loaded model is idle, runs its saved settings and no other job runs; otherwise `origami
-  tune` (and `tune --memory`) stops with the reason the dashboard shows, such as "Reload to apply saved settings first".
-- It stops, changing nothing, when an app sends a request, the Mac is too warm, memory runs short, Origami restarts
-  or the conditions change too much. Ordinary background activity and a steady Low Power Mode are accepted.
-- Nothing measured is lost: each finished comparison is kept (in `tuning.json`), and the next run within a day, for the
-  same model, context, settings and Origami build, continues from it ("continuing: N of M measurements kept from …")
-  while a fresh baseline still agrees with the kept one within 3%; otherwise it says so and measures again.
-  At the time limit the comparison in progress finishes and the run decides from what it has.
-- Every ending says what was measured, what was kept and what to do next (often nothing).
-- "The defaults are fastest" is a result: it is recorded, and the dashboard shows "Tuned: defaults are fastest
-  (date)". The defaults were tuned by hand on the development Mac, so expect it on an M2 Pro.
+  tune` stops with the reason the dashboard shows, such as "Reload to apply saved settings first".
+- It stops, changing nothing, when an app sends a request, memory runs short, Origami restarts or the loaded model
+  changes. Every ending says what was measured, what was kept and what to do next.
 
-The dashboard's **Tune for this Mac** finds one of three things:
-
-- **Faster settings, same replies** compares timing switches (GPU keep-alive; for GLM and DeepSeek next-layer
-  guesses, their depth and spinning) and prompt grouping within the memory Origami has.
-  Each candidate is measured next to the current settings and a control, with retries and a separate
-  confirmation. A candidate is kept only if it gains at least 3% and twice the measured noise, keeps the replies,
-  and does not slow down prompt reading. Noisy runs raise the bar; an inconclusive run changes nothing.
-  Qwen's prompt grouping is **NUMERIC**: matching the test replies does not guarantee identical replies on other
-  prompts. GLM's and DeepSeek's grouping keeps the same arithmetic (**BITWISE**).
-- **The speed of each quality level** measures the quality levels the running model offers down to the limit you choose,
-  with context, memory and thinking fixed, and reports token rate, first-token time and their
-  variation. These are speed measurements, not scores of answer quality.
+The dashboard's **Tune for this Mac** finds one of two things:
 
 - **The fastest memory limit**: see below.
-
-The first two use temperature 0 without changing your saved sampling settings or saving the test prompts. Review the
-results before applying them. Other requests, memory pressure or an
-unavailable model interrupt it. From the command line: `origami tune --review true` saves a proposal without
-applying it, and `origami tune --tradeoffs true` compares exact with the model's mildest level after it (`dynamic`) without changing
-settings (`--quality-floor <level>` compares down to that level).
+- **The speed of each quality level** measures the quality levels the running model offers down to the limit you choose,
+  with context, memory and thinking fixed, and reports token rate, first-token time and their
+  variation. These are speed measurements, not scores of answer quality. It uses temperature 0 without changing your
+  saved sampling settings or saving the test prompts; review the results before applying one. From the command line:
+  `origami tune --tradeoffs true` compares exact with the model's mildest level after it (`dynamic`) without changing
+  settings (`--quality-floor <level>` compares down to that level).
 
 ### The fastest memory limit
 

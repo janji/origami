@@ -204,8 +204,6 @@ public final class NativeServingBackend: ServingBackend, @unchecked Sendable {
     public var expertCacheSnapshot: ExpertCache.Snapshot? { driver.executor.expertCacheSnapshot }
     /// The model files' slow reading (`SlowDriveReads`), for the Experts card's model row.
     public var modelDriveSlowReads: [String: Any] { modelDriveReads.snapshot().report }
-    /// `split_reads` in /v1/status (`SplitReadCounters`), nil without streamed experts. Any thread.
-    public var splitReads: [String: Any]? { driver.executor.splitReads?.report }
     package var modelDriveReads: SlowDriveReads { driver.executor.weights.store.modelDriveReads }
     /// Expert reads since start from the pack's drive, the model's drive and the hot copy: count and seconds each.
     package var expertReadTimes: [(count: UInt64, seconds: Double, buckets: [UInt64])]? { driver.executor.decodeTiming?.reads }

@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import OrigamiEngine
 
-/// `origami tune --memory` (the dashboard's tuning mode "Fastest memory limit"): reloads the running model at a few
+/// `origami tune` (or `--memory`; the dashboard's tuning mode "The fastest memory limit"): reloads the running model at a few
 /// memory limits (`SelfTuning.memoryCandidates`), each through the front as a trial that leaves the saved settings and the
 /// memory history alone, and times a long prompt's first reply and a repeat. A limit the Mac cut or swapped for is out;
 /// the highest kept is suggested (when even the lowest is out, up to three lower limits are tried first, from the level the
@@ -28,7 +28,7 @@ extension Tuning {
     }
 
     /// The trials an interrupted `tune --memory` kept (`memory-partial@<key>`, each saved as it ends) for the same build
-    /// and Mac, for a day (`AutoMeasure.backOff`), as `origami tune` keeps its rounds (`Kept`).
+    /// and Mac, for a day (`AutoMeasure.backOff`).
     static func keptMemoryTrials(_ settings: Settings, key: String, identity: [String: Any]) -> (
         trials: [SelfTuning.MemoryTrial], date: Date
     )? {
@@ -299,7 +299,7 @@ extension Tuning {
         // Saved first, so the model reloaded with your settings shows the result.
         print("Reloading your saved memory limit")
         client.deadline = nil
-        _ = try await load(nil)
+        let reloaded = try await load(nil)
         if saved == nil { print("note: the result could not be saved to tuning.json") }
         print("Limit    First reply  Repeat      First token  Cache    Cuts  Swap")
         trials.forEach { print(row($0)) }
@@ -322,7 +322,31 @@ extension Tuning {
                     ? "nothing (automatic memory starts from it)" : "set it as your limit with the command above if you want it")
                 : "close other apps or use a smaller context, then run it again") + "."
         print(text + String(format: " (%.0f minutes)", Date().timeIntervalSince(started) / 60))
+        if let advice = hotCopyAdvice(reloaded) { print(advice) }
         outcome("comparison", reason: text)
+    }
+
+    /// One line after the measurement when the model's hot copy (its first place) does not hold every expert and its
+    /// drive has room for a larger one (with the cache's memory, the lever measured to move a real turn), from
+    /// `/v1/status`'s `experts_from` row; nil otherwise.
+    static func hotCopyAdvice(_ status: [String: Any]) -> String? {
+        func bytes(_ value: Any?) -> UInt64 { (value as? NSNumber)?.uint64Value ?? 0 }
+        let sources = (status["experts_from"] as? [String: Any])?["sources"] as? [[String: Any]] ?? []
+        guard let hot = sources.first(where: { $0["role"] as? String == "hot" }),
+            !["not_possible", "not_needed", "not_connected"].contains(hot["state"] as? String ?? ""),
+            hot["size_limit"] as? String != "whole_set", hot["free_bytes"] is NSNumber
+        else { return nil }
+        let popularity = hot["popularity"] as? [String: Any] ?? [:]
+        if let all = popularity["experts"] as? Int, all > 0, (popularity["held_experts"] as? Int ?? 0) >= all { return nil }
+        let free = bytes(hot["free_bytes"])
+        let reserve = bytes(hot["reserve_bytes"])
+        let room = free > reserve ? free - reserve : 0
+        // As the hot copy's Change… offers a drive: room for at least 20 GB more.
+        guard room >= 20_000_000_000 else { return nil }
+        let drive = hot["drive"] as? String ?? "its drive"
+        return "Hot copy: \(OrigamiPlan.gigabytes(bytes(hot["bytes"]))) on \(drive) does not hold every expert, and \(drive) has "
+            + "\(OrigamiPlan.gigabytes(room)) more room: a larger hot copy would read more of them from it instead of the model's "
+            + "drive (`origami config set hot_copy <size>`; the dashboard's Models tab shows what each size covers)."
     }
 
     /// What a stopped memory search measured and kept, and what to do next.

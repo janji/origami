@@ -17,7 +17,7 @@ It is one native binary (Swift and Metal, no Python, no MLX) with a local server
 and Ollama APIs, and a dashboard in the browser.
 
 **New here?** Start with [the guide](docs/guide.md): install, first run, every feature in short, and what is planned.
-The current release is 3.1.8.1 ([what changed](CHANGELOG.md)).
+The current release is 3.2.1 ([what changed](CHANGELOG.md)).
 
 ![The dashboard's Now tab: the model, its speed, where the last request's time went, where experts were read from, memory and health](docs/images/dashboard-now.png)
 
@@ -39,7 +39,7 @@ level). More pictures [below](#the-dashboard).*
 - **A dashboard in the browser.** Live speed and why a request was slow, memory, drives, models and files, and the
   settings as dials that show what this Mac's memory makes of each move.
 - **Memory that fits your Mac.** An automatic limit that gives way when macOS is short of memory and climbs back;
-  `origami tune --memory` measures this Mac's fastest limit and `origami tune` its timing settings.
+  `origami tune` measures this Mac's fastest limit.
 - **Several models on one port.** Load and switch between them by name; requests wait in a queue.
 - **Looks after the drive.** Measures each drive's speed, tells you when the model's drive reads slowly and
   rewrites its files in place (`origami refresh`), and carries on by itself when a drive is replugged.
@@ -230,6 +230,20 @@ its first two replies wrote 5.6 and 5.9 tok/s (91 and 1,203 tokens) and began af
 has not scored its answers; ISTA-DASLab's card reports it equal to the original model on AIME25, GPQA-Diamond and
 LiveCodeBench ([Get the files](docs/models.md#get-the-files)).
 
+**Low-bit builds on 3.2.1, in agent use.** Same Mac, 28 November 2026, each model with a hot copy on the internal SSD
+and automatic memory. Qwen's row is a real coding-agent turn replayed (a 27.7K-token conversation, 3.1K of it new,
+exact, two runs); the other two are a 4K-token prompt read from nothing and a 100-token reply, one run each:
+
+| Model | Writing | First word |
+|---|---|---|
+| Qwen with ISTA-DASLab's GSQ-RCO IQ3_XXS experts (exact) | 10.1 tok/s (3.2.0: 8.4–8.9) | 31 s for 3.1K new tokens |
+| DeepSeek, ISTA-DASLab's GSQ-RCO IQ2_XXS (`dynamic`) | 5.2 tok/s | 82 s |
+| GLM, Unsloth's UD-IQ3_XXS (exact) | 2.0 tok/s | 63 s |
+
+On 12 checkable tasks (`Tools/bench/quality_tasks.py`) GLM's build solved 12, DeepSeek's 10 and Qwen's 9; none was
+scored beside its higher-precision build on this Mac. A token of Qwen's reply is about 60% GPU work and 30% waiting
+for experts; GLM's is about 70% waiting for experts, so GLM gains most from memory and a faster drive.
+
 ### On an M4 Max with 128 GB
 
 A user's report ([issue #1](https://github.com/janji/origami/issues/1)), not measured by us: a Mac Studio with
@@ -322,6 +336,8 @@ which it stayed usable on checkable tasks ([docs/models.md](docs/models.md#quali
 - **Any OpenAI client** (Open WebUI and others): base URL `http://127.0.0.1:11439/v1`, any key.
 - **Anthropic clients and Claude Code**: `ANTHROPIC_BASE_URL=http://127.0.0.1:11439`.
 - **Ollama clients**: `OLLAMA_HOST=127.0.0.1:11439`.
+- **Model names**: `qwen`, `glm` and `deepseek` name whichever build of that model is installed, so replacing a build
+  (`origami model replace`) breaks no client ([docs/models.md](docs/models.md)).
 - **Codex**, **Pi**, **llama-swap**, starting at login (`origami service install`), API keys and network access:
   [docs/integration.md](docs/integration.md).
 

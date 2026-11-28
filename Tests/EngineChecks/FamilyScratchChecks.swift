@@ -147,7 +147,7 @@ func familyScratchPlanBounds() throws {
         try require((decode[indexName] ?? Int.max) <= 256, "\(family): decode planned the full context")
         let small = try decode.values.reduce(UInt64(0)) { $0 + UInt64(try FamilyRunner.scratchLength($1)) }
         let large = try prompt.values.reduce(UInt64(0)) { $0 + UInt64(try FamilyRunner.scratchLength($1)) }
-        try require(small < large && large < runner.workingBytes, "\(family): row plan exceeds its working owner")
+        try require(small < large && large < FamilyRunner.baseWorkingBytes, "\(family): row plan exceeds the prompt phase's working limit")
         let result = try model.forward((0..<269).map { 1 + $0 % 7 })
         try require(result.allSatisfy(\.isFinite), "\(family): planned grouped forward was not finite")
         runner.beginDecode()

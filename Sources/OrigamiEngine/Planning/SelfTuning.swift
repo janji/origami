@@ -1,9 +1,8 @@
 import Foundation
 
-/// `origami_tune`: execution switches a request from this Mac's own tuner may set for
-/// itself, so `origami tune` compares settings request by request in the one loaded model. Only these keys, only with
-/// `origami_mode: exact` except explicit delayed-expert experiments;
-/// the front refuses the field from other devices.
+/// `origami_tune`: execution switches a request from this Mac's own tools (benchmarks, `origami tune`'s requests, which
+/// send it empty) may set for itself alone. Only these keys, only with `origami_mode: exact` except explicit
+/// delayed-expert experiments; the front refuses the field from other devices.
 public struct TuneOverrides: Sendable, Equatable {
     /// Qwen: the GPU keep-alive spin for this reply.
     public var gpuKeepAlive: Bool?
@@ -39,8 +38,7 @@ public struct TuneOverrides: Sendable, Equatable {
         "family_early_delayed_reads", "qwen_prefill_scope", "family_prefill_slices",
         "qwen_pair_probe", "delayed_experts",
     ]
-    /// Switches the H3 screen retired: accepted with any value and ignored, so a saved tuning result or a request that
-    /// still names one keeps working.
+    /// Switches the H3 screen retired: accepted with any value and ignored, so a request that still names one keeps working.
     public static let retiredKeys = ["family_arriving_first", "family_engram_overlap", "expert_admission", "qwen_arriving_first"]
     /// Whether a request body sets `origami_tune` (the front refuses it from other devices). Parsed as the server will parse
     /// it: a JSON escape spells the key without its bytes (`origami\u005ftune`).
@@ -49,7 +47,7 @@ public struct TuneOverrides: Sendable, Equatable {
         return ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["origami_tune"] != nil
     }
 
-    /// The field as sent, or tuning.json's `values`: booleans, and a depth of 0...64 or "all".
+    /// The field as sent: booleans, and a depth of 0...64 or "all".
     public init(json: Any) throws {
         guard let object = json as? [String: Any] else { throw ServingFailure("origami_tune must be an object") }
         if let key = object.keys.first(where: { !Self.keys.contains($0) && !Self.retiredKeys.contains($0) }) {
@@ -142,70 +140,15 @@ public struct TuneOverrides: Sendable, Equatable {
     }
 }
 
-/// The self-tuner's rules, kept apart from its HTTP client so the checks run them without a model: the decision over
-/// rotated rounds, when a saved result goes stale, and which value wins.
+/// The rules `origami tune` keeps apart from its HTTP client so the checks run them without a model: when a kept
+/// measurement goes stale, and (below) which memory limit wins.
 public enum SelfTuning {
-    /// Bumped whenever a tuned setting's code or default changes: results of another version are not applied.
+    /// Bumped whenever what a measurement depends on changes: results of another version are not continued.
     public static let version = 5
-    public static let minimumGain = 0.03, noiseLimit = 0.15, promptLoss = 0.02, earlyDrop = 0.05, driftLimit = 0.03
-    /// The warm-up ends when two passes in a row decode within this of each other.
-    public static let settleLimit = 0.05
-
-    /// Seconds of a reply's stalls: what its gaps between tokens spend beyond four times their median (none with fewer
-    /// than 8 gaps). A stall the Mac adds now and then (a drive pausing, macOS reclaiming memory: DeepSeek on the M2 Pro
-    /// showed ~8.5 s about every 90 s) lands in one arm's reply and not its repeat; a setting that slows every token stays.
-    public static func stallSeconds(gaps: [Double]) -> Double {
-        guard gaps.count >= 8 else { return 0 }
-        let limit = 4 * median(gaps)
-        return limit > 0 ? gaps.reduce(0) { $0 + max(0, $1 - limit) } : 0
-    }
-    /// Whether two warm-up passes' decode speeds are within `settleLimit` of each other.
-    public static func settled(_ previous: Double, _ next: Double) -> Bool { previous > 0 && abs(next / previous - 1) <= settleLimit }
-    /// The longest `origami tune --minutes`: a run on the default limit grows to it when this model's measurements need it.
-    public static let maximumMinutes = 30.0
-    /// The comparison that fits in `left` seconds, plus at most `more`: how many of the candidates, in order (`needs`: the
-    /// samples each still needs, its whole set), and the seconds to add. A winner's confirmation (`confirm` samples) and
-    /// one round (3) of margin are kept; at least one candidate is planned, so a short limit still measures and keeps.
-    public static func fit(needs: [Int], confirm: Int, sampleSeconds: Double, left: Double, more: Double) -> (
-        count: Int, extra: Double
-    ) {
-        func seconds(_ count: Int) -> Double { Double(needs.prefix(count).reduce(0, +) + confirm + 3) * sampleSeconds }
-        let count = needs.isEmpty ? 0 : max(1, (0...needs.count).last { seconds($0) <= left + more } ?? 0)
-        return (count, min(more, max(0, seconds(count) - left)))
-    }
-    /// Soft staleness: applied, but the dashboard offers a re-check.
+    /// How far a kept measurement may drift from a fresh one of the same limit before all are measured again.
+    public static let driftLimit = 0.03
+    /// Older than this, a measured memory limit is stale (`memoryStaleness`).
     public static let recheckAge: TimeInterval = 90 * 86_400
-
-    /// One arm in one round: decode and prompt tokens a second, and its replies (text with token count) in order.
-    public struct Sample: Sendable {
-        public var decode: Double, prompt: Double, replies: [String]
-        public init(decode: Double, prompt: Double, replies: [String]) {
-            self.decode = decode
-            self.prompt = prompt
-            self.replies = replies
-        }
-    }
-    /// Arm name to sample: "base" (the current settings), "control" (the base again) and each candidate.
-    public typealias Round = [String: Sample]
-
-    /// Prefill groups compete on prompt speed; decode switches keep their original objective.
-    public enum Objective: String, Sendable {
-        case decode, prompt
-        public func speed(_ sample: Sample) -> Double { self == .decode ? sample.decode : sample.prompt }
-    }
-
-    public struct Decision: Sendable {
-        /// `faster`, `already_fastest` or `too_noisy`.
-        public var outcome: String
-        public init(outcome: String) { self.outcome = outcome }
-        public var objective = Objective.decode
-        public var winner: String?
-        /// The winner's median ratio less one (0 without one), the gain an arm needed, the control gap and the base's drift.
-        public var gain = 0.0, threshold = 1.0, noise = 0.0, drift = 0.0
-        /// Each arm's objective speed ratio to its round's base, round by round.
-        public var ratios: [String: [Double]] = [:]
-        public var notes: [String] = []
-    }
 
     public static func median(_ values: [Double]) -> Double {
         let s = values.sorted()
@@ -213,111 +156,8 @@ public enum SelfTuning {
         return n == 0 ? 0 : n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
     }
 
-    /// Arms more than `earlyDrop` slower than the round's base: not run again (a pathological keep-alive shows at once).
-    public static func dropped(after round: Round) -> Set<String> {
-        guard let base = round["base"], base.decode > 0 else { return [] }
-        return Set(round.filter { $0.key != "base" && $0.key != "control" && $0.value.decode < base.decode * (1 - earlyDrop) }.keys)
-    }
-
-    /// Accepts a candidate only if it was faster than its round's base by max(3%, twice the control's gap) in every
-    /// round, its best other speed is at most 2% below the base's best (a stall only ever slows a reading), and its
-    /// replies equal the base's; the single best one wins. A control gap
-    /// above 15%, or a base that drifted more than 3% and more than half the gain, changes nothing. `threshold` (a confirm)
-    /// judges against the gain the first rounds asked for instead of measuring the noise again.
-    public static func decide(_ rounds: [Round], candidates: [String], threshold given: Double? = nil, objective: Objective = .decode)
-        -> Decision
-    {
-        var decision = Decision(outcome: "already_fastest")
-        decision.objective = objective
-        let usable = rounds.filter { $0["base"].map { objective.speed($0) > 0 } ?? false }
-        guard !usable.isEmpty else {
-            decision.outcome = "too_noisy"
-            decision.notes.append("no round measured the base")
-            return decision
-        }
-        func ratio(_ arm: String, _ round: Round, _ speed: (Sample) -> Double) -> Double? {
-            guard let sample = round[arm], let base = round["base"], speed(base) > 0 else { return nil }
-            return speed(sample) / speed(base)
-        }
-        let control = usable.compactMap { ratio("control", $0, objective.speed) }
-        decision.noise = median(control.map { abs($0 - 1) })
-        decision.threshold = given ?? 1 + max(minimumGain, 2 * decision.noise)
-        let bases = usable.map { objective.speed($0["base"]!) }
-        decision.drift = abs(bases.last! / bases.first! - 1)
-        if given == nil, decision.noise > noiseLimit {
-            decision.outcome = "too_noisy"
-            decision.notes.append(
-                String(format: "the base and its repeat differed by %.1f%% (more than %.0f%%)", decision.noise * 100, noiseLimit * 100))
-            return decision
-        }
-        // Unstable baseline output cannot establish output equivalence.
-        let reference = usable[0]["base"]!.replies
-        let baseSteady = usable.allSatisfy { $0["base"]!.replies == reference && ($0["control"].map { $0.replies == reference } ?? true) }
-        if !baseSteady {
-            decision.outcome = "too_noisy"
-            decision.notes.append("Baseline replies varied; output equivalence could not be verified")
-            return decision
-        }
-        var best: (arm: String, gain: Double)?
-        for arm in candidates {
-            let ratios = usable.compactMap { ratio(arm, $0, objective.speed) }
-            guard ratios.count == usable.count else { continue }
-            decision.ratios[arm] = ratios
-            if baseSteady, usable.contains(where: { $0[arm]!.replies != $0["base"]!.replies }) {
-                decision.notes.append("\(arm): replies differed from the base; the setting was not accepted")
-                continue
-            }
-            guard ratios.allSatisfy({ $0 >= decision.threshold }) else { continue }
-            let secondary: Objective = objective == .decode ? .prompt : .decode
-            let bestOther = { (name: String) in usable.compactMap { $0[name].map(secondary.speed) }.max() ?? 0 }
-            let other = bestOther("base") > 0 ? bestOther(arm) / bestOther("base") : 0
-            guard other == 0 || other >= 1 - promptLoss else {
-                decision.notes.append(
-                    String(format: "\(arm): \(secondary == .prompt ? "reading" : "writing") %.0f%% slower", (1 - other) * 100))
-                continue
-            }
-            let gain = median(ratios) - 1
-            if best.map({ gain > $0.gain }) ?? true { best = (arm, gain) }
-        }
-        guard let best else {
-            if given == nil && decision.noise > 0.04 {
-                decision.outcome = "too_noisy"
-                decision.notes.append("Measured gains did not clear twice the control variation")
-            }
-            return decision
-        }
-        if given == nil, decision.drift > driftLimit && decision.drift > best.gain / 2 {
-            decision.outcome = "too_noisy"
-            decision.notes.append(String(format: "the base drifted %.1f%% from the first round to the last", decision.drift * 100))
-            return decision
-        }
-        decision.outcome = "faster"
-        decision.winner = best.arm
-        decision.gain = best.gain
-        return decision
-    }
-
-    /// A bounded neighboring search, performed only by `origami tune`, never on the serving path.
-    /// Larger groups cannot exceed the existing working-memory allowance.
-    public static func prefillCandidates(current: Int, maximum: Int, step: Int) -> [Int] {
-        guard step > 0, maximum >= step else { return [] }
-        let cap = maximum / step * step
-        let current = max(step, min(current / step * step, cap))
-        let larger = current > cap / 2 ? cap : current * 2
-        return Array(Set([max(step, current / 2 / step * step), larger])).filter { $0 != current }.sorted()
-    }
-
-    /// A family model's guess depth to try: the deepest rank of guessed experts used at least half the time, or nil
-    /// when every rank is (or nothing was guessed yet).
-    public static func guessDepth(issued: [Int], used: [Int]) -> Int? {
-        let ranks = zip(issued, used).map { $0.0 > 0 && 2 * $0.1 >= $0.0 }
-        guard issued.contains(where: { $0 > 0 }), let deepest = ranks.lastIndex(of: true) else { return nil }
-        return deepest + 1 < issued.count ? deepest + 1 : nil
-    }
-
-    /// Whether a saved result fits this Mac and model now: `current` (not applied, re-tune), `recheck` (applied, re-check
-    /// offered: macOS's major version changed or it is over 90 days old) or `stale` (another Mac, memory size, GPU, model,
-    /// drive set or tuning version), with the reason.
+    /// Whether a kept measurement fits this Mac and model now: `current`, `recheck` (macOS's major version changed or it is
+    /// over 90 days old) or `stale` (another Mac, memory size, GPU, model, drive set or tuning version), with the reason.
     public static func staleness(saved: [String: Any], current: [String: Any], date: Date, now: Date = Date()) -> (
         state: String, reason: String?
     ) {
@@ -330,14 +170,6 @@ public enum SelfTuning {
         if text(saved["macos"]) != text(current["macos"]) { return ("recheck", "macOS was updated") }
         if now.timeIntervalSince(date) > recheckAge { return ("recheck", "it is over 90 days old") }
         return ("current", nil)
-    }
-
-    /// A setting's value and where it came from: the user's own (config, flag or environment) beats a tuned one, which
-    /// beats the plan's default.
-    public static func resolve<T>(explicit: T?, tuned: T?, fallback: T) -> (value: T, source: String) {
-        if let explicit { return (explicit, "setting") }
-        if let tuned { return (tuned, "tuned") }
-        return (fallback, "default")
     }
 }
 

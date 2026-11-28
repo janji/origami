@@ -156,12 +156,12 @@ public enum DashboardPage {
           </section>
           <details class="block wrap" id="selftune" hidden open><summary><h2>Tune for this Mac</h2><span class="sum-hint" id="st-line"></span></summary>
             <div class="sf"><div class="tune-options">
-              <label>Find<select id="st-mode"><option value="tune">Faster settings, same replies</option><option value="memory">The fastest memory limit</option><option value="tradeoffs">The speed of each quality level</option></select></label>
-              <label id="st-budget-label">Time limit<select id="st-budget"><option value="" selected>About 8 min (more if needed)</option><option value="8">8 min</option><option value="15">15 min</option><option value="30">30 min</option></select></label>
+              <label>Find<select id="st-mode"><option value="memory">The fastest memory limit</option><option value="tradeoffs">The speed of each quality level</option></select></label>
+              <label id="st-budget-label">Time limit<select id="st-budget"><option value="" selected>8 min</option><option value="15">15 min</option><option value="30">30 min</option></select></label>
               <label id="st-floor-label" hidden>Lowest quality<select id="st-floor"></select></label></div>
-              <p class="note" id="st-scope">Tries timing settings against the current ones; keeps one only if it is faster with the same test replies.</p>
-              <details class="tuning-help"><summary>What is tested</summary><p class="note">Faster settings: two writing prompts and an inventory lookup in exact mode without thinking; tests GPU keep-alive, prefetch, spin and prompt grouping with repeated controls, matching test replies and confirmation. Qwen prompt grouping may change other replies through rounding. The speed of each quality level: writing prompts at each level with your thinking setting. Both warm up first, use temperature 0 and leave saved settings unchanged until you apply.</p></details>
-              <div class="actions"><button type="button" class="primary" id="st-go">Run tuning</button><button type="button" id="st-check" hidden>Re-check</button><button type="button" id="st-undo" hidden>Undo tuning</button></div>
+              <p class="note" id="st-scope">Reloads the model at a few memory limits (10 to 20 minutes) and suggests the highest this Mac keeps without cutting or swapping. Your setting is not changed.</p>
+              <details class="tuning-help"><summary>What is tested</summary><p class="note">The fastest memory limit: a long prompt, then two writing prompts at each limit; a limit macOS cut or swapped for is out, and your saved limit is reloaded at the end. The speed of each quality level: writing prompts at each level with your thinking setting, after a warm-up, at temperature 0; saved settings stay unchanged until you apply one.</p></details>
+              <div class="actions"><button type="button" class="primary" id="st-go">Run tuning</button></div>
               <p class="note" id="st-why" role="status"></p><button type="button" class="small" id="st-reload" hidden>Reload to apply</button>
               <p class="note" id="st-note" role="status"></p><div id="st-result"></div>
             </div></details>

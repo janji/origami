@@ -147,6 +147,10 @@ public struct CompatibilityReport: Codable, Sendable {
     public let totalBytes: Int64
     public let verdict: Verdict
     public let reason: String
+    /// For `converts`: what the conversion quantizes a second time, from which stored encoding onto which (nil when it
+    /// re-quantizes nothing: float weights quantized once, as MLX's or DwarfStar's own conversion does, and
+    /// quantized ones kept as stored). `model add` names it and converts only once told to (`--lossy`).
+    public var lossy: String? = nil
 }
 
 public enum ModelCompatibility {
@@ -168,12 +172,13 @@ public enum ModelCompatibility {
         }
         var architecture = "missing"
         if case .string(let value)? = gguf.metadata["general.architecture"] { architecture = value }
-        func report(_ family: ModelFamily?, _ geometry: ModelGeometry?, _ verdict: CompatibilityReport.Verdict, _ reason: String)
-            -> CompatibilityReport
-        {
+        func report(
+            _ family: ModelFamily?, _ geometry: ModelGeometry?, _ verdict: CompatibilityReport.Verdict, _ reason: String,
+            lossy: String? = nil
+        ) -> CompatibilityReport {
             CompatibilityReport(
                 source: source, format: "gguf", family: family, architecture: architecture, geometry: geometry,
-                types: types, bytes: bytes, totalBytes: total, verdict: verdict, reason: reason)
+                types: types, bytes: bytes, totalBytes: total, verdict: verdict, reason: reason, lossy: lossy)
         }
         if case .string("adapter")? = gguf.metadata["general.type"] {
             return report(
@@ -186,7 +191,9 @@ public enum ModelCompatibility {
         }
         if geometry.family == .qwen {
             if let problem = CheckpointConverter.ggufProblem(gguf) { return report(.qwen, geometry, .refused, problem) }
-            return report(.qwen, geometry, .converts, "converts once into the 4-bit layout (origami model add)")
+            return report(
+                .qwen, geometry, .converts, "converts once into the 4-bit layout (origami model add)",
+                lossy: CheckpointConverter.ggufLoss(gguf))
         }
         if let problem = familyProblem(gguf, geometry) { return report(geometry.family, geometry, .refused, problem) }
         guard servedFamilies.contains(geometry.family) else {
@@ -259,12 +266,13 @@ public enum ModelCompatibility {
         }
         let text = config["text_config"] as? [String: Any] ?? config
         let architecture = (config["model_type"] ?? text["model_type"]).map { "\($0)" } ?? "missing"
-        func report(_ family: ModelFamily?, _ geometry: ModelGeometry?, _ verdict: CompatibilityReport.Verdict, _ reason: String)
-            -> CompatibilityReport
-        {
+        func report(
+            _ family: ModelFamily?, _ geometry: ModelGeometry?, _ verdict: CompatibilityReport.Verdict, _ reason: String,
+            lossy: String? = nil
+        ) -> CompatibilityReport {
             CompatibilityReport(
                 source: source, format: "safetensors", family: family, architecture: architecture, geometry: geometry,
-                types: types, bytes: bytes, totalBytes: total, verdict: verdict, reason: reason)
+                types: types, bytes: bytes, totalBytes: total, verdict: verdict, reason: reason, lossy: lossy)
         }
         let geometry: ModelGeometry
         do { geometry = try ModelGeometry(config: config) } catch {
@@ -272,12 +280,22 @@ public enum ModelCompatibility {
         }
         let quantization = (config["quantization_config"] ?? config["quantization"]) as? [String: Any]
         if geometry.family == .qwen {
+            // The converter reads MLX affine, FP8 and NVIDIA's ModelOpt release; any other method (AutoRound's GPTQ
+            // packing, compressed-tensors, MXFP4) it refuses, whatever bits and group the block names.
+            if let method = (quantization?["quant_method"] as? String)?.lowercased(), !["fp8", "modelopt"].contains(method) {
+                let format = describe(quantization: quantization, headers: headers)
+                return report(.qwen, geometry, .refused, format.refusal ?? "\(format.name): no Qwen3.8-Flash-Next converter reads it yet")
+            }
             do {
                 _ = try ModelContract.validate(config: ModelSource.configJSON(config))
                 return report(.qwen, geometry, .runs, "runs as stored (MLX 4-bit)")
             } catch {
                 let text = "\(error)"
-                return report(.qwen, geometry, text.contains("origami model add") ? .converts : .refused, text)
+                guard text.contains("origami model add") else { return report(.qwen, geometry, .refused, text) }
+                do {
+                    let lossy = try CheckpointConverter.loss(quantization: quantization, headers: headers)
+                    return report(.qwen, geometry, .converts, text, lossy: lossy)
+                } catch { return report(.qwen, geometry, .refused, "\(error)") }
             }
         }
         // A new family's safetensors: what its quantization is, and whether a reader for it exists.
@@ -288,9 +306,14 @@ public enum ModelCompatibility {
         let unread = Set(headers.values.map(\.dtype)).subtracting(["F8_E4M3", "BF16", "F16", "F32"]).sorted()
         let readable = method == "fp8" || (method == nil && quantization?["bits"] == nil)
         if geometry.family == .glm, readable, unread.isEmpty {
+            let fp8 = headers.values.filter { $0.dtype == "F8_E4M3" }.count
             return report(
                 .glm, geometry, .converts,
-                "\(format.name): converts once into a GGUF with 2-bit experts (origami model add; --expert-bits 4 or 8 for Q4_K or Q8_0)")
+                "\(format.name): converts once into a GGUF with 2-bit experts (origami model add; --expert-bits 4 or 8 for Q4_K or Q8_0)",
+                lossy: fp8 == 0
+                    ? nil
+                    : "re-quantizes \(fp8) FP8 E4M3 tensors: the routed experts onto Q2_K (Q4_K or Q8_0 with --expert-bits), the dense matrices onto Q8_0"
+            )
         }
         guard geometry.family == .glm else {
             return report(
@@ -322,11 +345,26 @@ public enum ModelCompatibility {
                 method!.uppercased(),
                 "\(method!.uppercased()) stores ExLlama's trellis codes, which only ExLlama's CUDA kernels decode; no Metal reader exists"
             )
-        case "gptq", "awq", "hqq", "bitsandbytes", "aqlm", "quip", "vptq":
+        case "gptq", "awq", "auto-round", "hqq", "bitsandbytes", "aqlm", "quip", "vptq":
             return (method!.uppercased(), "\(method!.uppercased()) weights need a converter Origami does not have yet")
         default:
             return (method!, "the quantization method \(method!) is unknown to Origami")
         }
+    }
+
+    /// The one line `model add` prints and the dashboard's Add check shows before a conversion that quantizes weights a
+    /// second time: what it re-quantizes and its measured cost; nil for any other report.
+    package static func lossLine(_ report: CompatibilityReport) -> String? {
+        guard report.verdict == .converts, let lossy = report.lossy else { return nil }
+        return "Lossy: it \(lossy). Measured cost: \(lossCost(report))."
+    }
+
+    /// What a re-quantization costs where it was measured (docs/models.md), else "not measured".
+    static func lossCost(_ report: CompatibilityReport) -> String {
+        // ROADMAP D4's offline measure on ISTA's Qwen IQ3_XXS GGUF: per tensor, against the GGUF's own values.
+        guard report.family == .qwen, report.format == "gguf" else { return "not measured" }
+        return "each re-quantized tensor moves 9–16% (relative RMS) from the GGUF's own values, measured on one GSQ-RCO build "
+            + "(docs/models.md); its effect on answers is not measured"
     }
 
     // MARK: where the headers come from
@@ -435,5 +473,79 @@ public enum ModelCompatibility {
             return check(config: json, headers: headers, source: url.path)
         }
         return check(gguf: try GGUFSource(url), source: url.path)
+    }
+}
+
+/// What `model add` would quantize a second time, judged from headers (`CompatibilityReport.lossy`). Kept here, beside
+/// the verdicts and outside the arithmetic digest: it reads the conversion's rules, it never changes what is written.
+extension CheckpointConverter {
+    /// Whether `init(gguf:support:)` quantizes this GGUF tensor into the 4-bit layout, told by name alone (no support
+    /// files): every matrix but those it keeps in floats, the routed experts only when they are not kept native, never the
+    /// MTP head. `converter_gguf` checks it on every tensor of its fixture.
+    package static func ggufQuantizes(_ name: String, nativeExperts: Bool) -> Bool {
+        if name.contains("nextn") { return false }
+        if name.hasSuffix("_exps.weight") { return !nativeExperts }
+        let local = name.hasPrefix("blk.") ? String(name.split(separator: ".", maxSplits: 2).last ?? "") : name
+        if local.hasSuffix("_down_inject.weight") { return true }  // its low-rank rows are quantized, its inject rows not
+        let floats =
+            (local.hasPrefix("ssm_") && local != "ssm_out.weight") || local.hasSuffix("_norm.weight") || local.hasSuffix("_inject.weight")
+            || local.hasPrefix("ffn_gate_inp") || local.hasPrefix("indexer.") || local.hasPrefix("ple_conv1d")
+            || local.hasPrefix("ple_norm_")
+        return !floats
+    }
+
+    /// What converting this GGUF quantizes a second time: the tensors `ggufQuantizes` names whose stored type is itself
+    /// quantized (Q8_0 included), by type and role, onto the 4-bit affine grid. Nil when there are none (F32, F16 and
+    /// BF16 matrices are quantized once).
+    package static func ggufLoss(_ gguf: GGUFSource, experts total: Int = ModelContract.experts) -> String? {
+        let native = keepsExpertsNative(gguf, experts: total)
+        var types: [String: Int] = [:]
+        var roles = Set<String>()
+        for t in gguf.tensors.values where (GGUFQuant.sizes[t.type]?.block ?? 1) > 1 && ggufQuantizes(t.name, nativeExperts: native) {
+            types[GGUFQuant.name(t.type), default: 0] += 1
+            roles.insert(TensorRole.of(t.name).rawValue)
+        }
+        guard !types.isEmpty else { return nil }
+        return "re-quantizes \(types.values.reduce(0, +)) tensors stored as "
+            + types.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: ", ")
+            + " (\(roles.sorted().joined(separator: ", "))) onto 4-bit affine group 64"
+            + (native ? "; the routed experts stay as stored" : "")
+    }
+
+    /// What converting a Qwen safetensors checkpoint quantizes a second time, from its config's quantization block and
+    /// headers: FP8 weights (the official FP8 release; NVIDIA's n-gram table), and MLX codes of another width or group
+    /// than the one each tensor gets (4-bit group 64, the n-gram tables group 32), as `planAffine` and `plan` treat them.
+    /// Nil for an unquantized checkpoint: quantized once, as MLX's conversion does. Throws, as `planAffine` would, for a
+    /// module of a width the converter does not read.
+    package static func loss(quantization: [String: Any]?, headers: [String: TensorSpan]) throws -> String? {
+        var stored: [String: Int] = [:]
+        let fp8 = headers.filter { $0.value.dtype == "F8_E4M3" && !$0.key.hasPrefix("mtp.") && mlxName($0.key) != nil }.count
+        if fp8 > 0 { stored["FP8 E4M3", default: 0] += fp8 }
+        if let quantization, quantization["quant_method"] == nil, (quantization["mode"] as? String ?? "affine") == "affine",
+            let bits = quantization["bits"] as? Int, let group = quantization["group_size"] as? Int
+        {
+            for (name, span) in headers where name.hasSuffix(".weight") && span.dtype == "U32" {
+                let base = String(name.dropLast(".weight".count))
+                guard headers[base + ".scales"] != nil, let out = mlxName(name), !out.hasPrefix("vision_tower."), !out.contains(".conv1d."),
+                    !ModelContract.floatModules.contains(where: { out.contains($0 + ".") })
+                else { continue }  // decoded into floats, not quantized again
+                // The module's own width in the config, else the checkpoint's, looked up as `planAffine` does.
+                let module = (quantization[base] ?? quantization[String(base.drop { $0 != "." }.dropFirst())]) as? [String: Any]
+                let width = (bits: module?["bits"] as? Int ?? bits, group: module?["group_size"] as? Int ?? group)
+                guard [2, 4, 8].contains(width.bits) else {
+                    throw EngineError(
+                        "Origami cannot convert \(name): its \(width.bits)-bit codes are packed in a layout it does not read yet",
+                        code: "model_incompatible")
+                }
+                if width != (4, out.contains(".ple.ple_embedding.ngram_embedding.") ? 32 : 64) {
+                    stored["MLX \(width.bits)-bit group \(width.group)", default: 0] += 1
+                }
+            }
+        }
+        guard !stored.isEmpty else { return nil }
+        return "re-quantizes \(stored.values.reduce(0, +)) tensors stored as "
+            + stored.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: ", ")
+            + " onto 4-bit affine group 64 (the n-gram tables group 32)"
+            + (quantization?["quant_method"] as? String == "modelopt" ? "; the NVFP4 routed experts stay as stored" : "")
     }
 }

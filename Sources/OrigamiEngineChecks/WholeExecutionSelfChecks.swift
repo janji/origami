@@ -80,35 +80,103 @@ package enum WholeExecutionSelfChecks {
         try Check.require(ledger.snapshot().reserved == 0, "Dense index actual-row fixture leaked")
     }
 
+    /// The schedule over a fixture store (no model tensors read).
+    private static func makeSchedule(store: PackStore, ledger: MemoryLedger, preencoded: Bool = false) throws -> WholeExecutionSchedule {
+        let kernels = try ReferenceKernels(
+            pinnedUnary: true, ledger: ledger, pinnedRMS: true,
+            quantizedTiled: true, quantizedTiledBM32: true, quantizedBM32MinRows: 256)
+        let weights = try ReferenceWeights(
+            store: store, kernels: kernels, ledger: ledger, simdMatrix: true,
+            residentBytes: 1_000_000, residentSmallTensors: true, denseResidentBytes: 1_000_000,
+            fusedExperts: true, pinnedDense: true, fusedHCDecode: true, fusedHCPrefill: true)
+        let helpers = try weights.decodeFrontierHelpers()
+        let reductions = try PinnedReductions(ledger: ledger)
+        let selector = try BatchedTopIndices(ledger: ledger)
+        let attention = try PinnedAttention(ledger: ledger, architecture: .medium, batched: true)
+        let rope = try PinnedRoPE(ledger: ledger)
+        let indexer = try PinnedIndexer(ledger: ledger)
+        let math = LayerMath(
+            kernels: kernels, linear: { _, _, _ in throw EngineError("Unexpected fixture tensor read") },
+            tensor: { _ in throw EngineError("Unexpected fixture tensor read") }, reductions: reductions, selector: selector,
+            pinnedAttention: attention, pinnedRoPE: rope, pinnedIndexer: indexer)
+        let preparation = try FusedGDNPreparation(arithmetic: kernels.arithmetic, reductions: reductions, ledger: ledger)
+        let gdn = try weights.makeGDNDeviceBlock(preparation: preparation)
+        let gathered = try GatheredExpertDecode(ledger: ledger, fused: helpers.fused, reductions: reductions)
+        let injection = try FusedResidualInjection(ledger: ledger)
+        return try WholeExecutionSchedule(
+            weights: weights, math: math, ledger: ledger, context: 8192,
+            gdn: gdn, gathered: gathered, selector: selector, reductions: reductions, injection: injection,
+            decodeEarlyDemand: preencoded, preencodedLayers: preencoded)
+    }
+
+    /// The phase change builds the pre-encoded layers' residency set off the token path: the reply's first sync finds
+    /// it built (no rebuild, no wait), a slab that comes or goes mid-reply is added or dropped, and a trim during the
+    /// build waits for it and leaves the set empty. Buffers stand in for the cache's slabs; no model tensors are read.
+    package static func residencyBuiltAtPhaseChange(store: PackStore) throws {
+        let ledger = try MemoryLedger(ceiling: 900_000_000, transientMargin: 1_000_000)
+        try autoreleasepool {
+            let schedule = try makeSchedule(store: store, ledger: ledger, preencoded: true)
+            guard let device = MTLCreateSystemDefaultDevice() else { throw EngineError("Metal unavailable") }
+            func slabs(_ count: Int) throws -> [MTLBuffer] {
+                try (0..<count).map { _ in
+                    guard let buffer = device.makeBuffer(length: 4 << 20, options: .storageModeShared) else {
+                        throw EngineError("Fixture slab unavailable")
+                    }
+                    memset(buffer.contents(), 1, buffer.length)
+                    return buffer
+                }
+            }
+            func tokenPath(_ records: (generation: UInt64, buffers: [MTLBuffer])) throws -> WholeExecutionSchedule.Counts {
+                try schedule.beginScope(decode: true)
+                schedule.syncResidency(records)
+                schedule.endScope()
+                try Check.require(schedule.residencyHolds(records.buffers), "Residency set differs from generation \(records.generation)")
+                return schedule.snapshot().decode
+            }
+            let decodeShape = try slabs(48)
+            // Before: the reply's first pre-encoded layer builds the whole set on the token path.
+            var counts = try tokenPath((1, decodeShape))
+            let before = counts.residencySeconds
+            try Check.require(counts.residencyRebuilds == 1 && counts.residencyPhaseBuilds == nil, "Token-path build not counted")
+            try schedule.trim()
+            try Check.require(schedule.residencyHolds([]), "Trim kept the residency set")
+            // After: the phase change builds it; the token path only joins the finished build.
+            schedule.prepareDecodeResidency((2, decodeShape))
+            while schedule.residencyBuilding { Thread.sleep(forTimeInterval: 0.001) }
+            counts = try tokenPath((2, decodeShape))
+            try Check.require(
+                counts.residencyRebuilds == 1 && counts.residencyPhaseBuilds == 1, "The reply rebuilt the phase change's residency set")
+            let after = counts.residencySeconds - before
+            // Growth and eviction mid-reply: one rebuild each, and the set follows the slabs exactly.
+            let grown = decodeShape + (try slabs(1))
+            counts = try tokenPath((3, grown))
+            counts = try tokenPath((4, Array(grown.dropFirst())))
+            try Check.require(counts.residencyRebuilds == 3, "A slab change mid-reply did not rebuild the residency set")
+            counts = try tokenPath((4, Array(grown.dropFirst())))
+            try Check.require(counts.residencyRebuilds == 3, "An unchanged generation rebuilt the residency set")
+            // A trim while the build runs waits for it, then empties the set.
+            schedule.prepareDecodeResidency((5, decodeShape))
+            try schedule.trim()
+            try Check.require(
+                !schedule.residencyBuilding && schedule.residencyHolds([]) && schedule.snapshot().decode.residencyPhaseBuilds == 2,
+                "Trim did not join the phase change's build")
+            FileHandle.standardError.write(
+                Data(
+                    String(
+                        format: "residency set, 192 MB of fixture slabs: token path %.2f ms before, %.2f ms after\n", before * 1000,
+                        after * 1000
+                    ).utf8))
+        }
+        try Check.require(ledger.snapshot().reserved == 0, "Residency fixture leaked")
+    }
+
     /// No model tensors are read. Exercise the actual queue owner, both fixed
     /// generations, cancellation before/after commit and joined pin retirement.
     package static func scheduleOwnership(store: PackStore) throws {
         let ledger = try MemoryLedger(ceiling: 900_000_000, transientMargin: 1_000_000)
         try autoreleasepool {
-            let kernels = try ReferenceKernels(
-                pinnedUnary: true, ledger: ledger, pinnedRMS: true,
-                quantizedTiled: true, quantizedTiledBM32: true, quantizedBM32MinRows: 256)
-            let weights = try ReferenceWeights(
-                store: store, kernels: kernels, ledger: ledger, simdMatrix: true,
-                residentBytes: 1_000_000, residentSmallTensors: true, denseResidentBytes: 1_000_000,
-                fusedExperts: true, pinnedDense: true, fusedHCDecode: true, fusedHCPrefill: true)
-            let helpers = try weights.decodeFrontierHelpers()
-            let reductions = try PinnedReductions(ledger: ledger)
-            let selector = try BatchedTopIndices(ledger: ledger)
-            let attention = try PinnedAttention(ledger: ledger, architecture: .medium, batched: true)
-            let rope = try PinnedRoPE(ledger: ledger)
-            let indexer = try PinnedIndexer(ledger: ledger)
-            let math = LayerMath(
-                kernels: kernels, linear: { _, _, _ in throw EngineError("Unexpected fixture tensor read") },
-                tensor: { _ in throw EngineError("Unexpected fixture tensor read") }, reductions: reductions, selector: selector,
-                pinnedAttention: attention, pinnedRoPE: rope, pinnedIndexer: indexer)
-            let preparation = try FusedGDNPreparation(arithmetic: kernels.arithmetic, reductions: reductions, ledger: ledger)
-            let gdn = try weights.makeGDNDeviceBlock(preparation: preparation)
-            let gathered = try GatheredExpertDecode(ledger: ledger, fused: helpers.fused, reductions: reductions)
-            let injection = try FusedResidualInjection(ledger: ledger)
-            let schedule = try WholeExecutionSchedule(
-                weights: weights, math: math, ledger: ledger, context: 8192,
-                gdn: gdn, gathered: gathered, selector: selector, reductions: reductions, injection: injection)
+            let schedule = try makeSchedule(store: store, ledger: ledger)
+            guard let device = MTLCreateSystemDefaultDevice() else { throw EngineError("Metal unavailable") }
             try expectThrow { _ = try schedule.command("outside-scope") }
             try schedule.beginScope(decode: true)
             defer {
@@ -125,7 +193,7 @@ package enum WholeExecutionSelfChecks {
                 a !== b && a[.result] !== b[.result]
                     && schedule.snapshot().decodeGenerationBytes == a.layout.admittedBytes + b.layout.admittedBytes,
                 "Two decode generations alias or are not simultaneously charged")
-            guard let foreignQueue = kernels.device.makeCommandQueue(), let foreign = foreignQueue.makeCommandBuffer() else {
+            guard let foreignQueue = device.makeCommandQueue(), let foreign = foreignQueue.makeCommandBuffer() else {
                 throw EngineError("Fixture foreign command unavailable")
             }
             try expectThrow { try schedule.submit(foreign, shouldContinue: { true }) }
@@ -182,7 +250,7 @@ package enum WholeExecutionSelfChecks {
             let config = ExpertExecutionConfiguration(
                 mode: .slabPackedPreferred, cacheSlots: 12, slotsPerSlab: 4,
                 demandWindow: 10, readConcurrency: 2)
-            let executor = try ExpertExecution(device: kernels.device, ledger: ledger, configuration: config, packedAvailable: { false }) {
+            let executor = try ExpertExecution(device: device, ledger: ledger, configuration: config, packedAvailable: { false }) {
                 _, _, destination in
                 destination.initializeMemory(as: UInt8.self, repeating: 0)
             }
@@ -215,8 +283,8 @@ package enum WholeExecutionSelfChecks {
             try Check.require(
                 count.submitted == 5 && count.joined == 5 && count.failed == 0 && count.timed + count.missingTimestamps == count.joined,
                 "Whole command accounting does not reconcile")
-            try WholeTokenPlanSelfChecks.commandMissWindows(schedule: schedule, workspace: a, ledger: ledger, device: kernels.device)
-            try QwenPairScheduleSelfChecks.readOverlap(schedule: schedule, workspace: a, ledger: ledger, device: kernels.device)
+            try WholeTokenPlanSelfChecks.commandMissWindows(schedule: schedule, workspace: a, ledger: ledger, device: device)
+            try QwenPairScheduleSelfChecks.readOverlap(schedule: schedule, workspace: a, ledger: ledger, device: device)
         }
         try Check.require(ledger.snapshot().reserved == 0, "Whole schedule command/pin fixture leaked owners")
     }

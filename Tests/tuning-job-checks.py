@@ -77,7 +77,6 @@ private final class Counter: @unchecked Sendable {
         case "ordinary": write("Added fixture-model: ready\n")
         case "aborted": try outcome(scenario, reason: "The loaded model changed. Settings unchanged.")
         case "incomplete": try outcome(scenario, reason: "Two samples per mode were not completed.")
-        case "too_noisy": try outcome(scenario, reason: "Variation prevented a reliable winner.")
         default: try outcome(scenario)
         }
     }
@@ -144,11 +143,9 @@ private final class Counter: @unchecked Sendable {
             var results: [[String: Any]] = []
             results.append(try check("aborted", expected: "interrupted", reason: "The loaded model changed. Settings unchanged."))
             results.append(try check("incomplete", expected: "incomplete", reason: "Two samples per mode were not completed."))
-            results.append(try check("too_noisy", expected: "incomplete", reason: "Variation prevented a reliable winner."))
-            for name in ["comparison", "faster", "already_fastest", "unchanged", "undone"] {
-                results.append(try check(name, expected: "done"))
-            }
-            for name in ["missing", "malformed", "unknown_future_outcome"] {
+            results.append(try check("comparison", expected: "done"))
+            // The timing-switch comparison's outcomes are gone: one from an older tune reads as any unknown outcome.
+            for name in ["missing", "malformed", "unknown_future_outcome", "faster", "already_fastest", "too_noisy", "undone"] {
                 results.append(try check(name, expected: "incomplete"))
             }
             results.append(try check("trailing", expected: "interrupted", reason: "No trailing newline"))

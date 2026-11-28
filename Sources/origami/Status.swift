@@ -533,7 +533,6 @@ final class StatusSource: @unchecked Sendable {
             ]
             report["experts_from"] = from
         }
-        if let split = runtime.backend.splitReads { report["split_reads"] = split }
         report["template"] = runtime.template
         report["prompt_cache"] = runtime.promptCache.report
         return report

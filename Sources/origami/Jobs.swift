@@ -167,13 +167,10 @@ final class Jobs: @unchecked Sendable {
                 case "aborted":
                     job.state = "interrupted"
                     job.message = job.message ?? "Tuning was interrupted. Settings were not changed."
-                case "too_noisy":
-                    job.state = "incomplete"
-                    job.message = job.message ?? "Measurements varied too much to confirm an improvement. Settings were not changed."
                 case "incomplete":
                     job.state = "incomplete"
                     job.message = job.message ?? "Tuning did not finish all measurements. Settings were not changed."
-                case "comparison", "faster", "already_fastest", "applied", "undone", "rechecked", "unchanged": break
+                case "comparison": break
                 default:
                     job.state = "incomplete"
                     job.message = job.message ?? "Tuning ended without a reported outcome."

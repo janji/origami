@@ -10,8 +10,7 @@ enum Commands {
     /// Stable provenance for HTTP observations, computed once at startup. Credentials are excluded before hashing;
     /// settings identify the startup configuration, not later per-request overrides or governor decisions.
     static func observationTags(
-        _ settings: Settings, version: String, identity: String, context: Int,
-        startupTuning: [String: Any]? = nil, tuningScope: String = "front; no worker tuning selected"
+        _ settings: Settings, version: String, identity: String, context: Int
     ) throws -> [String: String] {
         func value<T>(_ item: T?) -> Any { item.map { $0 as Any } ?? NSNull() }
         // Settings.report is for people: its rounded GB amounts and joined path lists are not identities.
@@ -31,9 +30,7 @@ enum Commands {
             "sampling_custom": settings.samplingCustom, "sampling_values": settings.samplingValues,
             "sampling_override": settings.samplingOverride,
         ]
-        var tags = try ObservationProvenance.tags(
-            settings: values, environment: ProcessInfo.processInfo.environment,
-            startupTuning: startupTuning, tuningScope: tuningScope)
+        var tags = try ObservationProvenance.tags(settings: values, environment: ProcessInfo.processInfo.environment)
         tags.merge([
             "engine_version": version, "executable_sha256": try OrigamiRuntime.executableDigest(),
             "model_identity": identity, "model_identity_scope": "local_incarnation", "context_tier": String(context),
@@ -482,9 +479,9 @@ enum Commands {
         if let pack = storage.packFolder { log("pack \(pack.path)" + (storage.packSharesModelDrive ? " (same drive as the model)" : "")) }
         if let hot = storage.hotCopyFolder { log("hot copy \(hot.path) (built and kept while serving)") }
         for copy in storage.copyFolders { log("expert copy \(copy.path)") }
-        // Tuned values for this model and context on this Mac (`origami tune`), and what this Mac's memory taught.
-        let tuning = Tuning.load(
-            settings, model: model.fingerprint, context: settings.context, gpu: host.gpuName,
+        // What `origami tune` keeps its measurements under for this model and context, and what this Mac's memory taught.
+        let tuning = Tuning.State(
+            model: model.fingerprint, context: settings.context, gpu: host.gpuName,
             drives: [model.directory, storage.packFolder, storage.hotCopyFolder].compactMap { $0 })
         let history = Tuning.memoryHistory(settings)
         // A measured memory limit (`origami tune --memory`): shown, and without memory_limit served with unless stale.
@@ -522,41 +519,14 @@ enum Commands {
         http.defaults.samplingOverride = settings.samplingOverride
         // The server's buffers are counted in the engine plan; this ledger only bounds them.
         let source = StatusSource(settings: settings, model: model, host: host, found: found, storage: storage, events: events)
-        http.observationTags = try observationTags(
-            settings, version: version, identity: model.fingerprint, context: context,
-            startupTuning: ["overrides": tuning.tuned.wire],
-            tuningScope: "Qwen startup tuning overrides; settings/environment may override; excludes deferred plan and governor decisions")
-        if tuning.state != "none" {
-            log(
-                "tuning: \(tuning.state)" + (tuning.reason.map { " (\($0))" } ?? "")
-                    + (tuning.tuned.wire.isEmpty ? "" : ", applying \(tuning.tuned.wire)"))
-        }
-        let keepAliveSet =
-            settings.gpuKeepAlive != nil || (ProcessInfo.processInfo.environment["ORIGAMI_EXECUTION"] ?? "").contains("\"gpu_keepalive\"")
-        let execution =
-            (try? JSONSerialization.jsonObject(with: Data((ProcessInfo.processInfo.environment["ORIGAMI_EXECUTION"] ?? "{}").utf8)))
-            as? [String: Any]
-        let prefillScopeSet = (execution?["prefill"] as? [String: Any])?["read_scope"] != nil
+        http.observationTags = try observationTags(settings, version: version, identity: model.fingerprint, context: context)
         http.statusReport = {
             var report = source.report()
             guard let loaded = source.loadedRuntime else { return report }
             if let memory = report["memory"] as? [String: Any] {
                 report["memory"] = memory.merging(Self.cutReport(loaded.governor, usable: memory["budget_bytes"] as? UInt64)) { $1 }
             }
-            let on = loaded.plan.configuration.gpuKeepAlive
-            var knobs = [
-                "gpu_keepalive": Tuning.knob(
-                    on, source: keepAliveSet ? "setting" : tuning.tuned.gpuKeepAlive != nil ? "tuned" : "default", default: true)
-            ]
-            if loaded.backend.tunesPrefillScope {
-                knobs["qwen_prefill_scope"] = Tuning.knob(
-                    loaded.backend.prefillReadScope,
-                    source: prefillScopeSet ? "setting" : tuning.tuned.qwenPrefillScope != nil ? "tuned" : "default",
-                    default: loaded.backend.prefillReadScopeMaximum
-                )
-                .merging(["maximum": loaded.backend.prefillReadScopeMaximum, "step": 256]) { $1 }
-            }
-            report["tuning"] = tuning.report(knobs: knobs)
+            report["tuning"] = tuning.report
             report["memory_learned"] = history.summary(
                 cap: loaded.plan.memory.cap, minimum: loaded.plan.memory.minimum, applied: memoryLimit == nil,
                 advice: measuredMemory ?? loaded.governor.limitAdvice
@@ -659,8 +629,7 @@ enum Commands {
                         "\(model.fingerprint.prefix(12))-\(context)", isDirectory: true),
                     version: version, routingFile: settings.routingFile(model),
                     mtpWeights: settings.mtpWeights, promptCacheEntries: settings.promptCacheEntries,
-                    gpuKeepAlive: settings.gpuKeepAlive ?? tuning.tuned.gpuKeepAlive,
-                    qwenPrefillScope: tuning.tuned.qwenPrefillScope,
+                    gpuKeepAlive: settings.gpuKeepAlive,
                     memoryHistory: history, learnsMemory: memoryLimit == nil,
                     stage: { deferred.stage = $0 }, log: log)
                 // Names this build in its saved prompts' folder, as the family engines' do: `origami cache` and the
@@ -802,7 +771,7 @@ enum Commands {
         // The memory governor's ledger: memory_limit, else 70% of the Mac's memory, with OrigamiPlan's floor left free.
         let physical = ProcessInfo.processInfo.physicalMemory
         let hostCeiling = OrigamiPlan.memoryCeiling(host: try OrigamiHost.current())
-        // A measured memory limit (`origami tune --memory`, keyed as `Tuning.load` keys it): shown, and without memory_limit
+        // A measured memory limit (`origami tune --memory`, keyed as `Tuning.State` keys it): shown, and without memory_limit
         // served with unless stale.
         let history = Tuning.memoryHistory(settings)
         let tuningModel =
@@ -907,47 +876,18 @@ enum Commands {
         }
         backend.keeper = keeper
         if let keeper { HotCopy.shareDrives(settings, flags: flags, identity: identity, keeper: keeper) }
-        // Tuned values for this model and context on this Mac (`origami tune`) where no ORIGAMI_FAMILY_* variable sets them.
+        // What `origami tune` keeps its measurements under for this model and context.
         // Tuning truncates its model key: `tuningModel` hashes the whole representation before that truncation.
-        let tuning = Tuning.load(
-            settings, model: tuningModel, context: context, gpu: (try? OrigamiHost.current())?.gpuName ?? device.name,
-            drives: [url, hotFolder])
-        if tuning.state != "none" {
-            log(
-                "tuning: \(tuning.state)" + (tuning.reason.map { " (\($0))" } ?? "")
-                    + (tuning.tuned.wire.isEmpty ? "" : ", applying \(tuning.tuned.wire)"))
-        }
-        let environment = ProcessInfo.processInfo.environment
-        let fixed = Set(
-            ["PREFETCH", "PREFETCH_DEPTH", "SPIN", "PREFILL_SLICES"].filter {
-                environment["ORIGAMI_FAMILY_" + $0] != nil
-            })
-        // The GPU keep-alive (`gpu_keepalive`): the setting, else tuned, else auto (on outside Low Power Mode, read per reply).
+        let tuning = Tuning.State(
+            model: tuningModel, context: context, gpu: (try? OrigamiHost.current())?.gpuName ?? device.name, drives: [url, hotFolder])
+        // The GPU keep-alive (`gpu_keepalive`): the setting, else auto (on outside Low Power Mode, read per reply).
         // Built either way, so a request can turn it on; one that cannot be made fails the start only when it is chosen.
-        backend.keepAliveSetting = settings.gpuKeepAlive ?? tuning.tuned.gpuKeepAlive
+        backend.keepAliveSetting = settings.gpuKeepAlive
         backend.keepAlive =
             backend.keepAliveSetting != false ? try RequestGPUKeepAlive(ledger: ledger) : try? RequestGPUKeepAlive(ledger: ledger)
-        // Auto reads Low Power Mode per reply, so the status reads it too: off in Low Power Mode, not the default's "on".
-        let keepAliveSource = settings.gpuKeepAlive != nil ? "setting" : tuning.tuned.gpuKeepAlive != nil ? "tuned" : "default"
-        let keepAliveKnob = { [backend] in
-            Tuning.knob(backend.keepAliveSetting ?? !backend.lowPowerMode(), source: keepAliveSource, default: true)
-        }
-        let knobs = (model as? FamilyRunner).map {
-            Tuning.FamilyKnobs(runner: $0, fixed: fixed, tuned: tuning.tuned, keepAlive: keepAliveKnob)
-        }
-        if let runner = model as? FamilyRunner {
-            if !fixed.contains("PREFETCH"), let value = tuning.tuned.familyPrefetch { runner.guessesNext = value }
-            if !fixed.contains("PREFETCH_DEPTH"), let depth = tuning.tuned.familyPrefetchDepth {
-                runner.experts.guessDepth = depth < 0 ? nil : depth
-            }
-            if !fixed.contains("SPIN"), let value = tuning.tuned.familySpin { FamilyExperts.spins = value }
-            if let value = tuning.tuned.familyEarlyDelayedReads { runner.earlyDelayedReads = value }
-            if let text = environment["ORIGAMI_FAMILY_PREFILL_SLICES"] {
-                guard let value = Int(text), (1...4).contains(value) else { throw CLIError("ORIGAMI_FAMILY_PREFILL_SLICES must be 1 to 4") }
-                runner.prefillSlices = value
-            } else if let value = tuning.tuned.familyPrefillSlices {
-                runner.prefillSlices = value
-            }
+        if let runner = model as? FamilyRunner, let text = ProcessInfo.processInfo.environment["ORIGAMI_FAMILY_PREFILL_SLICES"] {
+            guard let value = Int(text), (1...4).contains(value) else { throw CLIError("ORIGAMI_FAMILY_PREFILL_SLICES must be 1 to 4") }
+            runner.prefillSlices = value
         }
         // Automatic mode only: the budget this Mac's memory use taught (`MemoryHistory`); the pool starts there. A limit
         // (memory_limit or measured) always starts at itself.
@@ -1030,12 +970,7 @@ enum Commands {
         http.lan = settings.listenLAN
         http.model = ModelFront.listedID(settings)
         http.family = geometry.family
-        http.observationTags = try observationTags(
-            settings, version: version, identity: identity, context: context,
-            startupTuning: [
-                "overrides": tuning.tuned.wire, "resolved_family_knobs": knobs?.report.mapValues { $0["value"] ?? NSNull() } ?? [:],
-            ],
-            tuningScope: "family startup tuning overrides and resolved tuner knobs; excludes per-request switches and governor decisions")
+        http.observationTags = try observationTags(settings, version: version, identity: identity, context: context)
         http.configWriter = configWriter(settings)
         // `/v1/status` and `/v1/plan` as Qwen's server answers them, with where the experts are read from (`experts_from`).
         let status = FamilyStatus(
@@ -1071,7 +1006,7 @@ enum Commands {
                 "available_bytes": memory.availableMemoryEstimate, "floor_bytes": ledger.availableFloorBytes,
             ].merging(Self.cutReport(governor, usable: usable)) { $1 }.merging(memory.ownersReport) { $1 }
             report["memory_admission"] = memoryAdmissionReport(memory)
-            if let knobs { report["tuning"] = tuning.report(knobs: knobs.report) }
+            report["tuning"] = tuning.report
             report["memory_learned"] = history.summary(
                 cap: ceiling, minimum: leastBytes, applied: learnsMemory, advice: measuredMemory ?? governor?.limitAdvice
             ).merging([
@@ -1190,7 +1125,7 @@ enum Commands {
     /// its experts in Q2_K (`--expert-bits 2`, the default) or Q4_K (`--expert-bits 4`).
     static func addFamilyModel(
         _ url: URL, gguf: Bool, name given: String?, derived: (String) throws -> String, into folder: URL,
-        flags: [String: [String]], yes: Bool, taken: (_ name: String, _ path: String) throws -> Void
+        flags: [String: [String]], yes: Bool, lossy: Bool, taken: (_ name: String, _ path: String) throws -> Void
     ) throws -> [String: Any]? {
         if gguf {
             let source = try GGUFSource(url)
@@ -1221,12 +1156,20 @@ enum Commands {
         print(
             "\(url.lastPathComponent) is \(family.displayName). Origami converts it once into a GGUF with \(GGUFQuant.name(type)) experts and Q8_0 dense "
                 + "matrices: \(gigabytes(UInt64(converter.outputBytes))) in \(target.path). The source is only read.")
+        var agreed = false
+        if let line = (try? ModelCompatibility.check(local: url)).flatMap(ModelCompatibility.lossLine) {
+            print(line)
+            guard Terminal.confirm("Convert it with this loss?", yes: lossy, flag: "--lossy") else {
+                throw CLIError("Not added: \(url.lastPathComponent) was not converted (the conversion is lossy; pass --lossy to accept).")
+            }
+            agreed = true
+        }
         guard free >= need else {
             throw CLIError(
                 "Converting needs \(gigabytes(need)) free there, 10 GB to spare included (\(gigabytes(free)) now). "
                     + "Pass --to with a folder on a bigger drive: `origami model add <source> --to /Volumes/…`.")
         }
-        guard Terminal.confirm("Convert it now? This reads the whole checkpoint once.", yes: yes) else {
+        guard Terminal.confirm("Convert it now? This reads the whole checkpoint once.", yes: yes || agreed) else {
             throw CLIError("Not added: \(url.lastPathComponent) was not converted.")
         }
         let steps = Terminal.steps("converting")
@@ -1684,6 +1627,8 @@ enum Commands {
                 return try valid(String(String(base).prefix(64)))
             }
             var downloaded = false
+            // Agreed to a conversion that quantizes weights a second time (`--lossy`, or asked and answered).
+            var lossy = switches.contains("lossy")
             /// A name derived again for another copy (another path) would silently re-point the first: refused without --name,
             /// before anything is converted.
             func sameName(_ name: String, _ path: String) throws {
@@ -1742,6 +1687,14 @@ enum Commands {
                                 + "Nothing was downloaded; pass --to with a folder on a bigger drive.")
                     }
                 }
+                // A conversion that quantizes weights a second time is named and agreed to before the download.
+                if let line = ModelCompatibility.lossLine(report) {
+                    print(line)
+                    guard Terminal.confirm("Convert it with this loss once downloaded?", yes: lossy, flag: "--lossy") else {
+                        throw CLIError("Not added: \(spec) was not downloaded (its conversion is lossy; pass --lossy to accept).")
+                    }
+                    lossy = true
+                }
                 guard Terminal.confirm("\(spec) is not on this Mac. Download it from Hugging Face?", yes: switches.contains("yes")) else {
                     throw CLIError("Not added: \(spec) was not downloaded.")
                 }
@@ -1781,7 +1734,7 @@ enum Commands {
             // GLM-5.3-Flash and DeepSeek-V4.1-Flash: a GGUF runs as stored; a GLM safetensors checkpoint converts once to a GGUF.
             if var entry = try addFamilyModel(
                 url, gguf: gguf && variant == nil, name: given, derived: derived, into: destination, flags: flags,
-                yes: switches.contains("yes"), taken: sameName)
+                yes: switches.contains("yes"), lossy: lossy, taken: sameName)
             {
                 let kept = ExpertVariant.keepSettings(&entry, from: entries, always: replacing != nil)
                 let replaced = try ModelRegistry.put(entry, settings: settings)
@@ -1844,6 +1797,14 @@ enum Commands {
                             "That folder holds an earlier conversion of another source, which this replaces; pass --name <name> to keep both."
                         )
                     }
+                    var agreed = false
+                    if let line = (try? ModelCompatibility.check(local: source)).flatMap(ModelCompatibility.lossLine) {
+                        print(line)
+                        guard Terminal.confirm("Convert it with this loss?", yes: lossy, flag: "--lossy") else {
+                            throw CLIError("Not added: \(spec) was not converted (the conversion is lossy; pass --lossy to accept).")
+                        }
+                        agreed = true
+                    }
                     guard free >= need else {
                         // The download stays where it is and is named, so the next run converts it instead of fetching it again.
                         throw CLIError(
@@ -1853,7 +1814,8 @@ enum Commands {
                                     : "Pass --to with a folder on a bigger drive: `origami model add <source> --to /Volumes/…`.")
                         )
                     }
-                    guard Terminal.confirm("Convert it now? This reads the whole checkpoint once.", yes: switches.contains("yes")) else {
+                    guard Terminal.confirm("Convert it now? This reads the whole checkpoint once.", yes: switches.contains("yes") || agreed)
+                    else {
                         throw CLIError("Not added: \(spec) was not converted.")
                     }
                     let steps = Terminal.steps("converting")

@@ -49,55 +49,6 @@ extension Tuning {
         }
     }
 
-    /// The completed rounds of a run that did not decide every candidate, kept in tuning.json as `partial@<key>` (each
-    /// round as it ends, so any interruption keeps them). The next run for the same model, context, Mac, drives, settings
-    /// measured and build continues from them for a day (`AutoMeasure.backOff`), with the same sizes of reply and document.
-    struct Kept {
-        var date = Date(), shape: [String: Int] = [:]
-        /// Per candidate: its rounds, and whether it is decided (slower at once, or nothing to compare) with fewer than three.
-        var arms: [String: (rounds: [SelfTuning.Round], judged: Bool)] = [:]
-        var count: Int { arms.values.reduce(0) { $0 + $1.rounds.count * 3 } }
-        static func key(_ key: String) -> String { "partial@" + key }
-
-        init() {}
-        init?(_ settings: Settings, key: String, identity: [String: Any], measuring: [String: String]) {
-            let entry = ((try? entries(settings)) ?? nil)?[Kept.key(key)] as? [String: Any] ?? [:]
-            guard entry["build"] as? String == version, entry["settings"] as? [String: String] == measuring,
-                let date = (entry["date"] as? String).flatMap({ ISO8601DateFormatter().date(from: $0) }),
-                Date().timeIntervalSince(date) < AutoMeasure.backOff,
-                SelfTuning.staleness(saved: entry["identity"] as? [String: Any] ?? [:], current: identity, date: date).state == "current",
-                let shape = entry["shape"] as? [String: Int], let arms = entry["arms"] as? [String: [String: Any]]
-            else { return nil }
-            func sample(_ value: Any?) -> SelfTuning.Sample? {
-                guard let object = value as? [String: Any], let decode = object["decode"] as? Double,
-                    let prompt = object["prompt"] as? Double, let replies = object["replies"] as? [String]
-                else { return nil }
-                return SelfTuning.Sample(decode: decode, prompt: prompt, replies: replies)
-            }
-            self.date = date
-            self.shape = shape
-            for (name, arm) in arms {
-                let rounds = (arm["rounds"] as? [[String: Any]] ?? []).map { $0.compactMapValues(sample) }
-                self.arms[name] = (rounds.filter { $0.count == 3 }, arm["judged"] as? Bool ?? false)
-            }
-        }
-
-        func save(_ settings: Settings, key: String, identity: [String: Any], measuring: [String: String]) {
-            func json(_ sample: SelfTuning.Sample) -> [String: Any] {
-                ["decode": sample.decode, "prompt": sample.prompt, "replies": sample.replies]
-            }
-            let arms = arms.mapValues { arm -> [String: Any] in
-                ["rounds": arm.rounds.map { $0.mapValues(json) }, "judged": arm.judged]
-            }
-            try? Tuning.save(
-                settings, key: Kept.key(key),
-                entry: [
-                    "date": ISO8601DateFormatter().string(from: Date()), "build": version, "identity": identity,
-                    "settings": measuring, "shape": shape, "arms": arms,
-                ])
-        }
-    }
-
     /// A machine-readable terminal result for the dashboard job, separate from human progress lines.
     static func outcome(_ value: String, reason: String? = nil) {
         var fields = ["outcome": value]

@@ -1376,7 +1376,6 @@ final class ModelFront: @unchecked Sendable {
         if SlowedBy.memoryShort(state) { state["memory_holders"] = ProcessMemory.others().map { ["name": $0.name, "bytes": $0.bytes] } }
         var signals = state
         if let job = jobs.report { signals["job"] = job }
-        if (state["tuning"] as? [String: Any])?["state"] as? String == "none" { signals["last_tuning"] = DashboardState.lastRun(settings) }
         let list = lock.withLock {
             let list = SlowedBy.stamp(SlowedBy.list(signals), seen: &slowSeen)
             lastSlowed = (Date(), list)
@@ -1385,7 +1384,7 @@ final class ModelFront: @unchecked Sendable {
         state["slowed_by"] = list
     }
 
-    /// `/v1/tuning/apply` (under the caller's settings lock): saves the tuning result, then reloads.
+    /// `/v1/tuning/apply` (under the caller's settings lock): saves the quality level chosen from a comparison, then reloads.
     private func applyTuning(_ request: BoundedHTTPRequest) throws -> [String: Any] {
         let fresh = try Settings.load(flags: flags)
         let proposal = try Settings.readConfig(Tuning.proposalFile(fresh))
@@ -1406,21 +1405,17 @@ final class ModelFront: @unchecked Sendable {
         guard let key = proposal["key"] as? String, key == (state["tuning"] as? [String: Any])?["key"] as? String else {
             throw ServingFailure("This result belongs to another model or context", status: 409)
         }
-        if proposal["kind"] as? String == "performance", let entry = proposal["entry"] as? [String: Any] {
-            try Tuning.save(fresh, key: key, entry: entry)
-        } else {
-            let choice = ((try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any])?["quality"] as? String ?? ""
-            guard QualityDial.levels.contains(where: { $0.name == choice }),
-                let result = (proposal["results"] as? [[String: Any]] ?? []).first(where: { $0["quality"] as? String == choice }),
-                (result["samples"] as? Int ?? 0) >= 2,
-                let rate = result["decode_tps"] as? Double, rate.isFinite, rate > 0,
-                let first = result["first_token_seconds"] as? Double, first.isFinite, first >= 0,
-                let spread = result["spread"] as? Double, spread.isFinite, spread >= 0
-            else {
-                throw ServingFailure("Choose a mode with at least two completed measurements")
-            }
-            _ = try Commands.configWriter(fresh)(["quality": choice])
+        let choice = ((try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any])?["quality"] as? String ?? ""
+        guard QualityDial.levels.contains(where: { $0.name == choice }),
+            let result = (proposal["results"] as? [[String: Any]] ?? []).first(where: { $0["quality"] as? String == choice }),
+            (result["samples"] as? Int ?? 0) >= 2,
+            let rate = result["decode_tps"] as? Double, rate.isFinite, rate > 0,
+            let first = result["first_token_seconds"] as? Double, first.isFinite, first >= 0,
+            let spread = result["spread"] as? Double, spread.isFinite, spread >= 0
+        else {
+            throw ServingFailure("Choose a mode with at least two completed measurements")
         }
+        _ = try Commands.configWriter(fresh)(["quality": choice])
         try? FileManager.default.removeItem(at: Tuning.proposalFile(fresh))
         return reloading(try reload(), ["saved": true])
     }
@@ -1663,7 +1658,8 @@ final class ModelFront: @unchecked Sendable {
     }
 
     /// `POST v1/jobs`: `{"kind": "add", "source": "<folder|file|owner/name>",
-    /// "name": "<name>", "to": "<folder>"}` adds a model (`origami model add`), writing a download or conversion in `to`;
+    /// "name": "<name>", "to": "<folder>"}` adds a model (`origami model add`), writing a download or conversion in `to`
+    /// (`"lossy": true` once the page has asked about a lossy conversion, as `--lossy`);
     /// `{"kind": "move", "path": "<item>", "to": "<folder>"}` and `{"kind": "remove", "path": "<item>"}` move or delete an
     /// item of the storage map (`Storage`), nothing else. A move of what the running model reads stops it first and starts
     /// it again once the move is done (or failed), so no model reads a file while it moves.
@@ -1704,11 +1700,11 @@ final class ModelFront: @unchecked Sendable {
             try jobs.start(
                 kind: "add", title: "Adding \(shown)",
                 arguments: ["model", "add", source, "--yes"] + (name.map { ["--name=\($0)"] } ?? []) + (to.map { ["--to=\($0)"] } ?? [])
-                    + (base.map { ["--base=\($0)"] } ?? []))
-        // `origami tune` against this server: Tune, Re-check or Undo.
+                    + (base.map { ["--base=\($0)"] } ?? []) + (body["lossy"] as? Bool == true ? ["--lossy"] : []))
+        // `origami tune` against this server: the memory measurement, or the quality levels' speeds.
         case "tune":
             // The reason the dashboard shows next to its tuning buttons, word for word.
-            let mode = body["mode"] as? String ?? "tune"
+            let mode = body["mode"] as? String ?? "memory"
             // The memory search measures whichever model is loaded, with that model's settings (`--model`).
             let saved = try Settings.load(flags: flags)
             let fresh = mode == "memory" ? modelSettings(saved) : saved
@@ -1717,21 +1713,15 @@ final class ModelFront: @unchecked Sendable {
             let block = DashboardState.tuneBlock(state: state, job: jobs.report, reloadRequired: reloadRequired(fresh, state: state))
             guard block.isEmpty else { throw ServingFailure(block, status: 409) }
             if mode == "memory" { lock.withLock { trialEnded = false } }
-            guard ["tune", "recheck", "undo", "tradeoffs", "memory"].contains(mode) else {
-                throw ServingFailure("mode must be tune, recheck, undo, tradeoffs or memory")
-            }
+            guard ["tradeoffs", "memory"].contains(mode) else { throw ServingFailure("mode must be memory or tradeoffs") }
             try jobs.start(
                 kind: "tune",
-                title: [
-                    "tune": "Tuning for this Mac", "recheck": "Re-checking the tuning", "undo": "Undoing the tuning",
-                    "tradeoffs": "Comparing quality modes", "memory": "Finding the fastest memory limit",
-                ][mode]! + (then == nil ? "" : " while idle"),
+                title: (mode == "memory" ? "Finding the fastest memory limit" : "Comparing quality modes")
+                    + (then == nil ? "" : " while idle"),
                 arguments: mode == "memory"
                     ? ["tune", "--port=\(port)", "--memory"] + (spec.map { ["--model=\($0)"] } ?? [])
-                    : ["tune", "--port=\(port)", "--review=true"] + ((body["minutes"] as? Int).map { ["--minutes=\($0)"] } ?? [])
-                        + (mode == "tradeoffs"
-                            ? ["--tradeoffs=true"] + ((body["quality_floor"] as? String).map { ["--quality-floor=\($0)"] } ?? [])
-                            : mode == "tune" ? [] : ["--" + mode]),
+                    : ["tune", "--port=\(port)", "--tradeoffs=true"] + ((body["minutes"] as? Int).map { ["--minutes=\($0)"] } ?? [])
+                        + ((body["quality_floor"] as? String).map { ["--quality-floor=\($0)"] } ?? []),
                 then: mode != "memory"
                     ? then
                     : { @Sendable [weak self] state in
@@ -2086,6 +2076,8 @@ final class ModelFront: @unchecked Sendable {
                 ? source : Models.displayName(URL(fileURLWithPath: Settings.expand(source))),
             "family": report.family!.displayName, "bytes": report.totalBytes, "verdict": report.verdict.rawValue,
             "reason": report.reason, "needs_bytes": needs, "fits": drive.free >= needs,
+            // A conversion that quantizes weights a second time, in `model add`'s words; the page asks before the add.
+            "lossy": ModelCompatibility.lossLine(report) ?? NSNull(),
         ]) { $1 }
     }
 

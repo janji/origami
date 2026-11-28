@@ -82,11 +82,11 @@
   { "rule": "a copy on the model's own drive is no condition",
     "status": {"status": "ready", "experts_from": {"sources": [{"role": "hot", "state": "not_possible", "detail": "A copy on the model's own drive is disabled by default."}]}},
     "slowed_by": [] },
-  { "rule": "a hot Mac in Low Power Mode, GLM's keep-alive off",
-    "status": {"status": "ready", "mac_now": {"thermal_state": 2, "low_power": true}, "tuning": {"state": "tuned", "entry": {"gain": 0.04}, "key": "k1", "knobs": {"gpu_keepalive": {"value": false, "source": "default", "default": true}}}},
+  { "rule": "a hot Mac in Low Power Mode",
+    "status": {"status": "ready", "mac_now": {"thermal_state": 2, "low_power": true}},
     "slowed_by": [
       {"fix": "Nothing to do: it recovers by itself as the Mac cools; keep its vents clear.", "id": "mac_hot", "since": null, "text": "The Mac is hot: macOS slows its chip down"},
-      {"fix": "Turn Low Power Mode off in System Settings › Battery (Energy on a desktop Mac).", "id": "low_power", "since": null, "text": "Low Power Mode is on: macOS slows the chip, and Origami turns its GPU keep-alive off"}
+      {"fix": "Turn Low Power Mode off in System Settings › Battery (Energy on a desktop Mac).", "id": "low_power", "since": null, "text": "Low Power Mode is on: macOS slows the chip"}
     ] },
   { "rule": "saves paused for disk",
     "status": {"status": "ready", "prompt_cache": {"saves_paused": "conversation saves are paused: 3.1 GB free, and a save keeps 10.0 GB free plus its image (1.2 GB); free disk space or lower the context"}},
@@ -114,26 +114,17 @@
       {"fix": "Nothing to do: it ends by itself; Cancel on the dashboard stops it.", "id": "job", "since": "2026-11-18T11:06:40Z", "text": "Finding the fastest memory limit is running: it reloads the model and times it, so requests wait or stop it"},
       {"fix": "Nothing to do: Origami answers one request at a time, and they run in turn.", "id": "queue", "since": null, "text": "2 requests wait for the one being answered"}
     ] },
-  { "rule": "advice: never tuned",
-    "status": {"status": "ready", "tuning": {"state": "none", "entry": null, "key": "k1", "knobs": {"gpu_keepalive": {"value": true, "source": "default", "default": true}}}, "last_tuning": null},
-    "slowed_by": [
-      {"fix": "Tune for this Mac in Setup (about 8 minutes, while nothing else runs).", "id": "not_tuned", "since": null, "text": "Not tuned for this Mac yet: tuning may find faster settings with the same replies"}
-    ] },
-  { "rule": "tuned before: the defaults were fastest",
-    "status": {"status": "ready", "tuning": {"state": "none", "entry": null, "key": "k1", "knobs": {"gpu_keepalive": {"value": true, "source": "default", "default": true}}}, "last_tuning": {"key": "k1", "outcome": "already_fastest"}},
-    "slowed_by": [] },
   { "rule": "the model's drive gone",
     "status": {"status": "degraded", "degraded": "The model's drive is not answering: reconnect it; reading resumes by itself, with no reload"},
     "slowed_by": [
       {"fix": "Reconnect it; reading resumes by itself, with no reload.", "id": "drive_gone", "since": null, "text": "The model's drive is not answering: replies wait for it"}
     ] },
   { "rule": "the order: what costs most first, advice last",
-    "status": {"status": "ready", "queue": {"busy": true, "queued": 1}, "memory": {"available_bytes": 10121428992, "budget_bytes": 14679362304, "budget_mode": "automatic", "cap_bytes": 24051816858, "floor_bytes": 4294967296, "footprint_bytes": 11620984456, "last_cut": null, "recovery_target_bytes": 24051816858, "reserved_bytes": 12565218464, "start_bytes": 17589764720, "target_bytes": 24051816858, "temporarily_reduced": true}, "memory_holders": [{"name": "Google Chrome", "bytes": 16100000000}], "tuning": {"state": "none", "entry": null, "key": "k2", "knobs": {"gpu_keepalive": {"value": true, "source": "default", "default": true}}}, "experts_from": {"sources": [{"role": "all", "drive": "Models", "state": "reading", "since_rewrite": {"high": true, "share": 0.25}}]}, "memory_learned": {"applied": false, "bytes": null, "cap_bytes": 24051816858, "days": 0.1, "in_force": "memory: automatic; this Mac's memory use has changed since the memory limit was measured (cut on 3 days since): run `origami tune --memory`", "limit_advice": null, "minimum_bytes": 15679362304, "regrowths": 0, "trims": 0}},
+    "status": {"status": "ready", "queue": {"busy": true, "queued": 1}, "memory": {"available_bytes": 10121428992, "budget_bytes": 14679362304, "budget_mode": "automatic", "cap_bytes": 24051816858, "floor_bytes": 4294967296, "footprint_bytes": 11620984456, "last_cut": null, "recovery_target_bytes": 24051816858, "reserved_bytes": 12565218464, "start_bytes": 17589764720, "target_bytes": 24051816858, "temporarily_reduced": true}, "memory_holders": [{"name": "Google Chrome", "bytes": 16100000000}], "experts_from": {"sources": [{"role": "all", "drive": "Models", "state": "reading", "since_rewrite": {"high": true, "share": 0.25}}]}, "memory_learned": {"applied": false, "bytes": null, "cap_bytes": 24051816858, "days": 0.1, "in_force": "memory: automatic; this Mac's memory use has changed since the memory limit was measured (cut on 3 days since): run `origami tune --memory`", "limit_advice": null, "minimum_bytes": 15679362304, "regrowths": 0, "trims": 0}},
     "slowed_by": [
       {"fix": "Other apps hold Google Chrome 16.1 GB. Quit what you do not need: it grows into free memory by itself about 20 s later; no reload needed.", "id": "memory_low", "since": null, "text": "Memory: Origami holds itself to 14.7 GB of the 24.1 GB it may use: it started small because little memory was free"},
       {"fix": "Stop Origami and run `origami refresh`: it rewrites the model's files in place, which usually cures this.", "id": "model_drive_slow", "since": null, "text": "The model's drive reads slowly: 25% of its reading time is far below its own speed"},
-      {"fix": "Nothing to do: Origami answers one request at a time, and they run in turn.", "id": "queue", "since": null, "text": "1 request waits for the one being answered"},
-      {"fix": "Tune for this Mac in Setup (about 8 minutes, while nothing else runs).", "id": "not_tuned", "since": null, "text": "Not tuned for this Mac yet: tuning may find faster settings with the same replies"}
+      {"fix": "Nothing to do: Origami answers one request at a time, and they run in turn.", "id": "queue", "since": null, "text": "1 request waits for the one being answered"}
     ] },
   { "rule": "nothing slows it",
     "status": {"status": "ready", "queue": {"busy": false, "queued": 0}, "memory": {"budget_bytes": 25500000000, "recovery_target_bytes": 25500000000, "budget_mode": "automatic", "temporarily_reduced": false}, "experts_from": {"sources": [{"role": "all", "drive": "Models", "state": "reading", "slow_reads": {"high": false, "share": 0.01}}, {"role": "hot", "drive": "internal drive", "state": "ready", "bytes": 40000000000, "budget_bytes": 40000000000}]}, "mac_now": {"thermal_state": 0, "low_power": false}, "prompt_cache": {"saves_paused": null}, "requests": {"recent": [{"time": "2026-11-22T11:00:00Z", "prompt_restore": {"wanted": 1950, "restored": 1900, "reason": "entry_evicted"}}]}},

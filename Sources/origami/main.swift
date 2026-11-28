@@ -1,7 +1,7 @@
 import Foundation
 import OrigamiEngine
 
-let version = "3.2.0"
+let version = "3.2.1"
 
 /// Options that set a setting; every command that reads settings accepts them. Help lists them in this order: the
 /// ones people change most first, the quality knobs last.
@@ -15,8 +15,8 @@ let settingOptions = [
 let commonSettingOptions = ["model", "context", "port", "memory-limit", "data-dir", "config"]
 /// Options without a value.
 let switchOptions: Set<String> = [
-    "yes", "deep", "no-pack", "full-pack", "json", "help", "version", "all", "family", "single-model", "recheck", "undo", "memory",
-    "copy",
+    "yes", "deep", "no-pack", "full-pack", "json", "help", "version", "all", "family", "single-model", "memory",
+    "copy", "lossy",
 ]
 let optionLines: [String: String] = [
     "model":
@@ -73,6 +73,7 @@ let optionLines: [String: String] = [
     "size": "--size <size>               most space Origami may use in that folder, e.g. 200GB",
     "label": "--label <label>             the service's launchd label (default com.origami.serve)",
     "yes": "-y, --yes                   answer yes to questions (downloads, deletions)",
+    "lossy": "--lossy                     convert even when the conversion quantizes weights a second time (it is named first)",
     "deep": "--deep                      also compare every record with the model's weights",
     "copy": "--copy                      rewrite the model's hot copy instead of its files",
     "json": "--json                      machine-readable output",
@@ -83,14 +84,11 @@ let optionLines: [String: String] = [
     "all": "--all                       remove every saved prompt, this build's too",
     "no-pack": "--no-pack                   do not copy the experts to another drive",
     "full-pack": "--full-pack                 copy the experts even onto the model's own drive",
-    "review": "--review true               save a proposal without applying it",
     "tradeoffs": "--tradeoffs true            compare quality modes without changing settings",
     "quality-floor": "--quality-floor <level>     lowest quality to compare (default the model's mildest level after exact)",
-    "minutes": "--minutes <n>               time limit: 3 to 30 minutes (default 8); with --memory 3 to 60 (default 30)",
-    "recheck": "--recheck                   check that the tuned settings are still faster than the defaults",
-    "undo": "--undo                      remove the tuned settings and reload with the defaults",
+    "minutes": "--minutes <n>               time limit: 3 to 60 minutes (default 30); with --tradeoffs 3 to 30 (default 8)",
     "memory":
-        "--memory                    reload at a few memory limits, time replies at each and suggest the fastest this Mac\n                              keeps without cuts or swap (about 4 minutes for Qwen, 6 for GLM, 10 for DeepSeek)",
+        "--memory                    what tune does without --tradeoffs: reload at a few memory limits, time replies at each\n                              and suggest the fastest this Mac keeps without cuts or swap (about 4 minutes for Qwen,\n                              6 for GLM, 10 for DeepSeek)",
 ]
 
 let help = """
@@ -128,8 +126,7 @@ let help = """
 
     Settings and speed:
       config                List every setting; `config set <key> <value>`, `config unset <key>`
-      tune                  Find faster timing settings on the running server (about 8 minutes)
-      tune --memory         Find this Mac's fastest memory limit on the running server
+      tune                  Find this Mac's fastest memory limit on the running server
       bench                 Time a short question, a story and a long document on the running server
 
     Problems:
@@ -194,10 +191,10 @@ let commands: [String: CommandSpec] = [
         options: ["size", "yes", "no-pack", "full-pack"], arguments: 2),
     "model": .init(
         usage:
-            "model list [--json]\n       origami model add <folder|org/repo|file.gguf> [--name <name>] [--to <folder>] [--expert-bits 2|4|8] [--yes]\n       origami model add <experts.gguf> --base <model> [--name <name>] [--yes]\n       origami model replace <name> <folder|org/repo|file.gguf> [--base <model>] [--to <folder>] [--yes]\n       origami model standalone <name> [--to <folder>]\n       origami model remove <name>\n       origami model move <name> <folder>\n       origami model default <name>",
+            "model list [--json]\n       origami model add <folder|org/repo|file.gguf> [--name <name>] [--to <folder>] [--expert-bits 2|4|8] [--lossy] [--yes]\n       origami model add <experts.gguf> --base <model> [--name <name>] [--yes]\n       origami model replace <name> <folder|org/repo|file.gguf> [--base <model>] [--to <folder>] [--lossy] [--yes]\n       origami model standalone <name> [--to <folder>]\n       origami model remove <name>\n       origami model move <name> <folder>\n       origami model default <name>",
         summary:
             "List, add, remove, move or choose the default of the models Origami knows by name; `origami serve --model <name>` serves one.\n`model add <experts.gguf> --base <model>` adds a faster variant of an exact model whose experts come from a low-bit file\n(replies differ from the exact model's). `model replace` puts another build under a name, keeping its settings, presets\nand default; the server keeps running and loads it at the next request; what was kept for the old files is named.\n`model standalone` copies a variant's base files into a folder of its own (compared byte for byte), so the base can go.\nA request may name `qwen`, `glm` or `deepseek`: the default model of that family, else the one added last. `model move` moves a model's files with the server quit, as the dashboard's Move:\nrenamed on the same drive, else copied, read back and compared before the original goes; its hot copy, counts and\nsaved prompts follow it",
-        options: ["name", "to", "base", "expert-bits", "json", "yes"], arguments: 3),
+        options: ["name", "to", "base", "expert-bits", "json", "lossy", "yes"], arguments: 3),
     "move": .init(
         usage: "move [list]\n       origami move recover [<id>]",
         summary:
@@ -255,10 +252,10 @@ let commands: [String: CommandSpec] = [
     "bench": .init(
         usage: "bench [options]", summary: "Time a short question, a story and a 6K-token document on the running server"),
     "tune": .init(
-        usage: "tune [--minutes N] [options]\n       origami tune --memory [--minutes N]\n       origami tune --recheck | --undo",
+        usage: "tune [--minutes N] [options]\n       origami tune --tradeoffs true [--quality-floor LEVEL] [--minutes N]",
         summary:
-            "On the running server, try timing settings that leave replies unchanged and keep the one that is faster every time\n(about 8 minutes, longer if the model needs it; a request from an app stops it, and the next run continues). Origami then uses it for this model and context on this Mac.\n--memory instead finds this Mac's fastest memory limit; it suggests it and changes no setting",
-        options: ["memory", "minutes", "recheck", "undo", "review", "tradeoffs", "quality-floor", "port", "config", "data-dir"],
+            "On the running server, find this Mac's fastest memory limit: reload at a few limits and time replies at each\n(a request from an app stops it, and the next run continues). It suggests the limit and changes no setting;\nwith no memory_limit set, automatic memory starts from it. Then, if the model's hot copy could be larger, it says so.\n--tradeoffs instead times each quality level, without changing settings",
+        options: ["memory", "minutes", "tradeoffs", "quality-floor", "port", "config", "data-dir"],
         settings: false),
     "report": .init(
         usage: "report [options]",
@@ -360,8 +357,7 @@ do {
     case "bench": try await Diagnostics.bench(flags: flags)
     case "report": try await Diagnostics.report(flags: flags)
     case "tune":
-        try await Tuning.run(
-            flags: flags, recheck: switches.contains("recheck"), undo: switches.contains("undo"), memory: switches.contains("memory"))
+        try await Tuning.run(flags: flags, memory: switches.contains("memory"))
     case "refresh": try Refresh.run(flags: flags, yes: switches.contains("yes"), copy: switches.contains("copy"))
     case "uninstall": try Commands.uninstall(flags: flags, yes: switches.contains("yes"))
     case "version": print("origami \(version)")
