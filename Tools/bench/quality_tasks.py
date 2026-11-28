@@ -9,9 +9,9 @@ Tasks (prompt tokens estimated at 4 characters a token; "typical" is the complet
 
     id                kind        prompt  cap    typical
     code_trace        code           110  2048    600
-    code_fix          code           120  3072    700
-    code_ranges       code           110  3072    600
-    code_duration     code           140  3072    700
+    code_fix          code           120  4096    700
+    code_ranges       code           110  4096    600
+    code_duration     code           140  4096    700
     tool_logs         tool result   4800  2048    400
     tool_files        tool result   3900  2048    400
     tool_orders       tool result   3600  2048    500
@@ -104,7 +104,7 @@ def user(text):
     return [{"role": "user", "content": text}]
 
 
-def code_task(task_id, prompt, name, tests, good, bad, cap=3072):
+def code_task(task_id, prompt, name, tests, good, bad, cap=4096):
     def score(message):
         code = code_answer(visible_text(message), name)
         return (bool(code) and run_hidden_tests(code, tests)), code
@@ -263,7 +263,7 @@ def logs_task(rng):
     question = (f"How many ERROR lines in /var/log/app.log come from the payments service? {ANSWER_LINE} "
                 "The answer is a single integer.")
     messages = tool_turn(question, "run_command", {"command": "cat /var/log/app.log"}, "\n".join(lines))
-    return exact_task("tool_logs", "tool result", messages, count, count + 1, numeric=True, tools=TOOLS)
+    return exact_task("tool_logs", "tool result", messages, count, count + 1, numeric=True)
 
 
 def files_task(rng):
@@ -285,7 +285,7 @@ def files_task(rng):
                 f"{ANSWER_LINE} The answer is the file's full path.")
     messages = tool_turn(question, "run_command", {"command": "list-files --json /srv/data"}, listing)
     wrong = biggest if biggest != best["path"] else picks[0]["path"]
-    return exact_task("tool_files", "tool result", messages, best["path"], wrong, tools=TOOLS)
+    return exact_task("tool_files", "tool result", messages, best["path"], wrong)
 
 
 def orders_task(rng):
@@ -306,7 +306,7 @@ def orders_task(rng):
                 f"(qty x unit_price)? {ANSWER_LINE} The answer is the order_id.")
     messages = tool_turn(question, "read_file", {"path": "reports/orders.csv"}, "\n".join(rows))
     wrong = min(totals, key=totals.get)
-    return exact_task("tool_orders", "tool result", messages, best, wrong, tools=TOOLS)
+    return exact_task("tool_orders", "tool result", messages, best, wrong)
 
 
 def ci_task(rng):

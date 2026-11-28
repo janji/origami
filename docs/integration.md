@@ -34,6 +34,11 @@ first seen. The ids: `drive_gone`, `job`, `memory_low`, `memory_limit_not_kept`,
 `drive_not_allowed`, `copy_drive_gone`, `hot_copy_building`, `hot_copy_no_room`, `hot_copy_failed`, `hot_copy_short`,
 `hot_copy_drive_slow`, `mac_hot`, `low_power`, `saves_paused`, `prompt_read_again`, `queue`, `memory_limit_low`,
 `not_tuned`; more may come, so show `text` and `fix` rather than matching ids. `/v1/status` also carries what the list reads from this Mac: `mac_now` (`thermal_state`, 0 to 3 as macOS reports it, and `low_power`) and, while the memory budget is 1 GB or more under what Origami may use (`memory.target_bytes`), `memory_holders` (the three largest other apps, `[{"name", "bytes"}]`).
+`memory.owners` names what holds Origami's reserved memory: bytes per owner (the expert cache, key/value storage,
+saved-prompt snapshots, HTTP buffers and so on, by the engine's own names), summing to `memory.reserved_bytes`;
+`memory.owners_without_buffer` is the part of them reserved ahead with no buffer yet. What is reserved but not yet in
+the process's memory is `reserved_bytes` minus `footprint_bytes` (when positive): owners do not report their resident
+part one by one.
 
 In `/v1/status`, `experts_from.sources` lists where experts are read from; the model's own row (`"role": "all"`), while
 its files are read, carries `slow_reads`: `busy_seconds` and `slow_seconds` (reading time since start, and the part of it
@@ -57,8 +62,8 @@ OpenRouter's `supported_parameters`, `context_length`, and Ollama's `capabilitie
 for a model that reads images).
 
 By default the list holds one model, `origami`, and every request gets the model chosen in the dashboard whatever
-name it sends. With `list_models true` it lists every model and a request can switch between them by name; see
-[models.md](models.md#keeping-several-models).
+name it sends. With `list_models true` it lists every model and a request can switch between them by name, or by its
+family (`qwen`, `glm`, `deepseek`), which outlives a replaced model; see [models.md](models.md#keeping-several-models).
 
 A switch costs a full stop and load: the running reply finishes, the model's memory goes back, the other model loads
 (GLM and DeepSeek take about a minute to answer again, Qwen less) and starts with an empty expert cache, so its first

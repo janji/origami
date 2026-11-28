@@ -416,7 +416,7 @@ public final class TokenizerStack: Sendable {
         var context: [String: any Sendable] = [
             "enable_thinking": thinking, "thinking": thinking, "clear_thinking": false, "drop_thinking": false,
             "_python_dict": Self.pythonDict,
-            "_bounded_range": Self.boundedRange,
+            "_bounded_range": Self.boundedRange, "tojson": Self.pythonToJSON,
         ]
         // Qwen's template names its top effort `xhigh` (`high` and `max` are it); a template without it takes `high` and
         // `max` as asked and `xhigh` as `max` (DeepSeek's refuses the name; GLM's reads any unknown level as Max).
@@ -483,7 +483,12 @@ public final class TokenizerStack: Sendable {
             } else {
                 while at < bytes.count, !Array(",:]} \t\n\r".utf8).contains(bytes[at]) { at += 1 }
             }
-            return try JSONDecoder().decode(TemplateValue.self, from: Data(bytes[start..<min(at, bytes.count)]))
+            let token = Data(bytes[start..<min(at, bytes.count)])
+            // A number written with a point or an exponent is a float, as Python reads it (`1.0` renders `1.0`, not `1`).
+            if Array("-0123456789".utf8).contains(bytes[start]), token.contains(where: { Array(".eE".utf8).contains($0) }) {
+                return .number(try JSONDecoder().decode(Double.self, from: token))
+            }
+            return try JSONDecoder().decode(TemplateValue.self, from: token)
         }
         func value() throws -> Jinja.Value {
             let open = peek()
@@ -563,6 +568,89 @@ public final class TokenizerStack: Sendable {
         }
         for (key, value) in keywords.sorted(by: { $0.key < $1.key }) { merged[.string(key)] = value }
         return .object(merged)
+    }
+
+    /// `tojson` as transformers renders chat templates (the models were trained on it, and write their calls that way):
+    /// `json.dumps(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False)`, so keys in their order, `", "`
+    /// and `": "`, no `\/` and no HTML escaping. swift-jinja's built-in sorts keys, writes compact JSON and escapes `/` and
+    /// non-ASCII, so a past call with a list or object argument never rendered as the model wrote it. The context's
+    /// filters come before the built-ins.
+    static let pythonToJSON = Jinja.Value.function { arguments, keywords, _ in
+        guard let value = arguments.first else { throw EngineError("tojson() takes a value") }
+        let names = ["ensure_ascii", "indent", "separators", "sort_keys"]
+        guard arguments.count <= names.count + 1, keywords.keys.allSatisfy(names.contains) else {
+            throw EngineError("tojson() takes ensure_ascii, indent, separators and sort_keys")
+        }
+        var options = keywords
+        for (name, given) in zip(names, arguments.dropFirst()) { options[name] = given }
+        let ascii = options["ensure_ascii"]?.isTruthy ?? false
+        let sortKeys = options["sort_keys"]?.isTruthy ?? false
+        let indent: String?
+        switch options["indent"] ?? .null {
+        case .null, .undefined: indent = nil
+        case .int(let count): indent = String(repeating: " ", count: max(0, count))
+        case .string(let text): indent = text
+        default: throw EngineError("tojson() indent must be an integer or a string")
+        }
+        var item = indent == nil ? ", " : ","
+        var key = ": "
+        switch options["separators"] ?? .null {
+        case .null, .undefined: break
+        case .array(let pair) where pair.count == 2:
+            guard case .string(let first) = pair[0], case .string(let second) = pair[1] else { fallthrough }
+            (item, key) = (first, second)
+        default: throw EngineError("tojson() separators must be two strings")
+        }
+        func quoted(_ text: String) -> String {
+            var out = "\""
+            for scalar in text.unicodeScalars {
+                switch scalar {
+                case "\"": out += "\\\""
+                case "\\": out += "\\\\"
+                case "\n": out += "\\n"
+                case "\r": out += "\\r"
+                case "\t": out += "\\t"
+                case "\u{08}": out += "\\b"
+                case "\u{0C}": out += "\\f"
+                case _ where scalar.value < 0x20 || (ascii && scalar.value > 0x7E):
+                    for unit in String(scalar).utf16 { out += "\\u" + String(format: "%04x", unit) }
+                default: out.unicodeScalars.append(scalar)
+                }
+            }
+            return out + "\""
+        }
+        func dumps(_ value: Jinja.Value, _ depth: Int) throws -> String {
+            let (open, close) =
+                indent.map { ("\n" + String(repeating: $0, count: depth + 1), "\n" + String(repeating: $0, count: depth)) } ?? ("", "")
+            switch value {
+            case .null, .undefined: return "null"
+            case .boolean(let flag): return flag ? "true" : "false"
+            case .int(let number): return String(number)
+            case .double(let number):
+                // Python's float repr: shortest digits, like Swift's, but fixed notation up to 1e16 (Swift's ends at 2^53).
+                if number.isNaN { return "NaN" }
+                if number.isInfinite { return number < 0 ? "-Infinity" : "Infinity" }
+                if abs(number) >= 0x1p53, abs(number) < 1e16 { return String(Int(number)) + ".0" }
+                return number.description
+            case .string(let text): return quoted(text)
+            case .array(let items):
+                guard !items.isEmpty else { return "[]" }
+                return "[" + open + (try items.map { try dumps($0, depth + 1) }.joined(separator: item + open)) + close + "]"
+            case .object(let entries):
+                guard !entries.isEmpty else { return "{}" }
+                var pairs = entries.map { entry -> (String, Jinja.Value) in
+                    switch entry.key {
+                    case .string(let name): return (name, entry.value)
+                    case .int(let number): return (String(number), entry.value)
+                    }
+                }
+                if sortKeys { pairs.sort { $0.0 < $1.0 } }
+                return "{" + open + (try pairs.map { quoted($0.0) + key + (try dumps($0.1, depth + 1)) }.joined(separator: item + open))
+                    + close + "}"
+            default: throw EngineError("tojson() cannot write a function or macro")
+            }
+        }
+        return .string(try dumps(value, 0))
     }
 
     /// Where this turn's reply begins (the last `<|im_start|>`, the generation prompt's): the next turn

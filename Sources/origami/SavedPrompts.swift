@@ -13,6 +13,12 @@ enum SavedPrompts {
     struct Owners {
         var qwen: [String: String] = [:], family: [String: String] = [:]
         var qwenKnown = false, familyKnown = false
+        /// The last name of each identity no model has now (`ModelRegistry.former`).
+        var former: [String: [String: String]] = [:]
+        /// How a build of no registered model names its model: its last name, else its identity.
+        func gone(_ id: String, known: Bool) -> String {
+            former[id].map(ModelRegistry.formerName) ?? (known ? "from a model no longer registered · " : "a model not identified · ") + id
+        }
     }
     enum State: Equatable {
         case inUse, usable
@@ -31,6 +37,8 @@ enum SavedPrompts {
         /// What removing it deletes.
         let items: [URL]
         let label: String, model: String
+        /// Its model's last name and what became of it (`Owners.gone`), when no registered model has it.
+        let owner: String?
         let context: Int?
         let used: Date
         let bytes: UInt64
@@ -51,6 +59,7 @@ enum SavedPrompts {
                 "state": state == .inUse ? "in_use" : state == .usable ? "usable" : "unusable",
             ]
             if let context { row["context"] = context }
+            if let owner { row["owner"] = owner }
             if case .unusable(let reason) = state { row["reason"] = reason }
             return row
         }
@@ -77,13 +86,16 @@ enum SavedPrompts {
         func used(_ index: URL) -> Date {
             (try? index.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
         }
-        func make(_ group: URL, _ items: [URL], label: String, model: String, context: Int?, index: URL?, state: State) -> Build {
+        func make(
+            _ group: URL, _ items: [URL], label: String, model: String, owner: String? = nil, context: Int?, index: URL?, state: State
+        ) -> Build {
             // An index that is missing holds nothing; one that cannot be read may hold named or pinned prompts.
             let read = index.map { try? Settings.readConfig($0) } ?? [:]
             let entries = read?["entries"] as? [String: [String: Any]] ?? [:]
             let kept = entries.values.compactMap { $0["name"] as? String ?? ($0["pinned"] as? Bool == true ? "a pinned prompt" : nil) }
             return Build(
-                group: group, items: items, label: label, model: model, context: context, used: index.map(used) ?? .distantPast,
+                group: group, items: items, label: label, model: model, owner: owner, context: context,
+                used: index.map(used) ?? .distantPast,
                 bytes: items.reduce(0) { $0 + Storage.size($1.path).allocated }, conversations: entries.count, kept: kept.sorted(),
                 unreadable: read == nil, state: state)
         }
@@ -95,13 +107,14 @@ enum SavedPrompts {
                 let context = Int(name.dropFirst(13))
                 let model = owners.qwen[id] ?? id
                 let orphan = owners.qwenKnown && owners.qwen[id] == nil
+                let owner = owners.qwen[id] == nil ? owners.gone(id, known: owners.qwenKnown) : nil
                 for build in children(group) where epoch(build) {
                     let state: State =
                         PromptCache.inUse(build)
                         ? .inUse : orphan ? .unusable("a model file no model uses") : whyUnreadable(build).map(State.unusable) ?? .usable
                     builds.append(
                         make(
-                            group, [build], label: name + "/" + build.lastPathComponent, model: model, context: context,
+                            group, [build], label: name + "/" + build.lastPathComponent, model: model, owner: owner, context: context,
                             index: build.appendingPathComponent("index.json"), state: state))
                 }
                 // 1.0.0 kept its entries in `<fingerprint12>-<context>` itself; no server reads them now.
@@ -112,7 +125,8 @@ enum SavedPrompts {
                 if !legacy.isEmpty {
                     builds.append(
                         make(
-                            group, legacy.sorted { $0.path < $1.path }, label: name + " (1.0.0)", model: model, context: context,
+                            group, legacy.sorted { $0.path < $1.path }, label: name + " (1.0.0)", model: model, owner: owner,
+                            context: context,
                             index: group.appendingPathComponent("index.json"), state: .unusable("made by Origami 1.0.0")))
                 }
             } else if epoch(group) {
@@ -131,7 +145,9 @@ enum SavedPrompts {
                     } ?? "")
                 builds.append(
                     make(
-                        group, [group], label: label, model: model, context: marker?["context"] as? Int,
+                        group, [group], label: label, model: model,
+                        owner: owners.family[key] == nil && !key.isEmpty ? owners.gone(key, known: owners.familyKnown) : nil,
+                        context: marker?["context"] as? Int,
                         index: group.appendingPathComponent("index.json"), state: state))
             } else if name == "family-context" {
                 // Its files are unlinked as soon as they are mapped: what is left is a process's that ended before.

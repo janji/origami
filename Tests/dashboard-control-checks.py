@@ -382,6 +382,63 @@ with tempfile.TemporaryDirectory(prefix='origami-control-') as temporary:
         check(original.exists() and copied.exists() and (recovery / (ident+'.json')).exists(), 'recovery preserves both locations when verification fails')
         job({'kind':'forget','path':str(target/'first')})
         check((target/'first').exists() and not any(x['name']=='first' for x in json.loads(registry.read_text())['models']), 'unlisting keeps model files on disk')
+        # A model whose experts are read from GGUF files outside its folder is as large as what it reads of them (the banks
+        # its manifest records), and Delete names the files that go and the one another model reads too, which stays.
+        kept_models = registry.read_bytes()
+        outside = root / 'ista'; outside.mkdir()
+        mine_gguf, theirs_gguf = outside / 'mine.gguf', outside / 'theirs.gguf'
+        for f in (mine_gguf, theirs_gguf): f.write_bytes(bytes(5000))
+        def experts_manifest(files):
+            return json.dumps({'format': 'origami-gguf-experts-v1', 'experts': 4, 'files': [{'path': str(f), 'size': 5000} for f in files],
+                               'layers': [{p: {'path': str(f), 'expert_bytes': 100} for p in ('gate', 'up', 'down')} for f in files]})
+        standalone = data / 'models' / 'standalone'; standalone.mkdir(); (standalone / 'config.json').write_text('{}')
+        (standalone / 'model.safetensors').write_bytes(bytes(1000)); (standalone / 'gguf-experts.json').write_text(experts_manifest([mine_gguf, theirs_gguf]))
+        reader = data / 'models' / 'reader'; reader.mkdir(); (reader / 'config.json').write_text('{}')
+        (reader / 'gguf-experts.json').write_text(experts_manifest([theirs_gguf]))
+        folder_bytes = sum(f.stat().st_size for f in standalone.iterdir())
+        registry.write_text(json.dumps({'models': json.loads(kept_models)['models'] + [
+            {'name': 'standalone', 'path': str(standalone), 'manifest': {'bytes': folder_bytes}}, {'name': 'reader', 'path': str(reader)}]}))
+        item = next(i for i in items() if i['role'] == 'model' and i.get('model') == 'standalone')
+        check(item['bytes'] == folder_bytes + 2400 and item['experts_from'] == [str(mine_gguf), str(theirs_gguf)],
+              'a model whose experts are read from GGUFs outside its folder counts the part it reads of them: ' + repr(item['bytes']))
+        until = time.time() + 10
+        while True:
+            listed = {e['id']: e['origami'] for e in call('v1/models?all')[1]['data'] if e.get('origami')}
+            if listed['standalone']['bytes'] != folder_bytes or time.time() > until: break
+            time.sleep(.1)
+        check(listed['standalone']['bytes'] == folder_bytes + 2400, 'and so does its size in the model listing: ' + repr(listed['standalone']['bytes']))
+        code, plan = call('v1/storage/plan', {'kind': 'delete', 'path': str(standalone)})
+        check(code == 200 and plan['deletes'] == [str(standalone), str(mine_gguf)] and plan['keeps'] == [{'path': str(theirs_gguf), 'why': 'reader reads it too'}],
+              'its Delete names the files that go and the experts file another model reads, which stays: ' + repr(plan))
+        job({'kind': 'delete', 'path': str(standalone)})
+        check(not standalone.exists() and not mine_gguf.exists() and theirs_gguf.exists(), 'and deletes those, keeping that one')
+        shutil.rmtree(reader); shutil.rmtree(outside); registry.write_bytes(kept_models)
+        # A replaced model's files say whose they are: a row of no registered model names it by its last name, marked
+        # replaced, with the date; a file older than that record by its fingerprint; unlisting a model keeps its name.
+        kept_models, kept_config = registry.read_bytes(), config.read_text()
+        config.write_text(json.dumps(dict(json.loads(kept_config), model='newer')))
+        newer = data / 'models' / 'newer'; newer.mkdir(); (newer / 'config.json').write_text('{}')
+        registry.write_text(json.dumps({'models': json.loads(kept_models)['models'] + [
+            {'name': 'newer', 'path': str(newer), 'manifest': {'fingerprint': 'e' * 64}}]}))
+        former = data / 'former-models.json'
+        former.write_text(json.dumps({'d' * 12: {'name': 'older', 'replaced_by': 'newer', 'at': '2026-11-26'}}))
+        copies = [store / (stem + '-' + mark * 12) for stem, mark in (('older', 'd'), ('gone', 'f'), ('newer', 'e'))]
+        for copy in copies: (copy / 'hot').mkdir(parents=True); (copy / 'hot' / 'index.json').write_text('{}')
+        group = data / 'prompt-cache' / ('d' * 12 + '-32768'); (group / ('1' * 16)).mkdir(parents=True)
+        (group / ('1' * 16) / 'index.json').write_text(json.dumps({'entries': {'one': {}, 'two': {}}}))
+        def hot_of(copy): return next(i for i in items() if i['path'] == str(copy / 'hot'))
+        builds = {b['path']: b for b in call('v1/storage')[1]['saved_prompts']}
+        check('model' not in hot_of(copies[0]) and hot_of(copies[0]).get('owner') == 'older (replaced by newer 2026-11-26)'
+              and builds[str(group / ('1' * 16))].get('owner') == 'older (replaced by newer 2026-11-26)'
+              and hot_of(copies[1]).get('owner') == 'from a model no longer registered · ' + 'f' * 12 and hot_of(copies[2]).get('model') == 'newer',
+              "a replaced model's hot copy and saved prompts name it, marked replaced, and a file older than that record its fingerprint: "
+              + repr([hot_of(c).get('owner') or hot_of(c).get('model') for c in copies] + [builds.get(str(group / ('1' * 16)))]))
+        job({'kind': 'forget', 'path': str(newer)})
+        today = time.strftime('%Y-%m-%d', time.gmtime())
+        check(json.loads(former.read_text())['e' * 12] == {'name': 'newer', 'at': today} and hot_of(copies[2]).get('owner') == 'newer (removed ' + today + ')',
+              'unlisting a model keeps its last name for the files it leaves: ' + repr(hot_of(copies[2]).get('owner')))
+        for folder in copies + [group, newer]: shutil.rmtree(folder)
+        former.unlink(); registry.write_bytes(kept_models); config.write_text(kept_config)
         code, _ = call('v1/config', {'memory_auto_measure': 'true'}, state()['revision'])
         check(code == 200 and state()['saved_settings']['memory_auto_measure']['value'] == 'true', "the Memory line's switch saves memory_auto_measure")
         check('starting ' not in (root/'server.log').read_text(), 'all checks ran without starting an inference process')
@@ -501,6 +558,113 @@ with tempfile.TemporaryDirectory(prefix='origami-restart-') as temporary:
         result = subprocess.run([binary, 'start', '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
         check(result.returncode == 0 and 'The last start failed' in result.stdout and 'not readable yet' in result.stdout and 'Ready: first runs again.' in result.stdout,
               'origami start after a failed start starts the model again and says so: ' + result.stdout.strip())
+    except Exception:
+        log.flush(); print((root / 'server.log').read_text(), file=sys.stderr); raise
+    finally:
+        process.terminate()
+        try: process.wait(timeout=8)
+        except subprocess.TimeoutExpired: process.kill(); process.wait()
+        log.close()
+
+# After a power cut: the model's drive is not mounted when the server starts; the server waits for it and loads within
+# 10 s of the mount, and a Stop while waiting ends the wait. The drive: a small disk image under /Volumes (as in J39).
+with tempfile.TemporaryDirectory(prefix='origami-mount-') as temporary:
+    root = pathlib.Path(temporary).resolve(); data = root / 'data'; data.mkdir()
+    volume = 'OrigamiMountCheck' + uuid.uuid4().hex[:6]; point = pathlib.Path('/Volumes/' + volume)
+    (root / 'src' / 'first').mkdir(parents=True); (root / 'src' / 'first' / 'config.json').write_text('{}')
+    subprocess.run(['hdiutil', 'create', '-quiet', '-srcfolder', str(root / 'src'), '-volname', volume, '-fs', 'HFS+', '-format', 'UDRO', str(root / 'drive.dmg')], check=True, timeout=120)
+    attach = lambda: subprocess.run(['hdiutil', 'attach', '-quiet', '-nobrowse', str(root / 'drive.dmg')], check=True, timeout=60)
+    detach = lambda: subprocess.run(['hdiutil', 'detach', '-quiet', '-force', str(point)], timeout=60) if point.exists() else None
+    (data / 'models.json').write_text(json.dumps({'models': [{'name': 'first', 'path': str(point / 'first'), 'manifest': {'fingerprint': 'a' * 64}}]}))
+    worker = root / 'worker.py'; worker.write_text(WORKER); worker.chmod(0o755)
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+    config = root / 'config.json'
+    config.write_text(json.dumps({'data_dir': str(data), 'model': 'first', 'context': '32k', 'models_dirs': '[]', 'port': port})); config.chmod(0o600)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('ORIGAMI_')}
+    env['ORIGAMI_TEST_WORKER'] = str(worker)
+    log = open(root / 'server.log', 'w+')
+    process = subprocess.Popen([binary, 'serve', '--config', str(config)], env=env, stdout=log, stderr=log)
+    def health():
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response: return json.load(response)
+        except urllib.error.HTTPError as error: return json.load(error)
+        except (OSError, urllib.error.URLError): return {}
+    def until(condition, seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if condition(state := health()): return state
+            time.sleep(.05)
+        return health()
+    try:
+        state = until(lambda h: 'waiting for' in h.get('failure', ''), 30)
+        check(state.get('status') == 'failed' and 'is not connected' in state['failure'] and volume in state['failure'],
+              'a start whose drive is not mounted says it waits for the drive: ' + repr(state))
+        result = subprocess.run([binary, 'stop', '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+        attach(); time.sleep(3)
+        check(health().get('status') == 'stopped' and 'is connected: starting' not in (root / 'server.log').read_text(),
+              'a Stop while waiting for the drive ends the wait: the mount starts nothing')
+        detach()
+        result = subprocess.run([binary, 'start', '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+        state = until(lambda h: 'waiting for' in h.get('failure', ''), 30)
+        check('is not connected' in result.stdout and 'waiting for' in state.get('failure', ''), 'Start with the drive still gone waits for it again: ' + result.stdout.strip())
+        attach(); mounted = time.time()
+        state = until(lambda h: h.get('status') == 'ready', 10)
+        check(state.get('status') == 'ready', 'the model loads within 10 s of its drive mounting (%.1f s): %r' % (time.time() - mounted, state))
+    except Exception:
+        log.flush(); print((root / 'server.log').read_text(), file=sys.stderr); raise
+    finally:
+        process.terminate()
+        try: process.wait(timeout=8)
+        except subprocess.TimeoutExpired: process.kill(); process.wait()
+        log.close(); detach()
+
+# The request history outlives the model process: after a stop and a start (as an idle unload or a switch stops it),
+# the status lists the old process's finished requests before the new one's, the last 50; and reading it costs well
+# under 1 ms more. Each stub process has finished 30 requests, named by its process id.
+HISTORY = WORKER.replace("{'status': 'ready', 'queue': {'busy': False, 'queued': 0}}", """{'status': 'ready', 'queue': {'busy': False, 'queued': 0}, 'requests': {'completed': 30, 'recent': [
+            {'request_id': '%d-%d' % (os.getpid(), i), 'time': '2026-11-28T00:00:00Z', 'seconds': 1.5, 'mode': 'exact', 'finish': 'stop', 'outcome': 'completed',
+             'prompt_tokens': 1000, 'cached_tokens': 900, 'completion_tokens': 200, 'ttft_s': 0.5, 'decode_tps': 8.0, 'stage_seconds': {'generation': 1.0}}
+            for i in range(30)]}}""", 1).replace("import http.server, json, sys", "import http.server, json, os, sys", 1)
+with tempfile.TemporaryDirectory(prefix='origami-history-') as temporary:
+    root = pathlib.Path(temporary).resolve(); data = root / 'data'; model = data / 'models' / 'first'; model.mkdir(parents=True)
+    (model / 'config.json').write_text('{}')
+    (data / 'models.json').write_text(json.dumps({'models': [{'name': 'first', 'path': str(model), 'manifest': {'fingerprint': 'a' * 64}}]}))
+    worker = root / 'worker.py'; worker.write_text(HISTORY); worker.chmod(0o755)
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+    config = root / 'config.json'
+    config.write_text(json.dumps({'data_dir': str(data), 'model': 'first', 'context': '32k', 'models_dirs': '[]', 'port': port})); config.chmod(0o600)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('ORIGAMI_')}
+    env['ORIGAMI_TEST_WORKER'] = str(worker)
+    log = open(root / 'server.log', 'w+')
+    process = subprocess.Popen([binary, 'serve', '--config', str(config)], env=env, stdout=log, stderr=log)
+    def status():
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/status', timeout=5) as response: return json.load(response)
+        except urllib.error.HTTPError as error: return json.load(error)
+        except (OSError, urllib.error.URLError): return {}
+    def owners(state): return [row['request_id'].split('-')[0] for row in (state.get('requests') or {}).get('recent', [])]
+    def ready(seconds=30):
+        deadline = time.time() + seconds
+        while time.time() < deadline and (state := status()).get('status') != 'ready': time.sleep(.05)
+        return state
+    def median_read(n=60):
+        times = []
+        for _ in range(n):
+            started = time.perf_counter(); status(); times.append(time.perf_counter() - started)
+        return sorted(times)[n // 2]
+    try:
+        first = owners(ready())
+        before = median_read()
+        for command in ('stop', 'start'):
+            subprocess.run([binary, command, '--config', str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        state = ready()
+        after = median_read()
+        again = owners(state)
+        check(len(first) == 30 and len(set(first)) == 1 and len(again) == 50 and again[:20] == first[:20] and set(again[20:]) == {again[-1]} and again[-1] != first[0],
+              "after a stop and a start the status lists the old process's requests before the new one's, the last 50")
+        check(after - before < 0.001, 'keeping the history costs a status read %.3f ms (under 1 ms)' % ((after - before) * 1000))
     except Exception:
         log.flush(); print((root / 'server.log').read_text(), file=sys.stderr); raise
     finally:
@@ -936,7 +1100,7 @@ with tempfile.TemporaryDirectory(prefix='origami-prune-') as temporary:
     worker = root / 'worker.py'; worker.write_text(WORKER); worker.chmod(0o755)
     context = root / 'context'; group = context / ('a' * 12 + '-32768')
     build = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest()[:16]
-    arithmetic = re.search(r'value = "([0-9a-f]{64})"', (pathlib.Path(__file__).resolve().parent.parent / 'Sources/OrigamiEngine/Core/ArithmeticDigest.swift').read_text()).group(1)
+    arithmetic = re.search(r'name: "qwen", value: "([0-9a-f]{64})"', (pathlib.Path(__file__).resolve().parent.parent / 'Sources/OrigamiEngine/Core/ArithmeticDigest.swift').read_text()).group(1)
     identity = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest() + ' Version %s (Build %s)' % tuple(
         subprocess.check_output(['sw_vers', flag], text=True).strip() for flag in ('-productVersion', '-buildVersion'))
     def epoch(folder, marker_build=None, index=None):

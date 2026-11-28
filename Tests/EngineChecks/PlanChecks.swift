@@ -175,6 +175,78 @@ func planPromptCacheFollowsRows() throws {
     }
 }
 
+/// ROADMAP C1': a prompt read's expert cache counts only the key/value arena the conversation holds plus what this
+/// request can add (`heldArenaBytes`), not the whole context's. At 128K, a 28K conversation reading 1.5K new tokens with
+/// 2,048 reply tokens keeps about 2.5 GB more cache; a conversation that fills the context keeps the old limit; and across
+/// every conversation size and reply length the owners stay within the budget, the request's pages within the hold.
+func planPromptCacheLendsUnusedArena() throws {
+    func require(_ value: Bool, _ message: @autoclosure () -> String) throws { if !value { throw EngineError(message()) } }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("origami-prompt-lend-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let ram: UInt64 = 32 << 30
+    let host = OrigamiHost(physicalMemory: ram, workingSet: ram * 3 / 4, gpuName: "simulated 32 GB", bfloatMatrices: true)
+    let context = 131072
+    let plan = try OrigamiPlan.make(
+        model: try ModelSource(fixture: root, spans: [:]), host: host, context: context, promptCache: root,
+        availableNow: ram, footprintNow: 0)
+    let configuration = plan.configuration
+    let experts = configuration.experts
+    let usable = try configuration.memoryAdmission().usableBytes
+    let resident = configuration.residentBytes + configuration.denseResidentBytes
+    let geometry = try ConversationGeometry(context: context)
+    let slab = UInt64(experts.slotsPerSlab * PackStore.expertBytes)
+    let owners =
+        experts.replicaOwnerBytes + experts.readAheadOwnerBytes + experts.layerCommandOwnerBytes + experts.reuseOwnerBytes
+        + experts.decodeSlabOwnerBytes
+    let perToken = geometry.pooledBytesPerToken
+    func cache(_ input: Int, held: UInt64) throws -> UInt64 {
+        try SerialExecutor.promptCacheBytes(
+            context: context, fileBacked: nil, input: input, residentBytes: resident, experts: experts, usable: usable,
+            heldArenaBytes: held)
+    }
+    // The limit before C1': the same room, under a ceiling that counted the whole arena.
+    func before(_ input: Int, held: UInt64) throws -> UInt64 {
+        let rows = min(8192, (input + 255) / 256 * 256)
+        let longest = try geometry.maximumFixedBytes(input: 8192, residentBytes: 0)
+        let this = try geometry.maximumFixedBytes(input: rows, residentBytes: 0)
+        return try ConversationPhaseBudget.expertBytes(
+            context: context, input: rows, residentBytes: resident, experts: experts, usable: usable, heldArenaBytes: held,
+            ceiling: min(experts.cacheBytes, experts.prefillCacheBytes + (longest - this) / slab * slab))
+    }
+    let (conversation, input, reply) = (28 * 1024, 1536, 2048)
+    let held = geometry.heldArenaBytes(live: UInt64(conversation) * perToken, growth: input + reply)
+    let (old, new) = (try before(input, held: held), try cache(input, held: held))
+    // The gain is the arena past the hold (3.59 GB less 1.10 GB), in whole slabs: about 2.5 GB.
+    let gain = Double(new) - Double(old)
+    try require(
+        new - old == (geometry.arenaBytes - held) / slab * slab && gain >= 1.7e9 && gain <= 2.6e9,
+        String(format: "28K + 1.5K + 2,048 at 128K: %.2f GB before, %.2f GB after", Double(old) / 1e9, Double(new) / 1e9))
+    let full = geometry.heldArenaBytes(live: UInt64(context - input) * perToken, growth: input + reply)
+    try require(
+        full == geometry.arenaBytes && (try cache(input, held: full)) == before(input, held: full)
+            && (try cache(input, held: geometry.arenaBytes)) == before(input, held: geometry.arenaBytes),
+        "a conversation filling the context changed the limit")
+    for conversation in stride(from: 0, through: context, by: 4096) {
+        for input in [256, 1536, 8192] where conversation + input <= context {
+            // Replies of a few tokens, 2,048, and one that runs to the context limit (past any estimate).
+            for reply in [1, 2048, context - conversation - input] {
+                let live = UInt64(conversation) * perToken
+                let held = geometry.heldArenaBytes(live: live, growth: input + reply)
+                let bytes = try cache(input, held: held)
+                let rows = min(8192, (input + 255) / 256 * 256)
+                let label = "\(conversation) + \(input) + \(reply)"
+                try require(bytes >= (try before(input, held: held)) && bytes <= experts.cacheBytes, label + ": the limit fell")
+                try require(
+                    try geometry.maximumFixedBytes(input: rows, residentBytes: resident, heldArenaBytes: held) + owners + bytes
+                        <= usable, label + ": owners overcommit the budget")
+                try require(
+                    held >= min(geometry.arenaBytes, live + UInt64(input + reply) * perToken), label + ": the pages outgrow the hold")
+            }
+        }
+    }
+}
+
 /// The 256K tier (file-backed KV): refused below 32 GB and without about 37 GB of free disk; from 32 GB it
 /// plans its own, smaller expert cache with the 8K/32K-only decode switches off and the file-KV disk quotas
 /// pinned. `planFitsMacSizes` above pins the 8K/32K plans, which this tier must not move. No model needed.

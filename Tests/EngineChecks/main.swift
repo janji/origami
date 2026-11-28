@@ -145,6 +145,24 @@ func memoryCeilingReservationsAndReleaseAreExact() throws {
     expectThrows { try MemoryLedger(ceiling: 100, transientMargin: 100) }
 }
 
+/// `/v1/status` `memory.owners` (both engines use `ownersReport`): every owner's reservation, summing to `reserved_bytes`,
+/// and the part reserved ahead without a buffer.
+func memoryOwnersReportSumsToReserved() throws {
+    let ledger = try MemoryLedger(ceiling: 2_000, transientMargin: 100)
+    _ = try ledger.reserve(bytes: 700, category: "expert_cache")
+    _ = try ledger.reserve(bytes: 150, category: "http_buffers")
+    _ = try ledger.reserve(bytes: 50, category: "http_buffers")
+    _ = try ledger.reserveAllowance(bytes: 300, category: "family-working")
+    let memory = ledger.snapshot()
+    let report = memory.ownersReport
+    let owners = report["owners"] as? [String: UInt64] ?? [:]
+    expect(owners == ["expert_cache": 700, "http_buffers": 200, "family-working": 300])
+    expect(owners.values.reduce(0, +) == memory.reserved && memory.reserved == 1_200)
+    expect(report["owners_without_buffer"] as? [String: UInt64] == ["family-working": 300])
+    let json = try JSONSerialization.data(withJSONObject: report, options: .sortedKeys)
+    expect(String(decoding: json, as: UTF8.self).contains("\"http_buffers\":200"))
+}
+
 func sequenceAdmissionIncludesContinuationAndRejectsOverflow() throws {
     expect(try MemoryLedger.sequenceStateBytes(inputTokens: 32_000, outputTokens: 768) == 943_718_400)
     expectThrows { try MemoryLedger.sequenceStateBytes(inputTokens: 262_144, outputTokens: 1) }
@@ -571,6 +589,7 @@ let tests: [(String, () throws -> Void)] =
         ("partial_read_failure", partialReadNeverSucceeds),
         ("invalid_reads", invalidReadsDoNotInvokeIO),
         ("memory_reservations", memoryCeilingReservationsAndReleaseAreExact),
+        ("memory_owners_report", memoryOwnersReportSumsToReserved),
         ("phase_workspace_admission_failure_reuse", phaseWorkspacePreservesAdmissionAcrossFailureAndReuse),
         ("continuation_admission", sequenceAdmissionIncludesContinuationAndRejectsOverflow),
         ("bf16_ties_exceptions_exhaustive", bf16TiesExceptionsAndAllFiniteRoundtrips),
@@ -714,6 +733,7 @@ let tests: [(String, () throws -> Void)] =
         ("tool_call_grammars_parse", toolCallGrammarsParse),
         ("family_tool_template_round_trip", familyToolTemplateRoundTrip),
         ("template_continuation_round_trip", templateContinuationRoundTrip),
+        ("template_tojson_matches_python", templateToJSONMatchesPython),
         ("stream_output_budget_usage", servingOutputBudgetAndWireUsage),
         ("server_request_admission_lifetime", servingAdmissionDelayedRetirement),
         ("server_health_ledger", servingHealthAndLedgerLifetime),
@@ -739,6 +759,7 @@ let tests: [(String, () throws -> Void)] =
         ("plan_expert_memory_and_ceiling", planExpertMemoryAndCeiling),
         ("plan_explicit_memory_target", planExplicitMemoryTarget),
         ("plan_prompt_cache_follows_rows", planPromptCacheFollowsRows),
+        ("plan_prompt_cache_lends_unused_arena", planPromptCacheLendsUnusedArena),
         ("gathered_expert_matches_fused", gatheredExpertMatchesFusedExperts),
         ("gathered_deferred_group_parity", gatheredDeferredGroupParity),
         ("group32_scheme_record_layout", group32SchemeAndRecordLayout),
@@ -922,6 +943,7 @@ let tests: [(String, () throws -> Void)] =
         ("prompt_cache_dashboard_edits", PrefixReuseSelfChecks.promptCacheEdits),
         ("prompt_cache_canary_shared_by_builds", PrefixReuseSelfChecks.canarySharedByBuilds),
         ("prompt_cache_canary_refused_and_older_folders", PrefixReuseSelfChecks.canaryRefusedAndOlderFolders),
+        ("prompt_cache_adopts_earlier_key", PrefixReuseSelfChecks.adoptsEarlierKey),
         ("prompt_cache_canary_opens_for_saves", PrefixReuseSelfChecks.canaryOpensForSaves),
         ("reply_text_matches_whole_decode", replyTextMatchesWholeDecode),
         ("paged_checkpoint_disk_bytes_of_written_pages", PagedCheckpointSelfChecks.diskBytesOfWrittenPages),

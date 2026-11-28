@@ -4,10 +4,10 @@
 set -u
 bin=${1:-.build/release/origami}
 tmp=$(mktemp -d)
-# A saved-prompt folder's marker names this build by the canary's fields (`PromptCanary`): the arithmetic digest and the
-# executable on this macOS.
-mine="\"arithmetic\": \"$(sed -n 's/.*value = "\([0-9a-f]*\)".*/\1/p' "$(dirname "$0")/../Sources/OrigamiEngine/Core/ArithmeticDigest.swift")\", \"builds\": [\"$(shasum -a 256 "$bin" | cut -d' ' -f1) Version $(sw_vers -productVersion) (Build $(sw_vers -buildVersion))\"]"
-trap 'hdiutil detach -quiet "$tmp/data/vol" 2>/dev/null; hdiutil detach -quiet "$tmp/fat" 2>/dev/null; rm -rf "$tmp"' EXIT
+# A saved-prompt folder's marker names this build by the canary's fields (`PromptCanary`): the arithmetic digest
+# (Qwen's: the fixtures are Qwen folders) and the executable on this macOS.
+mine="\"arithmetic\": \"$(sed -n 's/.*name: "qwen", value: "\([0-9a-f]*\)".*/\1/p' "$(dirname "$0")/../Sources/OrigamiEngine/Core/ArithmeticDigest.swift")\", \"builds\": [\"$(shasum -a 256 "$bin" | cut -d' ' -f1) Version $(sw_vers -productVersion) (Build $(sw_vers -buildVersion))\"]"
+trap 'hdiutil detach -quiet "$tmp/data/vol" 2>/dev/null; hdiutil detach -quiet "$tmp/fat" 2>/dev/null; hdiutil detach -quiet "$tmp/tiny" 2>/dev/null; rm -rf "$tmp"' EXIT
 export ORIGAMI_CONFIG="$tmp/data/config.json" ORIGAMI_DATA_DIR="$tmp/data" ORIGAMI_MODEL="$tmp/no-model" ORIGAMI_PORT=1
 failures=0
 # Ports free now, so two runs on one Mac at the same time do not meet.
@@ -309,6 +309,24 @@ PY
     check 1 "Nothing was added: these experts need the exact model" "$bin" model add "$tmp/vw/w-00001-of-00002.gguf" --base vbase --name vw
     check 1 "Cannot read t-00001-of-00002.gguf as a GGUF" "$bin" model add "$tmp/vt/t-00001-of-00002.gguf" --base vbase --name vt
     check 1 "vbase already names a model" "$bin" model add "$tmp/vx/x-00001-of-00002.gguf" --base vbase --name vbase
+    # `model standalone`: the variant gets its own copy of its base's files, compared byte for byte, so the base can go;
+    # refused with nothing written on a drive without the room, and for a model that is no variant.
+    check 1 "is not a low-bit variant" "$bin" model standalone vbase
+    if mkdir -p "$tmp/tiny" && hdiutil create -quiet -size 16m -fs ExFAT -volname OrigamiTiny "$tmp/tiny.dmg" \
+       && hdiutil attach -quiet -nobrowse -mountpoint "$tmp/tiny" "$tmp/tiny.dmg"; then
+        check 1 "Nothing was copied; pass --to with a folder on a bigger drive" "$bin" model standalone vq --to "$tmp/tiny"
+        [ -z "$(ls "$tmp/tiny")" ] && echo "ok    a refused standalone writes nothing" || { echo "FAIL  a refused standalone left $(ls "$tmp/tiny")"; failures=$((failures + 1)); }
+        hdiutil detach -quiet "$tmp/tiny"
+    else echo "skip  standalone without room (no disk image)"; fi
+    check 0 "copying done" "$bin" model standalone vq --to "$tmp/sa"
+    [ -f "$tmp/sa/vq/model.safetensors" ] && [ ! -L "$tmp/sa/vq/model.safetensors" ] && [ ! -e "$tmp/data/variants/vq" ] \
+        && cmp -s "$tmp/vb/tokenizer.json" "$tmp/sa/vq/tokenizer.json" \
+        && echo "ok    the standalone variant holds its own files and its folder of links is gone" || { echo "FAIL  the standalone variant's folder"; failures=$((failures + 1)); }
+    "$bin" model remove vbase > /dev/null; mv "$tmp/vb" "$tmp/vb-gone"
+    check 0 "low-bit experts from x-00001-of-00002.gguf" "$bin" status --model vq
+    mv "$tmp/vb-gone" "$tmp/vb"; "$bin" model remove vq > /dev/null; rm -rf "$tmp/sa"
+    "$bin" model add "$tmp/vb" --name vbase > /dev/null
+    check 0 "Added vq" "$bin" model add "$tmp/vx/x-00001-of-00002.gguf" --base vbase --name vq
     check 0 "untouched" "$bin" model remove vq
     [ ! -e "$tmp/data/variants/vq" ] && [ -f "$tmp/vb/model.safetensors" ] && [ -f "$tmp/vx/x-00001-of-00002.gguf" ] \
         && echo "ok    removing the variant keeps the base and the GGUF" \
@@ -1299,6 +1317,10 @@ check 1 "did not start: No model at" env ORIGAMI_CONFIG="$stopcfg" "$bin" start 
 grep "starting qwen" "$tmp/serve-stop.log" | tail -1 | grep -q "trial memory limit" && { echo "FAIL  Start after a stop loaded the memory trial's limit"; failures=$((failures + 1)); }
 check 0 "Stopped: " env ORIGAMI_CONFIG="$stopcfg" "$bin" stop --port $port_f
 kill "$stopfront"; wait "$stopfront" 2>/dev/null
+# Every line of the server's log has its time, the model process's own (its "No model at" here) too, and only once.
+grep -q "origami: No model at" "$tmp/serve-stop.log" || { echo "FAIL  the model process's error is not in the log"; failures=$((failures + 1)); }
+grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z? ' "$tmp/serve-stop.log" | grep -q . && { echo "FAIL  log lines without a time: $(grep -vE '^[0-9]{4}-' "$tmp/serve-stop.log")"; failures=$((failures + 1)); }
+grep -qE 'Z [0-9]{4}-[0-9]{2}-[0-9]{2}T' "$tmp/serve-stop.log" && { echo "FAIL  a log line has two times"; failures=$((failures + 1)); }
 ORIGAMI_CONFIG="$stopcfg" "$bin" serve --port $port_f > "$tmp/serve-stop2.log" 2>&1 & stopfront=$!
 for _ in $(seq 60); do curl -s -m 2 127.0.0.1:$port_f/health 2>/dev/null | grep -q '"status"' && break; sleep 0.5; done
 check 0 '"status":"stopped"' curl -s -m 5 127.0.0.1:$port_f/health
@@ -1529,4 +1551,71 @@ if launchctl print "gui/$(id -u)" > /dev/null 2>&1 && ! launchctl print "gui/$(i
     [ -e "$HOME/Library/LaunchAgents/$svc.plist" ] && fail "service remove left its plist"
     rm -f "$HOME/Library/Logs/Origami/$svc.log"
 else echo "skip  service install (no login session for launchd, or the test label or port 11977 is in use)"; fi
+# Family aliases (`qwen`, `glm`, `deepseek`): a request by alias is served by the default model of that family, else the
+# one added last, and still after the model behind it is replaced. A stub worker (ORIGAMI_TEST_WORKER) stands in for each
+# model process and answers with the model it was started for and that model's folder in models.json.
+ad="$tmp/alias-data"; mkdir -p "$ad"
+for m in qa qb ga; do mkdir -p "$ad/models/$m"; printf '{}' > "$ad/models/$m/config.json"; done
+printf '{"models":[{"name":"qa","path":"%s","added":"2026-01-01T00:00:00Z"},{"name":"qb","path":"%s","added":"2026-02-01T00:00:00Z"},{"name":"ga","path":"%s","family":"glm-5.3-flash","added":"2026-01-01T00:00:00Z"}]}' \
+    "$ad/models/qa" "$ad/models/qb" "$ad/models/ga" > "$ad/models.json"
+cat > "$ad/worker.py" <<'PY'
+#!/usr/bin/env python3
+import http.server, json, os, sys
+port = int(sys.argv[sys.argv.index('--port') + 1])
+model = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else os.environ['ORIGAMI_MODEL']
+entries = json.load(open(os.environ['ORIGAMI_DATA_DIR'] + '/models.json'))['models']
+path = next((e['path'] for e in entries if e['name'] == model), '?')
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def send(self, body):
+        body = json.dumps(body).encode()
+        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_POST(self): self.rfile.read(int(self.headers.get('Content-Length', 0))); self.send({'model': model, 'path': path})
+    def do_GET(self): self.send({'status': 'ready', 'queue': {'busy': False, 'queued': 0}})
+http.server.ThreadingHTTPServer(('127.0.0.1', port), H).serve_forever()
+PY
+chmod +x "$ad/worker.py"
+port_alias=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+aenv() { env ORIGAMI_DATA_DIR="$ad" ORIGAMI_CONFIG="$ad/config.json" ORIGAMI_MODEL=ga ORIGAMI_PORT=$port_alias ORIGAMI_LIST_MODELS=true ORIGAMI_TEST_WORKER="$ad/worker.py" "$@"; }
+ask() { curl -s -m 30 127.0.0.1:$port_alias/v1/chat/completions -H "Content-Type: application/json" -d "{\"model\":\"$1\",\"messages\":[]}"; }
+aenv "$bin" serve > "$tmp/serve-alias.log" 2>&1 & aliasfront=$!
+for _ in $(seq 60); do curl -s -m 2 127.0.0.1:$port_alias/health > /dev/null 2>&1 && break; sleep 0.5; done
+check 0 "{\"model\": \"qb\", \"path\": \"$ad/models/qb\"}" ask qwen
+check 0 '{"model": "ga"' ask glm
+check 0 '{"model": "qa"' ask qa
+check 0 '"model_not_found"' ask deepseek
+check 0 '"alias":"qwen","availability"' curl -s -m 5 "127.0.0.1:$port_alias/v1/models?all"
+check 0 '"id":"qb"' curl -s -m 5 127.0.0.1:$port_alias/v1/models/qwen
+check 0 "qb  $ad/models/qb  (alias qwen)" aenv "$bin" model list
+check 0 "ga  $ad/models/ga  (alias glm)" aenv "$bin" model list
+# The model behind `qwen` replaced (qb removed, qc added): the same request is served by the new one.
+qwen_fixture "$ad/models/qc" banks
+printf '{"models":[{"name":"qa","path":"%s","added":"2026-01-01T00:00:00Z"},{"name":"ga","path":"%s","family":"glm-5.3-flash","added":"2026-01-01T00:00:00Z"}]}' \
+    "$ad/models/qa" "$ad/models/ga" > "$ad/models.json"
+check 0 "Added qc" aenv "$bin" model add "$ad/models/qc" --name qc
+check 0 "{\"model\": \"qc\", \"path\": \"$ad/models/qc\"}" ask qwen
+# `model replace` while qc runs: its settings stay, the server keeps answering and loads the new build, and what was
+# kept for the old files (a hot copy, usage counts) is named with how to remove it.
+check 0 "context = 64k" aenv "$bin" config set context 64k --model qc
+qfp=$(aenv "$bin" status --model qc --json | python3 -c 'import json, sys; r = json.load(sys.stdin); print(r["hot_copy"]["path"], r["model"]["fingerprint"])')
+mkdir -p "${qfp%% *}"; printf '{"identity":"%s","keys":[],"offsets":[]}' "${qfp#* }" > "${qfp%% *}/index.json"
+fp=${qfp#* }; echo '{}' > "$ad/routing-${fp:0:12}.json"
+qwen_fixture "$ad/models/qd" banks
+check 0 "Kept the settings saved for qc: context." aenv "$bin" model replace qc "$ad/models/qd"
+case "$out" in *"hot copy "*"/qc-${fp:0:12}/hot (0.0 GB): delete it in the dashboard's Models view"*"usage counts $ad/routing-${fp:0:12}.json: delete the file"*"loads the new files of qc after its current reply"*)
+    echo "ok    model replace names the old files' hot copy and counts, and the running server reloads" ;;
+    *) fail "model replace did not name what it left or reload the server: $out" ;; esac
+check 0 "{\"model\": \"qc\", \"path\": \"$ad/models/qd\"}" ask qwen
+python3 -c 'import json, sys; e = [m for m in json.load(open(sys.argv[1]))["models"] if m["name"] == "qc"]; sys.exit(not (len(e) == 1 and e[0]["context"] == "64k" and e[0]["path"] == sys.argv[2]))' \
+    "$ad/models.json" "$ad/models/qd" 2>/dev/null && echo "ok    the replaced entry keeps its name and context" || fail "the replaced entry: $(cat "$ad/models.json")"
+check 1 "is qc's own files already" aenv "$bin" model replace qc "$ad/models/qd"
+check 1 "No model named nope" aenv "$bin" model replace nope "$ad/models/qd"
+check 2 "Usage: origami model" aenv "$bin" model replace qc "$ad/models/qd" --name other
+# The default model wins for its family, and an exact name over an alias.
+check 0 '"default" : "qa"' env ORIGAMI_MODEL=qa ORIGAMI_DATA_DIR="$ad" ORIGAMI_CONFIG="$ad/config.json" "$bin" model list --json
+case "$out" in *'"qwen" : "qa"'*) echo "ok    the default model is its family's alias" ;; *) fail "the default model is not qwen's alias: $out" ;; esac
+check 0 '"aliases"' env ORIGAMI_MODEL=ga ORIGAMI_DATA_DIR="$ad" ORIGAMI_CONFIG="$ad/config.json" "$bin" model list --json
+printf '{"models":[{"name":"qwen","path":"%s"},{"name":"qc","path":"%s","added":"2026-03-01T00:00:00Z"}]}' "$ad/models/qa" "$ad/models/qd" > "$ad/models.json"
+check 0 "{\"model\": \"qwen\", \"path\": \"$ad/models/qa\"}" ask qwen
+kill "$aliasfront"; wait "$aliasfront" 2>/dev/null
 [ "$failures" -eq 0 ] && echo "cli-checks: all passed" || { echo "cli-checks: $failures failed"; exit 1; }

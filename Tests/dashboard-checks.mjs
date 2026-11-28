@@ -267,6 +267,13 @@ const downloadRemoval = run('storageAction("remove", "/Volumes/B/.origami-moving
 check(/Delete 120\.0 GB permanently\. This is a whole downloaded model: to use it again, all 120\.0 GB must be downloaded again\./.test(element("storage-confirm-body").innerHTML),
   "deleting an unlisted download names its size and that it would have to be downloaded again");
 run('finishStorageConfirm(false)'); await downloadRemoval;
+// A model whose experts are read from a file outside its folder: Delete names each file that goes, and the one another
+// model reads too, which stays.
+const modelDelete = run('confirmStorage(' + JSON.stringify({ kind: "delete", path: "/Volumes/B/m", name: "m", role: "model", bytes: 1e9, allocated_bytes: 6e9,
+  parts: ["/Volumes/B/m"], deletes: ["/Volumes/B/m", "/Volumes/C/mine.gguf"], keeps: [{ path: "/Volumes/C/theirs.gguf", why: "reader reads it too" }] }) + ')');
+check(/Delete 6\.0 GB permanently\.<\/p><p>Deletes \/<wbr>Volumes\/<wbr>B\/<wbr>m, \/<wbr>Volumes\/<wbr>C\/<wbr>mine\.gguf<\/p><p>Keeps \/<wbr>Volumes\/<wbr>C\/<wbr>theirs\.gguf: reader reads it too<\/p>/
+  .test(element("storage-confirm-body").innerHTML), "deleting a model whose experts are elsewhere names the files that go and the one that stays: " + element("storage-confirm-body").innerHTML);
+run('finishStorageConfirm(false)'); await modelDelete;
 // Saved prompts get rows per model: what the running build reads, and apart what nothing can read any more, with its size
 // and age, in `origami cache`'s words; the storage total says so above 1 GB. Remove unusable… lists what goes; a folder
 // with pinned or named conversations needs its own tick.
@@ -281,6 +288,20 @@ const prompts = element("storage").innerHTML;
 check(/<h3>Saved prompts<\/h3>/.test(prompts) && /qwen <span class="tag">in use<\/span><\/div><div class="file-location">2\.0 GB · 3 conversations · 1 pinned or named/.test(prompts)
   && /qwen <span class="tag">unusable: made by another Origami build \(version 3\.1\.3\); a model file no model uses<\/span><\/div><div class="file-location">7\.0 GB · 2 folders · last used 14 d ago/.test(prompts)
   && !/Saved prompts <span class="tag">not used/.test(prompts) && /data-sact="prune"/.test(prompts), "saved prompts: the running build's and the unusable ones per model, in the words origami cache uses");
+// Rows of no registered model name the one they were made for (its last name, or its fingerprint), and an unused one what
+// deleting it loses; saved prompts of a replaced model are listed under its last name.
+const named = { ...routes["v1/storage"], drives: [{ ...routes["v1/storage"].drives[0], items: [
+    { path: "/s/older-dddddddddddd/hot", name: "hot", role: "hot copy", owner: "older (replaced by newer 2026-11-26)", bytes: 6.8e10, unused: true, actions: ["remove"], state: "unused" },
+    { path: "/s/gone-ffffffffffff/hot", name: "hot", role: "hot copy", owner: "from a model no longer registered · ffffffffffff", bytes: 1e9, unused: true, actions: ["remove"], state: "unused" }] }],
+  saved_prompts: [{ path: "/c/dddddddddddd-32768/1111111111111111", label: "dddddddddddd-32768/1111111111111111", model: "dddddddddddd", owner: "older (replaced by newer 2026-11-26)",
+    bytes: 6.5e9, conversations: 6, kept: [], unreadable: false, state: "usable" }] };
+const unnamed = routes["v1/storage"]; routes["v1/storage"] = named; await run("loadStorage()"); await settle();
+const owned = element("storage").innerHTML;
+check(/Hot copy · older \(replaced by newer 2026-11-26\) <span class="tag">unused<\/span><\/div><div class="file-location">[^<]* · 68\.0 GB · deleting it loses nothing a model reads now/.test(owned)
+  && /Hot copy · from a model no longer registered · ffffffffffff <span class="tag">unused/.test(owned)
+  && /older \(replaced by newer 2026-11-26\) <span class="tag">usable by this build<\/span><\/div><div class="file-location">6\.5 GB · 6 conversations/.test(owned) && !/>dddddddddddd </.test(owned),
+  "rows of a replaced model name it, marked replaced, an older one its fingerprint, and an unused row what deleting it loses");
+routes["v1/storage"] = unnamed; await run("loadStorage()"); await settle();
 check(/ on disk · 7\.0 GB of saved prompts no build can read$/.test(element("storage-total").textContent), "the storage total names unusable saved prompts above 1 GB: " + element("storage-total").textContent);
 routes["v1/storage"] = { ...routes["v1/storage"], saved_prompts: routes["v1/storage"].saved_prompts.slice(0, 1) };
 await run("loadStorage()"); await settle();
@@ -951,7 +972,18 @@ const health = element("health").innerHTML;
   }
   run("dashboard = " + kept + "; job = null");
   const legend = element("flow-mem").innerHTML;
-  check(/Origami uses/.test(legend) && /may still grow by/.test(legend) && /left to macOS and other apps/.test(legend) && !/room in its limit/.test(legend), "the memory bar's legend says what Origami uses, what it may still grow by and what is left to macOS and other apps");
+  check(/Origami uses/.test(legend) && /free/.test(legend) && /other apps and macOS/.test(legend) && !/left to macOS/.test(legend) && !/room in its limit/.test(legend), "the memory bar's legend says what Origami uses, what is free and what other apps and macOS hold");
+  // Row C7's first reading (production 3.1.8.1, 2026-11-26): the budget below the cap after a cut, and what the Mac had free.
+  const c7 = { ...JSON.parse(JSON.stringify(nowStatus)), memory: { cap_bytes: 24.05e9, budget_bytes: 20.21e9, reserved_bytes: 19.14e9, footprint_bytes: 17.76e9, available_bytes: 5.77e9,
+    budget_mode: "explicit", temporarily_reduced: true, last_cut: { reason: "memory is short (3.8 GB free)", at: new Date(Date.now() - 3 * 3600e3).toISOString() } } };
+  run("showNow(" + JSON.stringify(c7) + ")");
+  const mem = element("flow-mem").innerHTML.replace(/<[^>]+>/g, "");
+  check(/Origami uses 17\.8 GB/.test(mem) && /free 5\.8 GB/.test(mem) && /other apps and macOS 10\.8 GB/.test(mem) && /May still grow by 2\.5 GB within its budget of 20\.2 GB/.test(mem)
+    && /3\.8 GB of its 24\.1 GB limit held back: macOS took memory back 3 h ago because free memory had run low/.test(mem) && !/may still grow by 6/.test(mem),
+    "the memory flow splits the old 'may still grow by' into growth within the budget, what is held back and why, and what the Mac has free" + (/held back/.test(mem) ? "" : ": " + mem));
+  delete c7.memory.last_cut; c7.memory.learned_start_bytes = 20e9;
+  run("showNow(" + JSON.stringify(c7) + ")");
+  check(/held back: Origami started at what this Mac usually had free/.test(element("flow-mem").innerHTML), "held back after a learned start says so");
 }
 run("showNow(" + JSON.stringify(nowStatus) + ")");
 run('live({ status: "loading", model: "first", loading: { seconds: 42, line: "reading the dense weights" } })');

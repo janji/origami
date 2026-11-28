@@ -789,7 +789,7 @@ folder is found at its new name and its files re-stamped again), so a stop is fi
 | Qwen calibration (before 3.1) | `calibration.json` keys `<fingerprint16>|<drive>|<drive>` (no longer read; `drive-speeds.json` is per drive) | key prefix replaced |
 | Tuning | `tuning.json`, `tuning-proposal.json`, `tuning-history.jsonl`: `<id12>@<context>` and `identity.model` | prefix replaced |
 | Registered model | `models.json` `manifest.fingerprint` (Qwen) | replaced |
-| Qwen saved prompts | `<context_dir>/<fingerprint12>-<context>/<epoch16>`: each image embeds the fingerprint in `CheckpointIdentity` and the epoch under its manifest digests | deleted, and said so: they cannot be re-stamped safely |
+| Qwen saved prompts | `<context_dir>/<fingerprint12>-<context>/<epoch16>`: each image embeds the fingerprint in `CheckpointIdentity` and the epoch under its manifest digests | cannot be re-stamped safely, so after a refresh (every byte read back the same) the folder becomes `<fingerprint12>-<context>` of the new fingerprint and records the old one (`earlier-fingerprints.json`); the server finds the saves by it (`PromptCanary.adopt`) and reads them under the identity they were written with. After a move or Locate: deleted, and said so |
 
 Not re-bound: copies on a drive not connected during the refresh (listed as orphans later; the command names those
 folders), an experimental resident pack (`ORIGAMI_FAMILY_RESIDENT_Q4_PACK`, a folder only the environment names), and
@@ -833,8 +833,15 @@ JSON string reach the template as a `Jinja.Value` object in the string's key ord
 structure parsed in order, every scalar read as `TemplateValue` reads it), because swift-jinja's `Value(any:)` sorts a
 Swift dictionary's keys and the templates iterate the arguments (`|items`, `.items()`). The model's next prompt then
 continues the reply token for token (`template_continuation_round_trip`, on the three real templates; with
-`ORIGAMI_MODEL` a model folder or a family GGUF, on its tokenizer). Nested objects still go through swift-jinja's
-`tojson`, which sorts keys and writes compact JSON, as do the values the server sends (`JSONValue.jsonText`). `commonTokenPrefix` compares token IDs,
+`ORIGAMI_MODEL` a model folder or a family GGUF, on its tokenizer). A number written with a point or an exponent stays a
+float (`1.0` renders `1.0`). The templates' `tojson` is transformers' (`pythonToJSON` in the context, which swift-jinja
+looks in before its built-ins): `json.dumps(x, ensure_ascii=False)`, keys in order, `", "` and `": "`, no `\/`, with
+its `ensure_ascii`, `indent`, `separators` and `sort_keys`; swift-jinja's own sorts keys, writes compact JSON and
+escapes `/` and non-ASCII, so a past call with a list or object argument never rendered as the model wrote it
+(`template_tojson_matches_python` compares the three templates with jinja2's rendering). The server sends a list or
+object argument as the model wrote it, compacted (`ParsedToolCall.texts`), so its keys keep their order on the way
+back. Tool schemas still reach the template with sorted keys (the request body is read with `JSONSerialization`), as
+do arguments sent as objects (the Anthropic and Ollama wires). `commonTokenPrefix` compares token IDs,
 never characters, because BPE boundaries move. `systemBlockEnd` finds where a leading system block ends (for the
 system-prompt cache).
 
@@ -2750,7 +2757,10 @@ requests shrinks the next phase's cache instead of failing the request.
   the prompt's budget, then the prefill part of the host workspace is admitted (`ReferencePhaseWorkspace.requirePrefill`).
   The prompt is charged its real new rows (after the restored prefix), rounded up to whole 256-row tiles and at most one
   8,192-row scope; below 256 rows it keeps the decode cache. Its cache is the plan's prefill slots plus the scope bytes
-  its rows leave of the 8,192-row charge, never more than the decode cache or the current budget allows. So a 600-token
+  its rows leave of the 8,192-row charge, plus (with `elastic_decode_residency`) the key/value arena past what this
+  conversation holds and the request can add (`heldArenaBytes`: its pages, the new tokens and `max_tokens`), never more
+  than the decode cache or the current budget allows. The arena then takes that hold, after the cache is sized; a
+  conversation that fills the context keeps the old limit. So a 600-token
   prompt gives back only what its own scope needs, and an 8,192-row one gets the plan's prefill slots as before.
   `prompt_cache_slots` and `prompt_cache_slots_below_decode` (request phase counters) show it.
 - `prepareDecode`: the prefill workspace is retired, the token weight plan is built, the decode cache is sized from
@@ -2860,7 +2870,7 @@ log, `origami status` and `memory_learned.in_force` (the dashboard's memory line
   charges and faults (or wires) the whole slabs that fit both the room left in the budget and the decode phase's own
   limit (`setGrowthCeiling`, set at each phase change and cleared when the request ends; only with prepared decode
   slabs), stopping at the host floor or on fresh swap. The slabs stay outside the cache until `attachGrowth` adds them
-  at the next token's start (`forwardScopeImpl`, logging "expert cache grew back by N slabs mid-reply"): the previous
+  at the next token's start (`forwardScopeImpl`; one line per reply, "expert cache grew back by N slabs mid-reply", N the reply's total, when the sequence ends): the previous
   token's pre-encoded commands are joined there and slab growth is not held, and attaching refuses while it is. New
   slots start free; existing slots, records, pins and GPU publications are untouched, and the slab generation moves so
   the next command's residency set includes the new slabs. Any trim (`trimToBudget`, a phase change) releases prepared
@@ -3055,11 +3065,23 @@ and slot folders past the last slot are removed. An
 **Epoch.** The folder name is 16 hex digits of
 `SHA-256(arithmetic digest, model fingerprint, tokenizer identity, context tier, expert mode, ORIGAMI_EXECUTION text, prefill scope)`
 (GLM and DeepSeek: the arithmetic digest, the hot copy's identity, a resident pack's, the tensor table, the context and
-the decode path, `familyEpoch`). The arithmetic digest (`ArithmeticDigest.value`) is a SHA-256 over the sources that can
-change a saved state's or its logits' bits, so builds that change none of them share a folder; until 3.1.4 the
-executable's SHA-256 stood there and every upgrade started empty. `scripts/arithmetic-digest.py` writes it, and lists
-each covered and left-out path with why; `arithmetic_digest_current` fails, naming the command, when a covered file
-changed since. In: `CExactIO`, `Core` (bfloat16, exact reads, the state files), `Formats` (weight decoding, ggml matrix
+the decode path, `familyEpoch`). The arithmetic digest is the engine's own (`ArithmeticDigest.qwen`, `.qwenGGUF` for
+Qwen with GGUF experts, `.family` for GLM and DeepSeek): a SHA-256 over the sources that can change that engine's saved
+state's or its logits' bits, so builds that change none of them share a folder; until 3.1.4 the executable's SHA-256
+stood there and every upgrade started empty, and 3.1.5 to 3.1.8.3 used one digest for all engines, so a change only
+GLM runs dropped Qwen's saves too. `scripts/arithmetic-digest.py` writes them, and lists each covered and left-out path
+with why, and in `ONLY` the files only some engines run (Qwen's folder, `GenerationDriver`, `FastLateMissSkip`,
+`Planning`, `ModelContract`, `ModelLayout`, `PackStore` and the store format for both Qwen engines; `GGUFExperts` for Qwen
+with GGUF experts; the GGUF parser, grids, quantizer, conversion and ggml matrix kernels for Qwen with GGUF experts and the
+family; `Family` and `ModelFamily` for the family); every other covered file is every engine's.
+`arithmetic_digest_current` fails, naming the command, when a covered file changed since, and checks on a copy that a
+family-only change moves only the family digest and a Qwen-only one only Qwen's. 3.1.8.3's folders (keyed on its single
+digest, `ArithmeticDigest.before`) are each engine's while that engine's files are as they were then: at load, when the
+engine's folder does not exist, `PromptCanary.adopt` renames the folder the same settings had under 3.1.8.3's digest to
+it, its marker recording the epoch (and, for Qwen, the fingerprint) its saves were written under (`written_epoch`,
+`written_model`), which the run then uses for the checkpoints' identity and the index; the canary does not list the new
+build, so it is checked before any save is read. Once an engine's files change, `before` is nil and those folders are
+another arithmetic's. In: `CExactIO`, `Core` (bfloat16, exact reads, the state files), `Formats` (weight decoding, ggml matrix
 kernels, record layouts), `Models` (tensor locations, layout, geometry), `Conversation` (the state's format, capture and
 restore, the canary's probe), `Qwen` and `Family` (kernels and forward passes), `GenerationDriver` (Qwen's prompt read
 schedule and decode loop), `QualityDial` and `FastLateMissSkip` (which rows are exact), `RuntimeConfiguration` and
@@ -3182,8 +3204,9 @@ way. Checks: `hot_copy_share_*`, `hot_copy_keeper_backlog_counter`.
 
 **The restore account.** For every request, `prompt_restore` in its row says the prompt tokens a save could have given
 (`wanted`: the longest prefix of the request a save tried since load holds, or that the previous request's prompt
-shares), those restored, and when fewer, why (`PromptCache.explainRestore`): `no_entry`, `entry_evicted`,
-`save_skipped_disk`, `save_not_finished`, `save_failed`, `prefix_differs_at=K`, `entry_not_used`, or a save in a folder
+shares), those restored, and when fewer, why (`PromptCache.explainRestore`): `prefix_differs_at=K` (checked first: a
+request that leaves a save's tokens at K could not have restored it, whatever the save's fate), `no_entry`,
+`entry_evicted`, `save_skipped_disk`, `save_not_finished`, `save_failed`, `entry_not_used`, or a save in a folder
 this build cannot read: `saved_by_other_build`, with `reason_words` saying which (`PromptCanary.otherArithmetic`,
 `beforeUpgrades`);
 `prompt_cache.restore_fallbacks` counts them since load and `restore_lost_tokens` the tokens read again. Each row
@@ -3416,6 +3439,13 @@ unused item that holds (or is, by another spelling) a used item's file or one of
 settings file, stores, hot copy, saved prompts) is kept. An item's `users` are every name sharing its folder,
 fingerprint or GGUF key: a move stops any of them. Each drive answers within 3 s or is listed without its items.
 `in_use`: the running model's items and the saved prompts while any model runs.
+An item of no registered model carries `owner`, the model it was made for in the page's words: its last name from
+`<data_dir>/former-models.json` (by fingerprint12 or GGUF key: the name, the date and the model that replaced it,
+written by `ModelRegistry.retire` from `model remove`, the page's Unlist and Delete, an add under the same name and
+`origami refresh`), else "from a model no longer registered · <id>"; a `saved_prompts` build of no registered model
+says the same in its `owner`. A Qwen folder whose `gguf-experts.json` reads GGUFs outside it counts the bytes it reads
+of them (its banks' `expert_bytes` × experts, else the files' sizes) in its item's size and in `/v1/models`; its Delete
+removes those files too unless another model reads one (`deletes`, `keeps` in the plan).
 
 **Moving and removing.** `POST /v1/jobs` `{"kind": "move", "path", "to"}` and `{"kind": "remove", "path"}` act only
 on an item the map lists (matched as written or by `realpath`); remove only on an unused one. A move (`Storage.plan`,
@@ -3501,7 +3531,7 @@ so the port answers within a second of start and requests sent meanwhile wait (`
 | `GET /api/tags`, `/api/version`, `/api/show`, `/api/ps` | Ollama model information |
 | `GET /v1/models`, `/v1/models/<id>` | the model id (`origami` from `origami serve` unless `list_models`), and its `-<level>` twins (one per fast level the model offers) when non-exact levels are allowed; each entry (`LocalHTTPServer.modelEntry`) adds what harnesses read for their thinking menus: `reasoning_efforts`, OpenRouter's `supported_parameters`, `context_length` and Ollama's `capabilities` (every family thinks; `vision` from the checkpoint's vision tower in the model's own server, by family in the front's listing) |
 | `GET /health` (also `/v1/health`, and `/` for non-browser clients) | `loading`, `ready` or `failed`, the queue, the server defaults, the endpoints and the request fields understood |
-| `GET /v1/status` | memory, the running request, the last 50 requests (each with `hot_copy`: whether the hot copy served reads), saved prompts, drives, the context plan, the last 50 log lines, and `experts_from`: each place the experts are read from with its share of reads (Qwen's from the store's counters: mirror, each pack or copy, the model's files), the drives the hot copy may go to (`choices`) and a pack may move to (`moves`), Qwen's drives for a further copy (`copy_to`: without a pack, only drives with room for the whole pack plus the 10 GB setup keeps free, each with the pack's `bytes`) and settings that do nothing for this model (`unused_settings`) |
+| `GET /v1/status` | memory, the running request, the last 50 requests (each with `hot_copy`: whether the hot copy served reads; the front keeps those of model processes that stopped, so they outlive an idle unload, a switch or Stop), saved prompts, drives, the context plan, the last 50 log lines, and `experts_from`: each place the experts are read from with its share of reads (Qwen's from the store's counters: mirror, each pack or copy, the model's files), the drives the hot copy may go to (`choices`) and a pack may move to (`moves`), Qwen's drives for a further copy (`copy_to`: without a pack, only drives with room for the whole pack plus the 10 GB setup keeps free, each with the pack's `bytes`) and settings that do nothing for this model (`unused_settings`) |
 | `GET /v1/plan?context=&memory_limit=&expert_memory=&hot_copy=&context_dir=&quality=` | the memory plan another setting would give, without applying it |
 | `POST /v1/config` | saves those six settings for the next start (the dashboard's Apply); a family `hot_copy_dir` on the model's drive is refused; a retired `expert_bits` is refused unless empty (the Clear that removes it) |
 | `POST /v1/hot-copy` | the Experts card: `{"build": true}` (top up or build now), `{"drive": "<drive path>"\|"auto"}` (saved as `hot_copy_dir`: none on the data folder's drive, the data folder's store there for Qwen, whose automatic copy goes beside the model, `/Volumes/<drive>/Origami/hot-copy` elsewhere), `{"size": "40GB"\|"auto"\|"off"}` (`hot_copy`), and for Qwen `{"copy": "<drive path>"}` (adds `/Volumes/<drive>/Origami/store` to `stores`, where setup writes all experts or a further copy); applied while the model serves (either engine) and answered with its `hot_copy` row; for Qwen's `copy` the front starts `origami setup` as a job of its own kind (`{"job": "hot-copy", "reload": …}`), refused while a reload is pending, and reloads after it only if the job changed what the model reads (`Stores.signature`: the stores' headers, their times and payload sizes) or the copy was turned off, on or moved; setup fails, saying what it needs, what is kept free, what is free and what 2.x copies hold there, when a further copy has no room |
@@ -3889,7 +3919,7 @@ On a Mac where the plan keeps every expert in memory (`allResident`) it builds n
 5. On SIGINT or SIGTERM it stops the server, waits for the running request (30 s), drains the saves and flushes the
    routing counts.
 
-Logs go to stderr with ISO-8601 stamps; the last 50 lines are kept for `/v1/status` and the dashboard.
+Logs go to stderr with ISO-8601 stamps (the front stamps a model process's lines that have none); the last 50 lines are kept for `/v1/status` and the dashboard.
 
 **Hugging Face downloads** (`Models.download`, `Models.fetch`, `ChunkedFetch`). The CLI asks
 `https://huggingface.co/api/models/<repo>/revision/main?blobs=true` for the revision and file list, keeps the top-level

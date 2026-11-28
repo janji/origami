@@ -494,7 +494,7 @@ final class StatusSource: @unchecked Sendable {
             "budget_bytes": usable, "budget_mode": mode.rawValue, "target_bytes": target,
             "temporarily_reduced": mode == .explicit && usable < target,
             "footprint_bytes": memory.physicalFootprint, "available_bytes": memory.availableMemoryEstimate,
-        ]
+        ].merging(memory.ownersReport) { $1 }
         report["readiness_preparation"] = runtime.backend.readinessPreparation
         report["memory_admission"] = memoryAdmissionReport(memory)
         if let cache = runtime.backend.expertCacheSnapshot {

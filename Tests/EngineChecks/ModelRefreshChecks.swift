@@ -218,7 +218,10 @@ private func qwenFixture(_ root: URL, shardBytes: Int = 3 << 20) throws -> (URL,
     return (folder, names.map { folder.appendingPathComponent($0) })
 }
 
-/// The Qwen fixture with a hot copy, a store header, routing counts, calibration and a saved prompt folder.
+/// The Qwen fixture with a hot copy, a store header, routing counts, calibration and a saved prompt folder. The saves
+/// move to the new fingerprint's folder, which records the old one; a server there finds them under its new key (as
+/// `OrigamiRuntime.load` looks: its fingerprint, then the earlier ones) and reads them under the identity they were
+/// written with. A re-bind that did not verify the bytes (a move or Locate) still drops them.
 private func modelRefreshQwenRebinds() throws {
     let root = try temporary("qwen")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -234,8 +237,11 @@ private func modelRefreshQwenRebinds() throws {
     try FileManager.default.createDirectory(at: where_.data, withIntermediateDirectories: true)
     try Data(#"{"uses":{}}"#.utf8).write(to: where_.data.appendingPathComponent("routing-\(old.prefix(12)).json"))
     try Data(#"{"\#(old.prefix(16))|disk|disk":{}}"#.utf8).write(to: where_.data.appendingPathComponent("calibration.json"))
-    let saved = where_.prompts.appendingPathComponent("\(old.prefix(12))-8192/0123456789abcdef")
+    func epoch(_ fingerprint: String) -> String { PromptCanary.epoch(fingerprint + "settings", arithmetic: "digest") }
+    let saved = where_.prompts.appendingPathComponent("\(old.prefix(12))-8192/\(epoch(old).prefix(16))")
     try FileManager.default.createDirectory(at: saved, withIntermediateDirectories: true)
+    try refreshRequire(PromptCanary.write(.init(arithmetic: "digest", canary: "c", builds: ["b"]), to: saved), "fixture marker")
+    try Data(#"{"epoch":"\#(epoch(old))","entries":{}}"#.utf8).write(to: saved.appendingPathComponent("index.json"))
 
     let outcome = try ModelRefresh.run(
         model: folder, family: false, files: files, identity: { try ModelSource.fingerprint(directory: folder) }, places: where_)
@@ -251,8 +257,23 @@ private func modelRefreshQwenRebinds() throws {
     try refreshRequire(
         try String(contentsOf: where_.data.appendingPathComponent("calibration.json"), encoding: .utf8).contains(new.prefix(16)),
         "calibration not re-keyed")
-    try refreshRequire(!FileManager.default.fileExists(atPath: saved.deletingLastPathComponent().path), "Qwen saved prompts not dropped")
-    try refreshRequire(outcome.rebound.contains { $0.hasPrefix("dropped the saved prompts") }, "the drop is not said")
+    let prompts = where_.prompts.appendingPathComponent("\(new.prefix(12))-8192")
+    try refreshRequire(
+        !FileManager.default.fileExists(atPath: saved.deletingLastPathComponent().path)
+            && ModelRefresh.earlierFingerprints(prompts) == [old] && outcome.rebound.contains { $0.contains("-8192 to ") },
+        "Qwen saved prompts not moved to the new fingerprint: \(outcome.rebound)")
+    let earlier = ([new] + ModelRefresh.earlierFingerprints(prompts).reversed()).map { (epoch: epoch($0), model: $0) }
+    let key = prompts.appendingPathComponent(String(epoch(new).prefix(16)))
+    let written = PromptCanary.adopt(key, epoch: epoch(new), model: new, arithmetic: "digest", from: earlier)
+    try refreshRequire(
+        written == (epoch(old), old) && PromptCanary.marker(key)?.builds == ["b"]
+            && (try? String(contentsOf: key.appendingPathComponent("index.json"), encoding: .utf8))?.contains(epoch(old)) == true,
+        "the refreshed model's saves are not found under its new key with the identity they were written under")
+    // Without verified bytes (a move, a Locate): dropped as before.
+    let lines = try ModelRefresh.rebind(family: false, old: new, new: old, places: where_)
+    try refreshRequire(
+        !FileManager.default.fileExists(atPath: prompts.path) && lines.contains { $0.hasPrefix("dropped the saved prompts") },
+        "saves moved by an unverified re-bind")
 }
 
 /// Interrupted after file 1 of 3, then between the rewrite and the re-bind: each rerun finishes, no file done is
@@ -402,7 +423,8 @@ private func modelRefreshRefusedWhileLocked() throws {
     try refreshRequire(try ModelSource.fingerprint(directory: folder) == before, "files were touched while refused")
 }
 
-/// File 1 of 3 replaced by a different file of the same size (mtime restored) between two runs: nothing is re-bound.
+/// File 1 of 3 replaced by a different file of the same size (mtime restored) between two runs: nothing is re-bound, the
+/// saved prompts included.
 private func modelRefreshReplacedFileNotRebound() throws {
     let root = try temporary("replaced")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -412,6 +434,9 @@ private func modelRefreshReplacedFileNotRebound() throws {
     let old = try identity()
     let store = where_.folders[0].appendingPathComponent("qwen-\(old.prefix(12))")
     try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
+    let old12 = String(old.prefix(12))
+    let saved = where_.prompts.appendingPathComponent("\(old12)-8192/0123456789abcdef")
+    try FileManager.default.createDirectory(at: saved, withIntermediateDirectories: true)
     struct Stop: Error {}
     var hooks = ModelRefresh.Hooks()
     hooks.afterFile = { if $0 == 0 { throw Stop() } }
@@ -430,5 +455,9 @@ private func modelRefreshReplacedFileNotRebound() throws {
         try refreshRequire("\(error)".contains(files[0].lastPathComponent), "the refusal does not name the file: \(error)")
     }
     try refreshRequire(FileManager.default.fileExists(atPath: store.path), "the old copies were moved")
+    try refreshRequire(FileManager.default.fileExists(atPath: saved.path), "the old saved prompts were moved")
+    try refreshRequire(
+        (try? FileManager.default.contentsOfDirectory(atPath: where_.prompts.path))?.contains { !$0.hasPrefix(old12) } != true,
+        "saved prompts were keyed on the changed files")
     try refreshRequire(ModelRefresh.unfinished(data: where_.data) == nil, "the journal stayed after the refusal")
 }

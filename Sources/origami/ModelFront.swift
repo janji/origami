@@ -53,6 +53,17 @@ final class ModelFront: @unchecked Sendable {
     private let startup: (id: String, setting: String?)
     private(set) var scheduler: ModelScheduler<Child>!
     private var starting: String?, launching: Process?, failure: String?, stopped = false
+    /// A start that found its model's drive not mounted (`ready`), and the watch on /Volumes that starts the
+    /// model once the drive is readable (`watchForDrive`); Stop, a server stop or the next start ends it.
+    private var unmounted: (drive: String, path: String)?, driveWatch: DispatchSourceFileSystemObject?
+    /// The last 50 finished requests of models that stopped (an idle unload, a switch, Stop, a crash), oldest first: the
+    /// running model's own follow them in its status (`withHistory`), so the dashboard's history outlives its process.
+    /// `seen`: the running child's rows as last read.
+    private var history: [[String: Any]] = [], seen: (process: Int32, rows: [[String: Any]])?
+    /// `failure` as `/health` and status say it: with the wait for the drive while there is one. Under `lock`.
+    private var failureText: String? {
+        failure.map { driveWatch == nil ? $0 : $0 + " (waiting for \(unmounted?.drive ?? "the drive"); it starts once connected)" }
+    }
     /// The starting model's output, for its progress (`loadingProgress`).
     private var startingLog: LastError?
     /// The loaded model's drive seen gone at this many checks in a row (`checkModelDrive`): from the second it is
@@ -102,6 +113,8 @@ final class ModelFront: @unchecked Sendable {
     /// whether another runs. Both are learned off the request path, so a sleeping or unreadable drive never holds a
     /// listing, and what was last known answers while a check runs.
     private var checked: [String: (state: Stores.Availability, bytes: UInt64?, date: Date)] = [:], checking: [String: Date] = [:]
+    /// A Qwen folder's bytes read from GGUF files outside it (`Storage.expertsElsewhere`), from its last check.
+    private var expertsElsewhere: [String: UInt64] = [:]
     /// Each checked model's recommended sampling (`Models.recommendedSampling`), read by its availability check.
     private var recommendations: [String: SamplingDefaults] = [:]
     private var foundCache: (date: Date, models: [[String: Any]], unreadable: [String], partial: String?, known: Set<String>)?,
@@ -192,9 +205,10 @@ final class ModelFront: @unchecked Sendable {
             let chosen = spec ?? settings.model
             let target = path ?? chosen.map { "/~.".contains($0.first ?? " ") ? Settings.expand($0) : "locate:" + $0 } ?? "locate:"
             // A GGUF's size comes from its check (no file is touched here); a split one counts its first part only.
+            // A folder whose experts are read from a GGUF elsewhere counts what it reads there too (its check reads that).
             let bytes =
-                ((entry?["manifest"] as? [String: Any])?["bytes"] as? NSNumber)?.uint64Value ?? lock.withLock { checked[target]?.bytes }
-                ?? 0
+                (((entry?["manifest"] as? [String: Any])?["bytes"] as? NSNumber)?.uint64Value ?? lock.withLock { checked[target]?.bytes }
+                    ?? 0) + lock.withLock { expertsElsewhere[target] ?? 0 }
             let family = (entry?["family"] as? String).flatMap(ModelFamily.init(rawValue:)) ?? ModelFamily(rawValue: id) ?? .qwen
             return Row(
                 id: id, spec: spec, family: family, bytes: bytes,
@@ -216,10 +230,21 @@ final class ModelFront: @unchecked Sendable {
         }
     }
 
+    /// The family aliases (`ModelRegistry.aliases`) of the registry as `rows` last read it.
+    private var aliases: [String: String] { ModelRegistry.aliases(lock.withLock { lastEntries }, default: settings.model) }
+
+    /// The listed id a request's model name means (`ModelScheduler.resolve`), else the model a family alias names now.
+    private func resolve(_ name: String?, ids: [String]) -> String? {
+        let aliases = aliases.filter { ids.contains($0.value) }
+        return ModelScheduler<Child>.resolve(name, ids: ids)
+            ?? ModelScheduler<Child>.resolve(name, ids: Array(aliases.keys)).flatMap { aliases[$0] }
+    }
+
     /// `POST v1/reload`: the settings are read again and the default model restarts with them once the running
     /// requests finish (the dashboard's Apply); answered at once. Until the running reply ends, the model that still
     /// serves answers `/health` and status, with `pending` saying why it will reload; `loading` from its stop until back.
-    private func reload(because why: String = "to apply the saved settings", trial: UInt64? = nil) throws -> String {
+    /// `model`: that model instead of the default (`origami model replace`, for the model it replaced while that runs).
+    private func reload(because why: String = "to apply the saved settings", trial: UInt64? = nil, model: String? = nil) throws -> String {
         guard !isUnloaded else { throw Self.stoppedFailure }
         let fresh: Settings
         do { fresh = try Settings.load(flags: flags) } catch { throw ServingFailure("The settings cannot be read: \(error)") }
@@ -230,7 +255,7 @@ final class ModelFront: @unchecked Sendable {
                 throw ServingFailure("A request arrived, so the memory search stops; your saved limit is back", status: 409)
             }
             // A memory search measures the model loaded when it began, and its end reloads that model.
-            let id = trial != nil || memoryTrial != nil ? trialModel ?? running ?? Self.servedID(fresh) : Self.servedID(fresh)
+            let id = trial != nil || memoryTrial != nil ? trialModel ?? running ?? Self.servedID(fresh) : model ?? Self.servedID(fresh)
             loaded = (fresh, Self.servedID(fresh))
             pendingReload = Self.pendingText + " " + why
             memoryTrial = trial
@@ -298,6 +323,8 @@ final class ModelFront: @unchecked Sendable {
                 memoryTrial = nil  // a stopped `tune --memory` cannot restore it; Start loads the saved limit
                 trialModel = nil
                 launching?.terminate()  // a model still starting
+                driveWatch?.cancel()
+                driveWatch = nil
                 return true
             })
         else { return stoppedState() }
@@ -370,6 +397,8 @@ final class ModelFront: @unchecked Sendable {
         lock.withLock {
             stopped = true
             launching?.terminate()
+            driveWatch?.cancel()
+            driveWatch = nil
             // Wake bounded ingress reads and proxy disconnect detection. Closing/removing a descriptor uses this
             // same lock, so a recycled descriptor can never be shut down by an old client snapshot.
             for descriptor in clientDescriptors { _ = shutdown(descriptor, SHUT_RDWR) }
@@ -425,6 +454,7 @@ final class ModelFront: @unchecked Sendable {
             let drive = Stores.driveName(path)
             if state != .available { lock.withLock { checked[path] = (state, checked[path]?.bytes, Date()) } }
             if state == .notConnected {
+                lock.withLock { unmounted = (drive, path) }
                 throw ServingFailure(
                     "\(drive), where \(id) is, is not connected: connect it, then reload", status: 503, type: "engine_unavailable")
             }
@@ -451,6 +481,9 @@ final class ModelFront: @unchecked Sendable {
                 failure = nil
                 permission = nil
                 driveMisses = 0  // a new child opens the model's files afresh
+                unmounted = nil
+                driveWatch?.cancel()
+                driveWatch = nil
             }
             let said = LastError()
             defer {
@@ -527,8 +560,50 @@ final class ModelFront: @unchecked Sendable {
             let failure = ServingFailure.from(error)
             lock.withLock { self.failure = failure.description }
             log(failure.description)
+            watchForDrive()
             throw failure
         }
+    }
+
+    /// After a start whose drive was not mounted (a power cut, a drive plugged in later), the model starts once the
+    /// drive's mount point appears in /Volumes and its path opens. Not after Stop (it ends the watch).
+    private func watchForDrive() {
+        let fd = open("/Volumes", O_EVTONLY)
+        guard fd >= 0 else { return }
+        let drive = lock.withLock { () -> String? in
+            guard let unmounted, driveWatch == nil, !unloaded, !stopped else { return nil }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .global())
+            source.setEventHandler { [unowned self] in driveMounted() }
+            source.setCancelHandler { close(fd) }
+            driveWatch = source
+            source.resume()
+            return unmounted.drive
+        }
+        guard let drive else {
+            close(fd)
+            return
+        }
+        log("waiting for \(drive) to be connected to start the model")
+        DispatchQueue.global().async { [self] in driveMounted(tries: 1) }  // mounted since the check
+    }
+    /// A change in /Volumes: the model starts once its path opens, looked at `tries` times half a second apart
+    /// (the mount point appears a moment before the volume is on it).
+    private func driveMounted(tries: Int = 10) {
+        guard let path = lock.withLock({ driveWatch == nil ? nil : unmounted?.path }) else { return }
+        for attempt in 1... {
+            if Stores.check(path, within: 5) == .available { break }
+            guard attempt < tries, lock.withLock({ driveWatch != nil }) else { return }
+            usleep(500_000)
+        }
+        let drive = lock.withLock { () -> String? in
+            guard let source = driveWatch, !unloaded, !stopped else { return nil }
+            source.cancel()
+            driveWatch = nil
+            return unmounted?.drive
+        }
+        guard let drive else { return }
+        log("\(drive) is connected: starting the model")
+        _ = try? resume()
     }
 
     /// The last error a child printed (`origami: …`, as `main` prints one), for the page when it does not start.
@@ -548,16 +623,28 @@ final class ModelFront: @unchecked Sendable {
         }
     }
 
-    /// Copies a child's standard error to the server's, keeping its last error line and its last line.
+    /// Copies a child's standard error to the server's, keeping its last error line and its last line. A line the child
+    /// wrote without the log's time (the engine's own `origami: …` lines) gets it here, so every line in the log has one.
     private static func forward(_ handle: FileHandle, keeping said: LastError) {
-        while case let chunk = handle.availableData, !chunk.isEmpty {
-            FileHandle.standardError.write(chunk)
-            for line in String(decoding: chunk, as: UTF8.self).split(separator: "\n") {
+        func relay(_ bytes: Data) {  // whole lines
+            var out = ""
+            for line in String(decoding: bytes, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
+                let stamped = line.prefixMatch(of: #/\d{4}-\d\d-\d\dT[\d:.]+Z? /#) != nil
+                out += (stamped ? "" : ISO8601DateFormatter().string(from: Date()) + " ") + line + "\n"
                 if line.hasPrefix("origami: ") { said.line = String(line.dropFirst("origami: ".count)) }
                 let text = line.replacing(#/^\d{4}-\d\d-\d\dT[\d:.]+Z? /#, with: "").replacing(#/^origami: /#, with: "")
                 if !text.trimmingCharacters(in: .whitespaces).isEmpty { said.recent = String(text.prefix(200)) }
             }
+            FileHandle.standardError.write(Data(out.utf8))
         }
+        var pending = Data()
+        while case let chunk = handle.availableData, !chunk.isEmpty {
+            pending.append(chunk)
+            guard let last = pending.lastIndex(of: UInt8(ascii: "\n")) else { continue }
+            relay(pending[...last])
+            pending = Data(pending[(last + 1)...])
+        }
+        if !pending.isEmpty { relay(pending + Data("\n".utf8)) }
     }
 
     /// The model being started: its last log line and the seconds since it began (`loading` in `/health`, `/v1/status`
@@ -575,6 +662,16 @@ final class ModelFront: @unchecked Sendable {
     /// stopped; SIGKILL after two minutes.
     private func stop(_ child: Child) {
         let process = child.process
+        // Its rows since the last status read too, unless it no longer answers.
+        let rows =
+            process.isRunning
+            ? (DashboardState.status(port: child.port, key: settings.apiKey)["requests"] as? [String: Any])?["recent"] as? [[String: Any]]
+            : nil
+        lock.withLock {
+            let last = rows ?? (seen?.process == process.processIdentifier ? seen?.rows : nil) ?? []
+            history = Array((history + last).suffix(50))
+            seen = nil
+        }
         guard process.isRunning else { return }
         let footprint = ProcessMemory.footprint(process.processIdentifier)
         lock.withLock {
@@ -897,8 +994,14 @@ final class ModelFront: @unchecked Sendable {
                 guard jobs.report?["state"] as? String != "running" || jobs.report?["kind"] as? String == "tune" else {
                     throw ServingFailure("Wait for the current operation before reloading", status: 409)
                 }
-                // `origami tune --memory` only: a limit to load at, kept in this process, never saved.
                 let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
+                // `origami model replace`: the model it replaced reloads from its new files if it is the one loaded; any
+                // other start reads them anyway.
+                if let model = body?["model"] as? String {
+                    guard model == scheduler.current?.id else { return answer(["reloading": false, "model": model]) }
+                    return answer(reloading(try reload(because: "to load the files that replaced it", model: model)), status: 202)
+                }
+                // `origami tune --memory` only: a limit to load at, kept in this process, never saved.
                 let trial = (body?["memory_limit_trial"] as? NSNumber)?.uint64Value
                 // A search from a terminal (no job) ends with this restore: the next trial is a new search's.
                 if body?["restore_memory"] as? Bool == true, jobs.report?["state"] as? String != "running" {
@@ -1075,7 +1178,9 @@ final class ModelFront: @unchecked Sendable {
             let id = String(path.dropFirst("/v1/models/".count)).removingPercentEncoding ?? ""
             // `origami` (the setup's name) and every model's own id with its `-<level>` names.
             let entries = [false, true].flatMap { listing("/v1/models", rows: rows, all: $0)["data"] as? [[String: Any]] ?? [] }
-            guard let entry = entries.first(where: { $0["id"] as? String == id }) else {
+            // A family alias (`qwen`, `glm`, `deepseek`) answers with the entry of the model it names now.
+            let wanted = rows.contains { $0.id == id } ? id : aliases[id] ?? id
+            guard let entry = entries.first(where: { $0["id"] as? String == wanted }) else {
                 return reject(ServingFailure("No model named \(id)", status: 404, code: "model_not_found"))
             }
             answer(entry)
@@ -1083,7 +1188,7 @@ final class ModelFront: @unchecked Sendable {
             pass(firstID)
         case "/api/show" where request.method == "POST":
             let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
-            let id = ModelScheduler<Child>.resolve((body?["model"] ?? body?["name"]) as? String, ids: ids)
+            let id = resolve((body?["model"] ?? body?["name"]) as? String, ids: ids)
             guard let id, id != scheduler.current?.id, let row = rows.first(where: { $0.id == id }) else { return pass(id) }
             let (details, abilities) = LocalHTTPServer.ollamaDescription(
                 row.family, quantization: row.quantization, vision: Self.vision(row))
@@ -1099,7 +1204,7 @@ final class ModelFront: @unchecked Sendable {
                 guard listsAll else { return pass(firstID) }
                 let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
                 let name = body?["model"] as? String
-                let id = ModelScheduler<Child>.resolve(name, ids: ids)
+                let id = resolve(name, ids: ids)
                 // A name not listed is not answered by whichever model runs under that name; no name, or `origami`, is.
                 if id == nil, let name, !name.isEmpty, ![Self.setupID, Self.setupID + ":latest"].contains(name) {
                     return reject(ServingFailure("No model named \(name)", status: 404, code: "model_not_found"))
@@ -1126,12 +1231,13 @@ final class ModelFront: @unchecked Sendable {
                     var state = DashboardState.status(port: running.child.port, key: settings.apiKey, path: path)
                     if let pending { state["pending"] = pending }
                     markDegraded(&state)
+                    withHistory(&state, running.child)
                     markSlowed(&state, port: path == "/v1/status" ? nil : running.child.port)
                     return answer(state, status: state["status"] as? String == "unavailable" ? 503 : 200)
                 }
                 return Self.pipe(raw, client: client, port: running.child.port, cancelled: cancelled, lifecycle: lifecycle)
             }
-            let (starting, failure) = lock.withLock { (self.starting, self.failure) }
+            let (starting, failure) = lock.withLock { (self.starting, self.failureText) }
             switch path {
             case "/api/ps": answer(["models": [Any]()])
             case "/health", "/v1/health", "/v1/status", "/":
@@ -1217,8 +1323,9 @@ final class ModelFront: @unchecked Sendable {
             state = DashboardState.status(port: running.child.port, key: settings.apiKey)
             scheduler.releaseRunning()
             markDegraded(&state)
+            withHistory(&state, running.child)
         } else {
-            let (starting, failure, permission) = lock.withLock { (self.starting, self.failure, self.permission) }
+            let (starting, failure, permission) = lock.withLock { (self.starting, self.failureText, self.permission) }
             state = [
                 "status": failure != nil && starting == nil ? "failed" : "loading", "version": version,
                 "model": starting ?? firstID, "failure": failure ?? NSNull(), "loading": loadingProgress() ?? NSNull(),
@@ -1232,6 +1339,18 @@ final class ModelFront: @unchecked Sendable {
         if let pending = lock.withLock({ pendingReload }), active != nil { state["pending"] = pending }
         markSlowed(&state)
         return (state, active, generation)
+    }
+
+    /// The running child's status with the stopped models' finished requests before its own (`history`), the last 50.
+    private func withHistory(_ state: inout [String: Any], _ child: Child) {
+        guard var requests = state["requests"] as? [String: Any], let rows = requests["recent"] as? [[String: Any]] else { return }
+        let kept = lock.withLock { () -> [[String: Any]] in
+            seen = (child.process.processIdentifier, rows)
+            return history
+        }
+        guard !kept.isEmpty else { return }
+        requests["recent"] = Array((kept + rows).suffix(50))
+        state["requests"] = requests
     }
 
     /// `slowed_by` (`SlowedBy`) from `state` with what the front knows itself, added to `state` too: this Mac's heat and
@@ -1384,6 +1503,13 @@ final class ModelFront: @unchecked Sendable {
                 throw ServingFailure(item.deleteBlocked ?? "Reconnect this disk first", status: 409)
             }
             preview["disables_cache"] = item.role == "hot copy"
+            // Which files go and which stay: an experts file elsewhere goes with its model unless another model reads it.
+            let deletes = Storage.deletes(item)
+            preview["deletes"] = deletes
+            preview["keeps"] = item.elsewhere.compactMap { file in
+                item.sharedWith[file].map { ["path": file, "why": $0 + " reads it too"] }
+            }
+            preview["allocated_bytes"] = deletes.dropFirst(item.pieces.count).reduce(item.allocated) { $0 + Storage.size($1).allocated }
         } else if !["remove", "forget"].contains(action) {
             throw ServingFailure("Unknown storage action")
         }
@@ -1874,7 +2000,9 @@ final class ModelFront: @unchecked Sendable {
                         return Models.fileSize(url).map { UInt64(max(0, $0)) }
                     }
                     let recommended = state == .available ? path.map(Models.recommendedSampling) : nil
+                    let outside = state == .available ? path.flatMap(Storage.expertsElsewhere)?.bytes : nil
                     lock.withLock {
+                        if state == .available { expertsElsewhere[target] = outside }
                         checked[target] = (state, bytes ?? checked[target]?.bytes, Date())
                         checking[target] = nil
                         if let recommended { recommendations[target] = recommended }
@@ -2024,6 +2152,8 @@ final class ModelFront: @unchecked Sendable {
                 origami["sampling"] = sampling[row.id]
                 // A low-bit expert variant names its exact base: its replies differ from that model's.
                 if let base = row.variantOf { origami["variant_of"] = base }
+                // The family alias that names this model now (`ModelRegistry.aliases`).
+                if name == row.id, let alias = aliases.first(where: { $0.value == row.id })?.key { origami["alias"] = alias }
                 return LocalHTTPServer.modelEntry(name, family: row.family, vision: Self.vision(row), context: context, origami: origami)
             },
         ]

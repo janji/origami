@@ -120,23 +120,36 @@ public enum OrigamiRuntime {
         // share saved prompts, `PromptCanary`), weights, tokenizer, template and settings.
         let config = try Data(contentsOf: model.directory.appendingPathComponent("config.json"))
         let template = (try? Data(contentsOf: model.directory.appendingPathComponent("chat_template.jinja"))) ?? Data()
-        let epoch = PromptCanary.epoch(
-            model.fingerprint + tokenizer.identity + "\(runtime.contextLimit)" + String(describing: runtime.experts.mode) + overridesText
-                + "|prefill-scope:\(prefillScope)")
+        let arithmetic = ArithmeticDigest.forQwen(ggufExperts: model.ggufExperts != nil)
+        func epoch(_ fingerprint: String, _ digest: String) -> String {
+            PromptCanary.epoch(
+                fingerprint + tokenizer.identity + "\(runtime.contextLimit)" + String(describing: runtime.experts.mode) + overridesText
+                    + "|prefill-scope:\(prefillScope)", arithmetic: digest)
+        }
+        let key = epoch(model.fingerprint, arithmetic.value)
+        let root = promptCacheRoot.appendingPathComponent(String(key.prefix(16)), isDirectory: true)
+        // The folder's saves may have been written under an earlier key of the same bits (`PromptCanary.adopt`): 3.1.8.3's
+        // single digest while this engine's files are unchanged since, and the fingerprints the model had before refreshes
+        // that read its bytes back unchanged (`ModelRefresh.earlierFingerprints`), latest first.
+        let fingerprints = [model.fingerprint] + ModelRefresh.earlierFingerprints(promptCacheRoot).reversed()
+        let earlier = fingerprints.flatMap { fingerprint in
+            ([arithmetic.value] + [arithmetic.before].compactMap { $0 }).map { (epoch: epoch(fingerprint, $0), model: fingerprint) }
+        }
+        let written = PromptCanary.adopt(root, epoch: key, model: model.fingerprint, arithmetic: arithmetic.value, from: earlier)
         let identity = try CheckpointIdentity(
-            modelSHA256: model.fingerprint, tokenizerSHA256: tokenizer.identity,
+            modelSHA256: written.model, tokenizerSHA256: tokenizer.identity,
             templateSHA256: hex(SHA256.hash(data: template)), quantizationSHA256: hex(SHA256.hash(data: config)),
-            arithmeticEpoch: "origami-" + epoch)
+            arithmeticEpoch: "origami-" + written.epoch)
         let geometry = try ConversationGeometry(context: runtime.contextLimit, fileBacked: runtime.fileBackedContext)
         // One folder per epoch, shared by the builds whose canary matches (checked below, before any request).
         let promptCache = try PromptCache(
-            root: promptCacheRoot.appendingPathComponent(String(epoch.prefix(16)), isDirectory: true), epoch: epoch,
+            root: root, epoch: written.epoch,
             // Plus four system snapshots. No aggregate quota: PromptCache.makeRoom keeps 10 GB free on the drive.
             entries: PromptCache.regularEntries(context: runtime.contextLimit, entries: promptCacheEntries),
             entryBytes: runtime.prefixDiskBytes, ledger: ledger, capacity: runtime.contextLimit,
             // A context kept in a file grows on the same drive: saves leave it room too.
             minimumFreeBytes: 10_000_000_000 + (geometry.fileBacked ? ConversationGeometry.fileDiskBytes : 0),
-            build: PromptCanary.build)
+            build: PromptCanary.build, arithmetic: arithmetic.value)
         promptCache.log = log
         let prefix = try PrefixReuseController(
             identity: identity, ledger: ledger, memoryBytes: runtime.prefixMemoryBytes,

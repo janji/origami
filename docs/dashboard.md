@@ -39,8 +39,9 @@ waits for it, and a banner says so; the same banner says when conversation saves
     write, one mark per reply), the first-word time, how fast prompts are read and
     how much of them was reused. **Measure** sends a short test reply.
   - Three bars: where the last request's time went (waiting, setting up, reading the prompt, writing, saving), where
-    the experts were read from (memory, hot copy, the model drive), and this Mac's memory ("Origami uses 14.9 GB · may
-    still grow by 7.7 GB · left to macOS and other apps 11.8 GB"). Under the first, the last request in two lines (its
+    the experts were read from (memory, hot copy, the model drive), and this Mac's memory ("Origami uses 17.8 GB · free
+    5.8 GB · other apps and macOS 10.8 GB"), with under it how far Origami may still grow within its budget and how much
+    of its limit it holds back after macOS took memory back, and why. Under the first, the last request in two lines (its
     first word: prompt tokens read and reused from a saved copy, and why fewer were reused than could have been; its
     writing: GPU time and the wait on each drive) and one line, the same `origami status` gives, in the words the
     Slowed-by box uses: "Slower than usual: macOS took back about 1.8 GB of Origami's memory during this reply, so more

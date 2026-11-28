@@ -123,8 +123,8 @@ package enum PrefixReuseSelfChecks {
 
     // MARK: prompt cache on disk
 
-    private static func image(_ ledger: MemoryLedger, ids: [Int64]) throws -> ModelCheckpoint {
-        let identity = try identity()
+    private static func image(_ ledger: MemoryLedger, ids: [Int64], epoch: String = "prefix-fixture-v1") throws -> ModelCheckpoint {
+        let identity = try identity(epoch)
         let segments = try PrefillReadSchedule(promptTokens: ids.count, computeTile: 256, readScope: 8192)
             .checkpointSegments(arithmeticEpoch: identity.arithmeticEpoch)
         return try ModelCheckpoint.capture(
@@ -748,15 +748,18 @@ package enum PrefixReuseSelfChecks {
             }
             entered.wait()
             let running = reason(ids(30_000) + ids(9_400, 100), restored: 0)
+            // One that leaves that unfinished save's tokens is a different prefix, whatever the save's fate.
+            let leaves = reason(ids(30_000, 400) + ids(9_500, 300), restored: 0)
             gate.signal()
             while done.wait(timeout: .now() + 0.01) == .timedOut { gate.signal() }
             try require(running.wanted == 600 && running.reason == "save_not_finished", "save not finished: \(running)")
+            try require(leaves.wanted == 400 && leaves.reason == "prefix_differs_at=400", "differs from a running save: \(leaves)")
             let counted = cache.report["restore_fallbacks"] as? [String: Int] ?? [:]
             try require(
                 counted == [
-                    "no_entry": 1, "entry_not_used": 1, "prefix_differs": 1, "entry_evicted": 1, "save_skipped_disk": 1,
+                    "no_entry": 1, "entry_not_used": 1, "prefix_differs": 2, "entry_evicted": 1, "save_skipped_disk": 1,
                     "save_not_finished": 1,
-                ] && cache.report["restore_lost_tokens"] as? Int == 600 * 5 + 300,
+                ] && cache.report["restore_lost_tokens"] as? Int == 600 * 5 + 300 + 400,
                 "restore counters: \(counted) \(String(describing: cache.report["restore_lost_tokens"]))")
         }
         try require(ledger.snapshot().reserved == 0, "Restore-reason fixture leaked a reservation")
@@ -959,7 +962,8 @@ package enum PrefixReuseSelfChecks {
             let first = try canaryCache(root, ledger, build: a)
             first.settle(probe: noProbe)
             try require(
-                first.savesOff == nil && PromptCanary.marker(root) == .init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: [a]),
+                first.savesOff == nil
+                    && PromptCanary.marker(root) == .init(arithmetic: ArithmeticDigest.qwen.value, canary: nil, builds: [a]),
                 "A new folder was not this build's at once: \(first.savesOff ?? "")")
             try first.write(image(ledger, ids: qwen))
             try first.writeState(tokens: family, bytes: 4) {
@@ -1084,7 +1088,7 @@ package enum PrefixReuseSelfChecks {
         // Another arithmetic keys another folder; its prompts read as another build's.
         let other = parent.appendingPathComponent(String(PromptCanary.epoch("settings", arithmetic: "other").prefix(16)))
         try require(
-            PromptCanary.epoch("settings", arithmetic: "other") != PromptCanary.epoch("settings"),
+            PromptCanary.epoch("settings", arithmetic: "other") != PromptCanary.epoch("settings", arithmetic: ArithmeticDigest.qwen.value),
             "The arithmetic digest does not key the folder")
         try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
         try require(
@@ -1126,13 +1130,74 @@ package enum PrefixReuseSelfChecks {
         try autoreleasepool {
             let empty = parent.appendingPathComponent("0123456789abcdee", isDirectory: true)
             try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
-            _ = PromptCanary.write(.init(arithmetic: PromptCanary.arithmetic, canary: canary(), builds: ["build-x"]), to: empty)
+            _ = PromptCanary.write(.init(arithmetic: ArithmeticDigest.qwen.value, canary: canary(), builds: ["build-x"]), to: empty)
             let e = try canaryCache(empty, ledger, build: "build-e")
             e.settle(probe: noProbe)
             try require(
                 e.savesOff == nil
-                    && PromptCanary.marker(empty) == .init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: ["build-e"]),
+                    && PromptCanary.marker(empty) == .init(arithmetic: ArithmeticDigest.qwen.value, canary: nil, builds: ["build-e"]),
                 "An empty folder ran the probe at load or kept another build's canary")
         }
+    }
+
+    /// Saves whose key moved while their bits did not (3.1.8.3's single digest, a refresh) are kept: `adopt` renames the
+    /// earlier key's folder to the new key and says which identity they were written under; the next build is not in
+    /// its canary, so it probes before reading, then restores the checkpoint under that identity. Adopting again changes
+    /// nothing; a folder another server holds, or a new key that already has a folder, is left alone.
+    package static func adoptsEarlierKey() throws {
+        let ledger = try MemoryLedger(ceiling: 2_000_000_000, transientMargin: 0)
+        let parent = try folder()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        func key(_ digest: String, _ settings: String = "settings") -> (epoch: String, url: URL) {
+            let epoch = PromptCanary.epoch(settings, arithmetic: digest)
+            return (epoch, parent.appendingPathComponent(String(epoch.prefix(16)), isDirectory: true))
+        }
+        let (old, new) = (key("before"), key("now"))
+        let saved = (1...600).map(Int64.init)
+        // Saved by another process: this one holds every folder it opened (`PromptCache.inUse`), so the folder is a copy.
+        let made = try folder()
+        defer { try? FileManager.default.removeItem(at: made) }
+        try autoreleasepool {
+            let a = try canaryCache(made.appendingPathComponent("0123456789abcdef"), ledger, build: "build-a", epoch: old.epoch)
+            try a.write(image(ledger, ids: saved, epoch: "origami-" + old.epoch))
+            idleCanary(a)
+            try FileManager.default.copyItem(at: a.root, to: old.url)
+        }
+        let written = PromptCanary.adopt(new.url, epoch: new.epoch, model: "m", arithmetic: "now", from: [(old.epoch, "m")])
+        try require(
+            written == (old.epoch, "m") && !FileManager.default.fileExists(atPath: old.url.path)
+                && PromptCanary.marker(new.url)?.arithmetic == "now" && PromptCanary.marker(new.url)?.builds == ["build-a"],
+            "The earlier key's folder was not adopted under the new key")
+        try autoreleasepool {
+            let b = try canaryCache(new.url, ledger, build: "build-b", epoch: written.epoch)
+            try require(b.candidates(for: saved).isEmpty, "An adopted folder was read before its canary")
+            var probes = 0
+            b.settle {
+                probes += 1
+                return canary()
+            }
+            let segments = try PrefillReadSchedule(promptTokens: saved.count, computeTile: 256, readScope: 8192)
+                .checkpointSegments(arithmeticEpoch: "origami-" + written.epoch)
+            let restored = try b.candidates(for: saved).first?.store.read(
+                expectedIdentity: identity("origami-" + written.epoch), expectedSegments: segments, expectedConsumedIDs: saved)
+            try require(probes == 1 && restored?.consumedIDs == saved, "The adopted save was not restored after the canary")
+        }
+        let again = PromptCanary.adopt(new.url, epoch: new.epoch, model: "m", arithmetic: "now", from: [(old.epoch, "m")])
+        try require(again == written, "Adopting again changed the identity")
+        // A folder a server holds stays where it is; so does an earlier key when the new one has a folder.
+        let (held, target) = (key("before", "other"), key("now", "other"))
+        try autoreleasepool {
+            let server = try canaryCache(held.url, ledger, build: "build-a", epoch: held.epoch)
+            let kept = PromptCanary.adopt(target.url, epoch: target.epoch, model: "m", arithmetic: "now", from: [(held.epoch, "m")])
+            try require(
+                kept == (target.epoch, "m") && FileManager.default.fileExists(atPath: held.url.path)
+                    && !FileManager.default.fileExists(atPath: target.url.path),
+                "A folder another server holds was adopted")
+            withExtendedLifetime(server) {}
+        }
+        try FileManager.default.createDirectory(at: target.url, withIntermediateDirectories: true)
+        let own = PromptCanary.adopt(target.url, epoch: target.epoch, model: "m", arithmetic: "now", from: [(held.epoch, "m")])
+        try require(
+            own == (target.epoch, "m") && FileManager.default.fileExists(atPath: held.url.path), "An existing key's folder was replaced")
     }
 }

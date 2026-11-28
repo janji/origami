@@ -1642,9 +1642,16 @@ enum DashboardScript {
           const from = (ready && s.experts_from) || {}, sp = from.split;
           flow("flow-reads", sp && sp.reads ? ["Expert reads", fmt.format(sp.reads), abar([["@", "b", sp.memory || 0, "from memory", pct(sp.memory)],
             ["#", "a", sp.hot_copy || 0, "from the hot copy", pct(sp.hot_copy)], [":", "c", sp.model_drive || 0, "from the model's drive", pct(sp.model_drive)]], "Expert reads")] : null);
-          const m = ready && s.memory, ram = ready && s.mac && s.mac.memory_bytes, room = m ? Math.max(0, m.cap_bytes - m.footprint_bytes) : 0;
-          flow("flow-mem", m && ram && m.footprint_bytes ? ["Memory", "this Mac has " + macGB(ram), abar([["#", "a", m.footprint_bytes, "Origami uses", gb(m.footprint_bytes)], ["-", "c", room, "may still grow by", gb(room)],
-            [".", "d", Math.max(0, ram - m.footprint_bytes - room), "left to macOS and other apps", gb(Math.max(0, ram - m.footprint_bytes - room))]], "Memory")] : null);
+          // The bar is what the Mac's memory holds now (Origami, free, everything else); under it, how far Origami may grow
+          // within its budget and how much of its limit it holds back, and why.
+          const m = ready && s.memory, ram = ready && s.mac && s.mac.memory_bytes, use = m ? m.footprint_bytes || 0 : 0, free = m ? Math.max(0, Math.min(ram - use, m.available_bytes || 0)) : 0;
+          const budget = m ? m.budget_bytes || m.cap_bytes : 0, grow = Math.max(0, budget - use), held = m ? Math.max(0, m.cap_bytes - Math.max(budget, use)) : 0;
+          const heldWhy = !m ? "" : m.last_cut ? "macOS took memory back " + ago(m.last_cut.at) + " because " + cutWhy(m.last_cut.reason) + "; it returns once memory is free again"
+            : m.learned_start_bytes ? "Origami started at what this Mac usually had free and grows while memory stays free" : "little memory was free; it returns while memory stays free";
+          const memNote = '<div class="why"><p>May still grow by <b>' + gb(grow) + "</b> within its budget of " + gb(budget) + "</p>" +
+            (held >= 1e8 ? "<p><b>" + gb(held) + "</b> of its " + gb(m.cap_bytes) + " limit held back: " + esc(heldWhy) + "</p>" : "") + "</div>";
+          flow("flow-mem", m && ram && use ? ["Memory", "this Mac has " + macGB(ram), abar([["#", "a", use, "Origami uses", gb(use)], ["-", "c", free, "free", gb(free)],
+            [".", "d", Math.max(0, ram - use - free), "other apps and macOS", gb(Math.max(0, ram - use - free))]], "Memory") + memNote] : null);
           // What the model runs as: its context, and whether its replies are the model's own.
           const about = ready && s.model && typeof s.model === "object" ? s.model : {}, set = (ready && s.settings) || {}, q = set.quality && LEVEL_LABELS[set.quality.value] ? set.quality.value : null;
           const variant = /low-bit/.test(about.experts || ""), context = ready && (s.context || about.context);
@@ -1752,7 +1759,7 @@ enum DashboardScript {
             return '<div class="mrow"><i class="mark" data-m="' + (running ? "ok" : away ? "none" : "dim") + '" aria-hidden="true"></i><div><strong>' + esc(named(m)) + "</strong>" +
               (o.variant_of ? '<span class="badge" data-b="differs">low-bit experts · replies differ from exact</span>' : "") + '<span class="sub">' +
               [running ? live.chip || STATE.ready : state, FAMILIES[o.family] || "", o.bytes ? Math.round(o.bytes / 1e9) + " GB" : "", o.drive ? esc(place(o.drive)) : "",
-                o.variant_of ? "its experts on " + esc(o.variant_of) : o.quantization && o.quantization !== "unknown" ? esc(o.quantization) : ""].filter(Boolean).join(" · ") + '</span></div><div class="hact">' +
+                o.variant_of ? "its experts on " + esc(o.variant_of) : o.quantization && o.quantization !== "unknown" ? esc(o.quantization) : "", o.alias ? "alias " + esc(o.alias) : ""].filter(Boolean).join(" · ") + '</span></div><div class="hact">' +
               (setting && setting !== modelInitial ? '<button type="button" class="small" data-key="load:' + esc(setting) + '" data-mload="' + esc(setting) + '"' + (away ? ' data-blocked data-why="' + esc("It is " + state) + '"' : "") + ">Load</button>" : "") +
               (file ? '<button type="button" class="small" data-key="rm:' + esc(file.path) + '" data-mremove="' + esc(file.path) + '" aria-label="' + esc("Remove " + named(m)) + '">Remove…</button>' : "") + "</div></div>";
           });
@@ -2606,10 +2613,17 @@ enum DashboardScript {
           // Unused saved prompts are listed per model under Saved prompts below, removed together there.
           for (const i of items.filter(i => !(i.role === "prompts" && i.unused))) { const key = i.model || "Other files"; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(i); }
           const button = (i, act, label) => '<button type="button" data-sact="' + act + '" data-path="' + esc(i.path) + '">' + label + '</button>';
+          // A row of no registered model names the model it was made for (`owner`: its last name, or its fingerprint), and
+          // an unused one what deleting it loses.
+          const loses = { "hot copy": "deleting it loses nothing a model reads now; a model that needs one builds it again while serving",
+            pack: "deleting it loses nothing: no model reads these experts", prompts: "deleting it loses saved conversations no build can read",
+            support: "deleting it loses nothing a model reads now; its model makes it again if added", download: "deleting it loses the download: it would be downloaded again",
+            conversion: "deleting it loses the conversion so far", staging: "deleting it loses only an unfinished copy" };
           const file = i => {
             const acts = i.actions || [];
             const used = i.state || (i.in_use ? "in use" : i.unused ? "not used" : "");
-            return '<li class="frow"><div><div class="file-title">' + esc(roleName(i)) + ' <span class="tag">' + esc(used) + '</span></div><div class="file-location">' + esc(driveLabel(i.drive)) + ' · ' + disk(i.allocated_bytes == null ? i.bytes : i.allocated_bytes) + '</div><details class="file-path" data-storage-key="file:' + esc(i.path) + '"><summary>Path</summary><p>' + wpath(i.path) + '</p>' + (i.blocked ? '<p>' + esc(i.blocked) + '</p>' : '') + '</details></div><div class="sact">' +
+            return '<li class="frow"><div><div class="file-title">' + esc(roleName(i)) + (i.model ? '' : ' · ' + esc(i.owner || i.name)) + ' <span class="tag">' + esc(used) + '</span></div><div class="file-location">' + esc(driveLabel(i.drive)) + ' · ' + disk(i.allocated_bytes == null ? i.bytes : i.allocated_bytes) +
+              (i.unused ? ' · ' + esc(loses[i.role] || "deleting it loses nothing Origami reads") : '') + '</div><details class="file-path" data-storage-key="file:' + esc(i.path) + '"><summary>Path</summary><p>' + wpath(i.path) + '</p>' + (i.experts_from ? '<p>Experts read from ' + i.experts_from.map(wpath).join(", ") + '</p>' : '') + (i.blocked ? '<p>' + esc(i.blocked) + '</p>' : '') + '</details></div><div class="sact">' +
               (acts.includes("move") ? button(i,"move","Move…") : '') +
               (acts.includes("delete") ? button(i,"delete","Delete…") : acts.includes("remove") ? button(i,"remove","Delete…") : '') +
               (acts.includes("relink") ? button(i,"relink","Locate…") : '') +
@@ -2637,7 +2651,7 @@ enum DashboardScript {
         function savedPrompts(m) {
           const builds = m.saved_prompts || [], models = new Map();
           if (!builds.length) return "";
-          for (const b of builds) { if (!models.has(b.model)) models.set(b.model, []); models.get(b.model).push(b); }
+          for (const b of builds) { const who = b.owner || b.model; if (!models.has(who)) models.set(who, []); models.get(who).push(b); }
           const sum = (list, key) => list.reduce((n, b) => n + (key === "kept" ? b.kept.length : b[key]), 0);
           const row = (title, tag, sub) => '<li class="frow"><div><div class="file-title">' + esc(title) + ' <span class="tag">' + esc(tag) + '</span></div><div class="file-location">' + esc(sub) + '</div></div></li>';
           const rows = [...models.entries()].map(([model, list]) => {
@@ -2680,7 +2694,10 @@ enum DashboardScript {
               '<p>' + wpath(plan.path) + (plan.to ? '<br>→ ' + wpath(plan.to) : '') + '</p>' +
               (moving ? '<p>' + (plan.copy_bytes ? disk(plan.required_bytes) + ' required · ' + disk(plan.free_bytes) + ' free. Copy, verify, then remove the original.' : 'Same disk · no additional copy.') + '</p>' : '') +
               (deleting ? '<p>Delete ' + disk(plan.allocated_bytes || plan.bytes) + ' permanently.' + (plan.disables_cache ? ' Automatic hot copying will be turned off for this model.' : '')
-                + (plan.role === "download" ? ' This is a whole downloaded model: to use it again, all ' + disk(plan.allocated_bytes || plan.bytes) + ' must be downloaded again.' : '') + '</p>' : '') +
+                + (plan.role === "download" ? ' This is a whole downloaded model: to use it again, all ' + disk(plan.allocated_bytes || plan.bytes) + ' must be downloaded again.' : '') + '</p>' +
+                // A model whose experts are read from a file elsewhere: each file that goes, and each that stays and why.
+                ((plan.keeps || []).length || (plan.deletes || []).length > (plan.parts || []).length ? '<p>Deletes ' + plan.deletes.map(wpath).join(", ") + '</p>' +
+                  (plan.keeps || []).map(k => '<p>Keeps ' + wpath(k.path) + ': ' + esc(k.why) + '</p>').join('') : '') : '') +
               (plan.kind === "forget" ? '<p>Files stay on disk.</p>' : '') +
               (plan.in_use ? '<p>' + (moving ? 'The model pauses during the move and loads from the destination.' : 'The loaded model must stop for this operation.') + '</p>' : '');
             $("storage-confirm").showModal();

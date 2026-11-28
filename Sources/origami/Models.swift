@@ -567,14 +567,78 @@ enum ModelRegistry {
             return result
         }
     }
+    /// The family names a request may use instead of a model's own (`qwen`, `glm`, `deepseek`), each to the registered
+    /// model of that family it means now: the default model (`default`) if it is one, else the most recently added. A model
+    /// registered under the alias's own name keeps it, so an exact name always wins.
+    static func aliases(_ entries: [[String: Any]], default: String?) -> [String: String] {
+        let families: [String: ModelFamily] = ["qwen": .qwen, "glm": .glm, "deepseek": .deepseek]
+        let names = entries.compactMap { $0["name"] as? String }
+        var aliases: [String: String] = [:]
+        for (alias, family) in families where !names.contains(alias) {
+            // Ties in `added` go to the later entry: `put` appends, so the file's order is the order of adding.
+            let mine = entries.enumerated().filter {
+                $0.element["name"] is String
+                    && ((($0.element["family"] as? String).flatMap(ModelFamily.init(rawValue:)) ?? .qwen) == family)
+            }
+            let pick =
+                mine.first { $0.element["name"] as? String == `default` }
+                ?? mine.max { ($0.element["added"] as? String ?? "", $0.offset) < ($1.element["added"] as? String ?? "", $1.offset) }
+            aliases[alias] = pick?.element["name"] as? String
+        }
+        return aliases
+    }
     /// Adds `entry`, replacing one of the same name; true when it replaced one.
     static func put(_ entry: [String: Any], settings: Settings) throws -> Bool {
-        try update(settings) { entries in
-            let name = entry["name"] as? String
-            let replaced = entries.contains { $0["name"] as? String == name }
+        let name = entry["name"] as? String
+        let old = try update(settings) { entries in
+            let old = entries.first { $0["name"] as? String == name }
             entries.removeAll { $0["name"] as? String == name }
             entries.append(entry)
-            return replaced
+            return old
         }
+        if let old { retire(old, replacedBy: name, settings: settings) }
+        return old != nil
+    }
+
+    /// `<data_dir>/former-models.json`: by identity (a Qwen fingerprint12, a GGUF key), the name a model had when it was
+    /// removed or replaced or its identity changed, so the dashboard names the files left keyed by it.
+    static func formerFile(_ settings: Settings) -> URL { settings.dataDir.appendingPathComponent("former-models.json") }
+    static func former(_ settings: Settings) -> [String: [String: String]] {
+        ((try? Settings.readConfig(formerFile(settings))) ?? [:]).compactMapValues { $0 as? [String: String] }
+    }
+    /// Keeps `entry`'s name for its identities (`ids`, else what it has now: its manifest's or its folder's fingerprint12,
+    /// its GGUF key), with today's date and the model now in its place, if any. Called as a model leaves the list or its
+    /// identity changes: `model remove`, the dashboard's Unlist and Delete, an add under its name, `origami refresh`, and
+    /// a replace. A record whose identity is registered again is not shown, so calling it early is harmless.
+    static func retire(_ entry: [String: Any], replacedBy: String? = nil, ids: [String]? = nil, settings: Settings) {
+        guard let name = entry["name"] as? String else { return }
+        let ids = ids ?? identities(entry)
+        guard !ids.isEmpty else { return }
+        var record = ["name": name, "at": String(ISO8601DateFormatter().string(from: Date()).prefix(10))]
+        record["replaced_by"] = replacedBy
+        let file = formerFile(settings)
+        try? StateFile.locked(file) {
+            var all = try Settings.readConfig(file)
+            for id in ids { all[id] = record }
+            try JSONSerialization.data(withJSONObject: all, options: [.prettyPrinted, .sortedKeys]).write(to: file, options: .atomic)
+        }
+    }
+    /// The identities the files Origami keeps for `entry` are keyed by: its GGUF key, or its fingerprint12.
+    private static func identities(_ entry: [String: Any]) -> [String] {
+        guard let path = entry["path"] as? String else { return [] }
+        if entry["family"] != nil {
+            guard let parts = try? GGUFSource.parts(URL(fileURLWithPath: path)) else { return [] }
+            return [FamilySupport.key(folder: parts.folder, files: parts.files, experts: ExpertVariant.expertFiles(entry))]
+        }
+        let fingerprint =
+            (entry["manifest"] as? [String: Any])?["fingerprint"] as? String
+            ?? (try? ModelSource.fingerprint(directory: URL(fileURLWithPath: path)))
+        return fingerprint.map { [String($0.prefix(12))] } ?? []
+    }
+    /// How the page names a former model: "<name> (removed 2026-11-26)", "(replaced by <name> …)" or "(refreshed …)".
+    static func formerName(_ record: [String: String]) -> String {
+        let name = record["name"] ?? "?"
+        let by = record["replaced_by"]
+        return name + " (" + (by == nil ? "removed" : by == name ? "refreshed" : "replaced by " + by!) + " " + (record["at"] ?? "") + ")"
     }
 }

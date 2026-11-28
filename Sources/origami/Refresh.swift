@@ -51,6 +51,12 @@ enum Refresh {
         // The drive history's count for these files starts again (`origami doctor`, the dashboard's Drive line).
         DriveReadLog.rewritten(family ? url.deletingLastPathComponent() : url, data: settings.dataDir)
         forgetSpeed(url, settings: settings)
+        // What stayed keyed by the old identity (a copy on a drive not connected) is named as the model before its refresh.
+        if let entry = ModelRegistry.entry(settings.model, settings: settings) {
+            ModelRegistry.retire(
+                entry, replacedBy: entry["name"] as? String, ids: [family ? outcome.old : String(outcome.old.prefix(12))],
+                settings: settings)
+        }
         print("Rewrote \(outcome.rewritten.count) file\(outcome.rewritten.count == 1 ? "" : "s"); every one read back the same bytes.")
         for line in outcome.rebound { print("  " + line) }
         for folder in offline {
@@ -137,11 +143,14 @@ enum Refresh {
                 var probe = settings
                 probe.model = name ?? url.path
                 guard let context, let gguf = try? ExpertVariant.source(url, settings: probe) else { return { _ in [] } }
+                // Under this build's digest, and 3.1.8.3's while it keys the same bits (`PromptCanary.adopt` takes those later).
+                let digests = [ArithmeticDigest.family.value] + [ArithmeticDigest.family.before].compactMap { $0 }
                 return { key in
-                    [
+                    digests.compactMap {
                         try? Commands.familyEpoch(
-                            gguf, identity: LocalModelIdentity.familyRepresentation(source: key), resident: "", context: context)
-                    ].compactMap { $0 }
+                            gguf, identity: LocalModelIdentity.familyRepresentation(source: key), resident: "", context: context,
+                            arithmetic: $0)
+                    }
                 }
             }
             epochs = epochsOf(experts.isEmpty ? nil : ownName)

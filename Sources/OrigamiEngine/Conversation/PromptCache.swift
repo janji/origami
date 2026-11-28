@@ -69,7 +69,7 @@ public final class PromptCache {
     private var index: Index
     private let minimumFreeBytes: UInt64
     private let sameModel: ((URL) -> Bool?)?
-    private let epoch: String, entryBytes: UInt64, ledger: MemoryLedger, capacity: Int
+    private let epoch: String, arithmetic: String, entryBytes: UInt64, ledger: MemoryLedger, capacity: Int
     /// This executable's SHA-256 when the folder is shared by builds of one arithmetic (`PromptCanary`); nil: not shared.
     private let build: String?
     /// The folder is held closed until `settle` ran this build's canary against it: nothing read, written or removed.
@@ -146,9 +146,11 @@ public final class PromptCache {
     ///     Qwen's `<fingerprint12>-<context>` folders.
     ///   - build: this executable's SHA-256 when `epoch` is keyed on the arithmetic digest (`PromptCanary.epoch`): the
     ///     folder opens at once when its canary lists this build, else stays closed until `settle`.
+    ///   - arithmetic: that digest (its engine's `ArithmeticDigest`), which the folder's marker records.
     public init(
         root: URL, epoch: String, entries: Int, systemEntries: Int = 4, entryBytes: UInt64, ledger: MemoryLedger,
-        capacity: Int, minimumFreeBytes: UInt64 = 10_000_000_000, sameModel: ((URL) -> Bool?)? = nil, build: String? = nil
+        capacity: Int, minimumFreeBytes: UInt64 = 10_000_000_000, sameModel: ((URL) -> Bool?)? = nil, build: String? = nil,
+        arithmetic: String = ArithmeticDigest.qwen.value
     ) throws {
         if let drive = Self.missingDrive(root) {
             throw EngineError(
@@ -163,6 +165,7 @@ public final class PromptCache {
         self.minimumFreeBytes = minimumFreeBytes
         self.sameModel = sameModel
         (self.epoch, self.entryBytes, self.ledger, self.capacity, self.build) = (epoch, entryBytes, ledger, capacity, build)
+        self.arithmetic = arithmetic
         regular = max(1, entries)
         index = Index(epoch: epoch, entries: [:])
         systemBlocks = []
@@ -196,7 +199,7 @@ public final class PromptCache {
                 // Nothing to restore: the folder is this build's, its canary written while idle (`canaryWhenIdle`). An earlier
                 // build's canary there is dropped with its list: this build has not reproduced it, and keeping it would
                 // vouch for saves it did not check; the next upgrade checks the canary this build writes.
-                guard PromptCanary.write(.init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: [build]), to: self.root) else {
+                guard PromptCanary.write(.init(arithmetic: arithmetic, canary: nil, builds: [build]), to: self.root) else {
                     savesOff = "the saved prompts' marker could not be written in \(self.root.path)"
                     break
                 }
@@ -208,7 +211,7 @@ public final class PromptCache {
                 try use(PromptCanary.ownFolder(self.root, build: build))
                 if savesOff == nil {
                     _ = PromptCanary.write(
-                        .init(arithmetic: PromptCanary.arithmetic, canary: nil, builds: [build], refused: self.root.lastPathComponent),
+                        .init(arithmetic: arithmetic, canary: nil, builds: [build], refused: self.root.lastPathComponent),
                         to: self.root)
                 }
             default:
@@ -271,7 +274,7 @@ public final class PromptCache {
         if marker?.canary == nil {
             // A folder without a canary holds nothing this build can vouch for (only `ORIGAMI_TEST_CANARY_AT_LOAD` gets here).
             try? FileManager.default.removeItem(at: root.appendingPathComponent("index.json"))
-            marker = PromptCanary.Marker(arithmetic: PromptCanary.arithmetic, canary: canary, builds: [])
+            marker = PromptCanary.Marker(arithmetic: arithmetic, canary: canary, builds: [])
             log?("saved prompts: this build wrote the folder's canary in \(seconds) s")
         } else if marker!.canary == canary {
             log?("saved prompts: this build was checked against the folder's canary in \(seconds) s")
@@ -286,7 +289,7 @@ public final class PromptCache {
                 return
             }
             marker = PromptCanary.Marker(
-                arithmetic: PromptCanary.arithmetic, canary: canary, builds: [], refused: refused.lastPathComponent)
+                arithmetic: arithmetic, canary: canary, builds: [], refused: refused.lastPathComponent)
         }
         if !marker!.builds.contains(build) { marker!.builds.append(build) }
         if savesOff == nil, !PromptCanary.write(marker!, to: root) {
@@ -397,7 +400,8 @@ public final class PromptCache {
         for (folder, used) in otherBuilds(lowDisk: false) where Date().timeIntervalSince(used) > 14 * 86_400 {
             try? FileManager.default.removeItem(at: folder)
         }
-        unreadable = build.map { PromptCanary.unreadableEntries(beside: root, build: $0, sameModel: sameModel) } ?? []
+        unreadable =
+            build.map { PromptCanary.unreadableEntries(beside: root, build: $0, arithmetic: arithmetic, sameModel: sameModel) } ?? []
         let kinds = Set(unreadable.map(\.why)).sorted()
         if !kinds.isEmpty {
             unusableNote =
@@ -1054,9 +1058,10 @@ public final class PromptCache {
                 let shared = common(attempt.ids)
                 guard shared > wanted else { continue }
                 wanted = shared
+                // A request that leaves the saved tokens could not have restored them whatever became of the save.
                 reason =
-                    attempt.fate != .saved
-                    ? attempt.fate.rawValue : shared < attempt.ids.count ? "prefix_differs_at=\(shared)" : "entry_not_used"
+                    shared < attempt.ids.count
+                    ? "prefix_differs_at=\(shared)" : attempt.fate != .saved ? attempt.fate.rawValue : "entry_not_used"
             }
             let previous = common(previousPrompt)
             if previous > wanted {

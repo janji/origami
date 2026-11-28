@@ -740,15 +740,18 @@ enum Commands {
     /// `serve` for a GLM-5.3-Flash or DeepSeek-V4.1-Flash GGUF: the family engine reads the file as stored (dense
     /// weights resident, routed experts read on demand into the expert memory); the tokenizer and chat template
     /// come from the GGUF.
-    /// The epoch of a family model's saved prompts (`PromptCache`): the engine's arithmetic digest (`PromptCanary.epoch`),
+    /// The epoch of a family model's saved prompts (`PromptCache`): the engine's arithmetic digest (`PromptCanary.epoch`;
+    /// `arithmetic`, for an earlier one),
     /// the hot copy's identity (the GGUF's key and the expert representation), a resident pack's, the GGUF's tensor table,
     /// the context and the decode path (`ORIGAMI_FAMILY_GROUPED_DECODE=0`: no check shows the two give the same bits end
     /// to end, so states never cross it).
-    static func familyEpoch(_ gguf: GGUFSource, identity: String, resident: String, context: Int) throws -> String {
+    static func familyEpoch(
+        _ gguf: GGUFSource, identity: String, resident: String, context: Int, arithmetic: String = ArithmeticDigest.family.value
+    ) throws -> String {
         let table = gguf.tensors.values.sorted { $0.name < $1.name }.map { "\($0.name):\($0.type):\($0.file):\($0.offset):\($0.length)" }
             .joined(separator: ",")
         let path = FamilyRunner.groupsDecodeExperts ? "" : "|ungrouped-decode"
-        return PromptCanary.epoch(identity + resident + table + "\(context)" + path)
+        return PromptCanary.epoch(identity + resident + table + "\(context)" + path, arithmetic: arithmetic)
     }
 
     static func serveFamily(settings: Settings, flags: [String: [String]], gguf url: URL, parent: pid_t) async throws {
@@ -964,17 +967,24 @@ enum Commands {
         // Saved prompts in Qwen's prompt cache, one folder per epoch: the engine's arithmetic (shared by the builds whose
         // canary matches, `PromptCanary`), the GGUF (its tokenizer and template included), the effective expert
         // representation and the context. The support files written from the GGUF at each start do not enter it.
-        let epoch = try familyEpoch(gguf, identity: identity, resident: residentPack?.representationIdentity ?? "", context: context)
+        let pack = residentPack?.representationIdentity ?? ""
+        let keyed = try familyEpoch(gguf, identity: identity, resident: pack, context: context)
+        let root = settings.promptCacheRoot.appendingPathComponent(String(keyed.prefix(16)), isDirectory: true)
+        // Saves 3.1.8.3 keyed on its single digest are this engine's while its files are unchanged since (`PromptCanary.adopt`).
+        let earlier = try [ArithmeticDigest.family.before].compactMap { $0 }.map {
+            (epoch: try familyEpoch(gguf, identity: identity, resident: pack, context: context, arithmetic: $0), model: "")
+        }
+        let epoch = PromptCanary.adopt(root, epoch: keyed, model: "", arithmetic: ArithmeticDigest.family.value, from: earlier).epoch
         let cacheLedger = try MemoryLedger(ceiling: 1 << 30, transientMargin: 1, availableFloor: 1)
         let cache = try PromptCache(
-            root: settings.promptCacheRoot.appendingPathComponent(String(epoch.prefix(16)), isDirectory: true), epoch: epoch,
+            root: root, epoch: epoch,
             entries: PromptCache.regularEntries(context: context, entries: settings.promptCacheEntries),
             // The slots' Qwen checkpoints are never written here; the smallest store holds the folders.
             entryBytes: PromptCache.entryDiskBytes(context: 8192) * 2, ledger: cacheLedger, capacity: 8192,
             // Sibling epoch folders are any family model's: only this key's and context's are its other builds.
             sameModel: { folder in
                 FamilySetup.epoch(folder).map { $0["family_key"] as? String == key && $0["context"] as? Int == context }
-            }, build: PromptCanary.build)
+            }, build: PromptCanary.build, arithmetic: ArithmeticDigest.family.value)
         cache.log = log
         // A build the folder's canary does not list yet runs the probe now, before the warm-up and any request.
         cache.settle { try backend.canary() }
@@ -1059,7 +1069,7 @@ enum Commands {
                 "temporarily_reduced": ledger.budgetMode == .explicit && usable < target,
                 "reserved_bytes": memory.reserved, "footprint_bytes": memory.physicalFootprint,
                 "available_bytes": memory.availableMemoryEstimate, "floor_bytes": ledger.availableFloorBytes,
-            ].merging(Self.cutReport(governor, usable: usable)) { $1 }
+            ].merging(Self.cutReport(governor, usable: usable)) { $1 }.merging(memory.ownersReport) { $1 }
             report["memory_admission"] = memoryAdmissionReport(memory)
             if let knobs { report["tuning"] = tuning.report(knobs: knobs.report) }
             report["memory_learned"] = history.summary(
@@ -1571,13 +1581,15 @@ enum Commands {
 
     // MARK: model
 
-    /// `origami model list|add|remove|default`: named models (`ModelRegistry`); `--model <name>` and the `model`
-    /// setting accept a name. Removing a name never touches the model's folder.
+    /// `origami model list|add|replace|standalone|remove|default`: named models (`ModelRegistry`); `--model <name>` and the
+    /// `model` setting accept a name. Removing a name never touches the model's folder. `replace` adds a model under a
+    /// name already registered, keeping that entry's settings; `standalone` replaces a Qwen variant with a copy of it that
+    /// owns its base's files (`ExpertVariant.standalone`).
     static func model(_ arguments: [String], flags: [String: [String]], switches: Set<String>) async throws {
         let settings = try Settings.load(flags: flags)
         let entries = try ModelRegistry.entries(settings)
         let usage =
-            "Usage: origami model list | add <folder|org/repo> [--name <name>] [--to <folder>] [--expert-bits 2|4|8] | add <experts.gguf> --base <model> [--name <name>] | remove <name> | move <name> <folder> | default <name>"
+            "Usage: origami model list | add <folder|org/repo> [--name <name>] [--to <folder>] [--expert-bits 2|4|8] | add <experts.gguf> --base <model> [--name <name>] | replace <name> <folder|org/repo|file.gguf> [--base <model>] | standalone <name> [--to <folder>] | remove <name> | move <name> <folder> | default <name>"
         func named(_ name: String) throws -> [String: Any] {
             guard let entry = entries.first(where: { $0["name"] as? String == name }) else {
                 throw CLIError("No model named \(name); `origami model list` shows them")
@@ -1590,6 +1602,7 @@ enum Commands {
             let mounted = Storage.volumes()
             Storage.noteVolumes(settings, volumes: mounted)
             let relinks = Storage.relinks(settings, volumes: mounted)
+            let aliases = ModelRegistry.aliases(entries, default: settings.model)
             for entry in entries {
                 let name = entry["name"] as? String ?? "?"
                 let path = entry["path"] as? String ?? "?"
@@ -1613,6 +1626,7 @@ enum Commands {
                 } else if !FileManager.default.fileExists(atPath: gguf ? path : path + "/config.json") {
                     line += gguf ? "  (file missing)" : "  (folder missing)"
                 }
+                if let alias = aliases.first(where: { $0.value == name })?.key { line += "  (alias \(alias))" }
                 lines.append(line)
             }
             lines =
@@ -1620,9 +1634,24 @@ enum Commands {
                 ? [
                     "No models added; `origami model add <folder|org/repo>` names one. Origami serves \(settings.model ?? Models.defaultRepo)."
                 ]
-                : lines + ["", "* the default (`origami model default <name>` changes it)"]
-            emit(lines, ["default": settings.model ?? NSNull(), "models": entries], switches.contains("json"))
-        case "add":
+                : lines + [
+                    "", "* the default (`origami model default <name>` changes it)",
+                    "alias: a request may name the family (qwen, glm, deepseek) instead; it means the default model of that family, else the one added last",
+                ]
+            emit(lines, ["default": settings.model ?? NSNull(), "models": entries, "aliases": aliases], switches.contains("json"))
+        case "add", "replace", "standalone":
+            // `replace <name> <source>` and `standalone <name>`: the add below, under that name, in place of its entry.
+            var arguments = arguments
+            var replacing: [String: Any]?
+            let standalone = arguments.first == "standalone"
+            if arguments.first != "add" {
+                guard arguments.count == (standalone ? 2 : 3), flags["name"] == nil, !standalone || flags["base"] == nil else {
+                    throw CLIError.usage(usage)
+                }
+                replacing = try named(arguments[1])
+                if flags["base"]?.last == arguments[1] { throw CLIError("\(arguments[1]) cannot be the base of its own replacement") }
+                arguments = ["add", standalone ? "" : arguments[2]]
+            }
             guard arguments.count == 2 else { throw CLIError.usage(usage) }
             func valid(_ name: String) throws -> String {
                 guard name.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", options: .regularExpression) != nil else {
@@ -1630,11 +1659,23 @@ enum Commands {
                 }
                 return name
             }
-            let given = try flags["name"]?.last.map(valid)
+            let given = try replacing?["name"] as? String ?? flags["name"]?.last.map(valid)
             // Where a download or conversion is written: --to <folder> (the dashboard's choice), else the models folder.
             let destination = flags["to"]?.last.map { URL(fileURLWithPath: Settings.expand($0), isDirectory: true) } ?? settings.modelsDir
             if destination.path.hasPrefix("/Volumes/"), !Stores.volume(destination).mounted {
                 throw CLIError("\(Stores.driveName(destination.path)) is not connected; connect it or pass another --to folder")
+            }
+            if let replacing, standalone {
+                let target = destination.appendingPathComponent(given!, isDirectory: true)
+                try ExpertVariant.standalone(replacing, into: target, settings: settings)
+                arguments[1] = target.path
+            }
+            // What `model replace` reports left behind is judged against what the old entry had before anything changed.
+            let before = replacing.map { _ in Storage.map(settings, found: ([], "the command line does not search for models")) }
+            /// After the new entry is saved: what the old one leaves behind, and the running server told.
+            func afterReplace(_ entry: [String: Any]) async {
+                guard let replacing, let before else { return }
+                await Self.replaced(replacing, by: entry, before: before, settings: settings, carryCounts: standalone)
             }
             let spec = arguments[1]
             func derived(_ text: String) throws -> String {
@@ -1646,6 +1687,10 @@ enum Commands {
             /// A name derived again for another copy (another path) would silently re-point the first: refused without --name,
             /// before anything is converted.
             func sameName(_ name: String, _ path: String) throws {
+                // A replacement written over the files of the model it replaces (a conversion of the same name) is refused.
+                if let old = replacing?["path"] as? String, path == old, !ExpertVariant.owns(path, settings: settings) {
+                    throw CLIError("\(path) is \(name)'s own files already: replace it with another (a conversion: --to <another folder>)")
+                }
                 guard given == nil, let earlier = entries.first(where: { $0["name"] as? String == name })?["path"] as? String,
                     earlier != path
                 else { return }
@@ -1708,7 +1753,7 @@ enum Commands {
             var variant: [String: Any]?
             if let base = flags["base"]?.last {
                 let name = try given ?? derived(GGUFSource.modelPrefix(url.lastPathComponent).replacingOccurrences(of: ".gguf", with: ""))
-                if let earlier = entries.first(where: { $0["name"] as? String == name }), earlier["base"] == nil {
+                if replacing == nil, let earlier = entries.first(where: { $0["name"] as? String == name }), earlier["base"] == nil {
                     throw CLIError("\(name) already names a model; pass --name <another name>")
                 }
                 variant = ["base": base, "experts": url.path]
@@ -1716,7 +1761,7 @@ enum Commands {
                 if var entry = try ExpertVariant.family(
                     experts: url, base: base, name: name, settings: settings, yes: switches.contains("yes"))
                 {
-                    let kept = ExpertVariant.keepSettings(&entry, from: entries)
+                    let kept = ExpertVariant.keepSettings(&entry, from: entries, always: replacing != nil)
                     let replaced = try ModelRegistry.put(entry, settings: settings)
                     var probe = settings
                     probe.model = name
@@ -1724,6 +1769,7 @@ enum Commands {
                         try ExpertVariant.source(URL(fileURLWithPath: entry["path"] as! String), settings: probe))!
                     print("\(replaced ? "Updated" : "Added") \(name): \(base) with \(note).")
                     if let kept { print(kept) }
+                    await afterReplace(entry)
                     print("Opt-in: \(base) itself stays exact. Serve it with `origami serve --model \(name)`.")
                     if let line = ExpertVariant.seedCounts(name, settings: settings) {
                         print(line.prefix(1).uppercased() + line.dropFirst() + ".")
@@ -1737,12 +1783,13 @@ enum Commands {
                 url, gguf: gguf && variant == nil, name: given, derived: derived, into: destination, flags: flags,
                 yes: switches.contains("yes"), taken: sameName)
             {
-                let kept = ExpertVariant.keepSettings(&entry, from: entries)
+                let kept = ExpertVariant.keepSettings(&entry, from: entries, always: replacing != nil)
                 let replaced = try ModelRegistry.put(entry, settings: settings)
                 print(
                     "\(replaced ? "Updated" : "Added") \(entry["name"]!): \(entry["path"]!). Serve it with `origami serve --model \(entry["name"]!)`."
                 )
                 if let kept { print(kept) }
+                await afterReplace(entry)
                 return
             }
             if flags["expert-bits"] != nil {
@@ -1855,12 +1902,13 @@ enum Commands {
                 .map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() } ?? NSNull()
             entry["manifest"] = manifest
             try sameName(name, url.path)
-            let kept = ExpertVariant.keepSettings(&entry, from: entries)
+            let kept = ExpertVariant.keepSettings(&entry, from: entries, always: replacing != nil)
             let replaced = try ModelRegistry.put(entry, settings: settings)
             print(
                 "\(replaced ? "Updated" : "Added") \(name): \(url.path) (\(model.quantization.rawValue))."
             )
             if let kept { print(kept) }
+            await afterReplace(entry)
             if variant != nil, let note = ExpertVariant.note(model) {
                 print("It runs \(variant!["base"]!) with \(note). Opt-in: \(variant!["base"]!) itself stays exact.")
                 if let line = ExpertVariant.seedCounts(name, settings: settings) {
@@ -1873,6 +1921,7 @@ enum Commands {
             guard arguments.count == 2 else { throw CLIError.usage(usage) }
             let entry = try named(arguments[1])
             let path = entry["path"] as? String ?? "?"
+            ModelRegistry.retire(entry, settings: settings)
             try ModelRegistry.update(settings) { $0.removeAll { $0["name"] as? String == arguments[1] } }
             if settings.model == arguments[1] { try Settings.write(["model": nil], to: settings.configFile) }
             if entry["base"] != nil, ExpertVariant.owns(path, settings: settings) {
@@ -1903,6 +1952,86 @@ enum Commands {
             try Settings.write(["model": arguments[1]], to: settings.configFile)
             print("\(arguments[1]) is the default model; a running server loads it after a restart.")
         default: throw CLIError.usage(usage)
+        }
+    }
+
+    /// `model replace` and `model standalone`, once `new` is saved under `old`'s name: a Qwen variant's generated folder
+    /// of links goes (as `model remove` removes it); what was kept for the old build's files and cannot serve the new one
+    /// (hot copies, packs and saved prompts, by fingerprint or GGUF key, and usage counts) is named with how to remove it,
+    /// and so are the variants made on it; a server on the port loads a loaded old build's replacement after its reply.
+    /// `carryCounts`: the same router and experts (`standalone`), so the usage counts are copied to the new build.
+    static func replaced(
+        _ old: [String: Any], by new: [String: Any], before: (items: [Storage.Item], prompts: [SavedPrompts.Build]), settings: Settings,
+        carryCounts: Bool
+    ) async {
+        let name = old["name"] as? String ?? "?"
+        let manager = FileManager.default
+        if old["base"] != nil, let path = old["path"] as? String, path != new["path"] as? String,
+            ExpertVariant.owns(path, settings: settings)
+        {
+            try? manager.removeItem(atPath: path)
+        }
+        let after = Storage.map(settings, found: ([], "the command line does not search for models"))
+        let kept = Set(after.items.filter { $0.model == name }.map(\.path) + after.prompts.filter { $0.model == name }.map(\.path))
+        var left = before.items.filter { $0.model == name && $0.role != "model" && !kept.contains($0.path) }.map {
+            "  \($0.role) \($0.path) (\(gigabytes($0.allocated))): delete it in the dashboard's Models view"
+        }
+        left += before.prompts.filter { $0.model == name && !kept.contains($0.path) }.map {
+            "  saved prompts \($0.path) (\(gigabytes($0.bytes)), \($0.conversations) conversations): `origami cache prune` removes them"
+        }
+        // Usage counts, by the build's identity: Qwen's fingerprint, a GGUF's key.
+        func counts(_ entry: [String: Any]) -> [URL] {
+            guard entry["family"] != nil else {
+                return ((entry["manifest"] as? [String: Any])?["fingerprint"] as? String).map {
+                    [settings.dataDir.appendingPathComponent("routing-\($0.prefix(12)).json")]
+                } ?? []
+            }
+            guard let path = entry["path"] as? String, let parts = try? GGUFSource.parts(URL(fileURLWithPath: path)) else { return [] }
+            let key = FamilySupport.key(folder: parts.folder, files: parts.files, experts: ExpertVariant.expertFiles(entry))
+            return ["uses.json", "misses.json"].map { settings.dataDir.appendingPathComponent("family/\(key)/\($0)") }
+        }
+        let now = counts(new)
+        for (index, from) in counts(old).enumerated() where manager.fileExists(atPath: from.path) {
+            let to = index < now.count ? now[index] : nil
+            guard to != from else { continue }
+            if carryCounts, let to, !manager.fileExists(atPath: to.path), (try? manager.copyItem(at: from, to: to)) != nil {
+                print("Usage counts copied to the new files (the same router), for its hot copy.")
+                try? manager.removeItem(at: from)
+                continue
+            }
+            left.append("  usage counts \(from.path): delete the file; the new files are counted afresh")
+        }
+        print(
+            left.isEmpty
+                ? "Nothing kept for \(name)'s old files is left behind."
+                : (["Left on disk for \(name)'s old files (each is keyed by those files, so the new ones cannot use it):"] + left)
+                    .joined(separator: "\n"))
+        let variants = ((try? ModelRegistry.entries(settings)) ?? []).filter { $0["base"] as? String == name }.compactMap {
+            $0["name"] as? String
+        }
+        if !variants.isEmpty {
+            print(
+                "\(variants.joined(separator: ", ")) still read\(variants.count == 1 ? "s" : "") \(name)'s old files: replace "
+                    + "\(variants.count == 1 ? "it" : "them") too (`origami model replace <name> <experts.gguf> --base \(name)`) before those files go."
+            )
+        }
+        // A server on the port loads the new files in place of the old ones it runs (`POST v1/reload` with the model).
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(settings.port)/v1/reload")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = settings.apiKey { request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": name])
+        guard let (data, response) = try? await URLSession.shared.data(for: request) else { return }
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        switch (response as? HTTPURLResponse)?.statusCode {
+        case 202: print("The server on port \(settings.port) loads the new files of \(name) after its current reply.")
+        case 200: print("The server on port \(settings.port) reads the new files the next time it loads \(name).")
+        default:
+            print(
+                "The server on port \(settings.port) did not reload \(name) ("
+                    + ((object["error"] as? [String: Any])?["message"] as? String ?? "HTTP error")
+                    + "): `origami stop` then `origami start` loads the new files.")
         }
     }
 

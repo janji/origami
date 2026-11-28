@@ -217,10 +217,11 @@ package enum ModelRefresh {
         try hooks.beforeRebind?()
         let new = journal.new!
         var rebound =
-            journal.old == new ? [] : try rebind(family: journal.family, old: journal.old, new: new, places: places, epochs: epochs)
+            journal.old == new
+            ? [] : try rebind(family: journal.family, old: journal.old, new: new, places: places, epochs: epochs, verified: true)
         for item in related {
             guard let old = journal.related?[item.name], let now = journal.relatedNew?[item.name], old != now else { continue }
-            rebound += try rebind(family: journal.family, old: old, new: now, places: places, epochs: item.epochs)
+            rebound += try rebind(family: journal.family, old: old, new: now, places: places, epochs: item.epochs, verified: true)
         }
         try FileManager.default.removeItem(at: url)
         return Outcome(old: journal.old, new: new, rewritten: rewritten, rebound: rebound)
@@ -359,11 +360,14 @@ package enum ModelRefresh {
     /// - Qwen (`O` → `P`): each `<name>-O[..12]` folder (packs, further copies, the hot copy) becomes `<name>-P[..12]`,
     ///   with `O` replaced in its store headers (`model_fingerprint`) and `hot/index.json`; `routing-O[..12].json`
     ///   becomes `routing-P[..12].json`; `calibration.json`'s keys `O[..16]`, the tuning files' `O[..12]` and
-    ///   `models.json`'s `O` are replaced. Saved prompts in `<prompts>/O[..12]-<context>` are dropped: each image
-    ///   embeds the fingerprint in its identity and the epoch under its own digests, so they cannot be re-stamped.
-    package static func rebind(family: Bool, old: String, new: String, places: Places, epochs: (String) -> [String] = { _ in [] }) throws
-        -> [String]
-    {
+    ///   `models.json`'s `O` are replaced. Saved prompts in `<prompts>/O[..12]-<context>`: each image embeds the
+    ///   fingerprint in its identity and the epoch under its own digests, so they cannot be re-stamped. When `verified`
+    ///   (a refresh read every file back unchanged, `run`), the folder becomes `<prompts>/P[..12]-<context>` and records
+    ///   `O` (`earlierFingerprints`): the server finds the saves by it and reads them under the identity they were written
+    ///   with (`PromptCanary.adopt`). Otherwise (a move or Locate, which compare less) they are dropped.
+    package static func rebind(
+        family: Bool, old: String, new: String, places: Places, epochs: (String) -> [String] = { _ in [] }, verified: Bool = false
+    ) throws -> [String] {
         var lines: [String] = []
         let manager = FileManager.default
         func exists(_ url: URL) -> Bool { manager.fileExists(atPath: url.path) }
@@ -427,13 +431,36 @@ package enum ModelRefresh {
             try restamp(data.appendingPathComponent("calibration.json"), String(old.prefix(16)), String(new.prefix(16)))
             for folder in (try? manager.contentsOfDirectory(at: places.prompts, includingPropertiesForKeys: nil)) ?? []
             where PromptCache.modelFolder(folder.lastPathComponent).map({ $0 == old12 }) == true {
-                try manager.removeItem(at: folder)
-                lines.append("dropped the saved prompts in \(folder.path): they cannot be re-stamped")
+                guard verified else {
+                    try manager.removeItem(at: folder)
+                    lines.append("dropped the saved prompts in \(folder.path): they cannot be re-stamped")
+                    continue
+                }
+                let name = new12 + folder.lastPathComponent.dropFirst(old12.count)
+                if let moved = try move(folder, places.prompts.appendingPathComponent(name, isDirectory: true)) {
+                    try noteEarlier(moved, old)
+                }
             }
         }
         for file in tuning { try restamp(file, String(old.prefix(12)), String(new.prefix(12))) }
         try restamp(data.appendingPathComponent("models.json"), old, new)
         return lines
+    }
+
+    /// The fingerprints the model of a Qwen `<fingerprint12>-<context>` prompt folder had before refreshes that read its
+    /// bytes back unchanged, oldest first (`rebind`): its saves may still be keyed on them (`PromptCanary.adopt`).
+    package static func earlierFingerprints(_ folder: URL) -> [String] {
+        (try? Data(contentsOf: folder.appendingPathComponent(earlierFile))).flatMap { try? JSONDecoder().decode([String].self, from: $0) }
+            ?? []
+    }
+    static let earlierFile = "earlier-fingerprints.json"
+    /// Adds `fingerprint` to the folder's `earlierFingerprints` (once), written beside and renamed over.
+    static func noteEarlier(_ folder: URL, _ fingerprint: String) throws {
+        var list = earlierFingerprints(folder)
+        guard !list.contains(fingerprint) else { return }
+        list.append(fingerprint)
+        let url = folder.appendingPathComponent(earlierFile)
+        try JSONEncoder().encode(list).write(to: url, options: .atomic)
     }
 
     /// Replaces every `old` in the text file at `url` by `new` (a file without it is left alone): written beside and

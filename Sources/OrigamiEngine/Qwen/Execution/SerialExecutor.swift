@@ -26,6 +26,8 @@ public final class SerialExecutor {
     package var captureHiddenRows = 0
     private var pairGrids: MTLBuffer?
     private var pairResidencyBackoff = PairResidencyBackoff()
+    /// Slabs attached mid-reply since the sequence began: one log line per reply, not one per token.
+    private var grownBackSlabs = 0
     /// GPU seconds of the last resident pair step's commands (also when it missed), for the speculation log.
     package private(set) var pairResidentGPUSeconds = 0.0
     package var pairResidentMisses = 0
@@ -565,7 +567,8 @@ public final class SerialExecutor {
 
     /// The expert cache while a prompt of `input` new rows (after any restored prefix) is read. Fewer than 256 keep the
     /// hot decode capacity. Longer ones are charged their real rows in whole 256-row tiles, up to one 8,192-row scope, and
-    /// keep the plan's prefill cache plus what their scope leaves of the 8,192-row one; all under the current budget.
+    /// keep the plan's prefill cache plus what their scope leaves of the 8,192-row one, plus the key/value arena past
+    /// `heldArenaBytes` (what this conversation holds and the request can add); all under the current budget.
     package static func promptCacheBytes(
         context: Int, fileBacked: Bool?, input: Int, residentBytes: UInt64, experts: ExpertExecutionConfiguration,
         usable: UInt64, additionalOwners: UInt64 = 0, heldArenaBytes: UInt64? = nil
@@ -577,7 +580,10 @@ public final class SerialExecutor {
             let longest = try geometry.maximumFixedBytes(input: 8192, residentBytes: 0)
             let this = try geometry.maximumFixedBytes(input: rows, residentBytes: 0)
             let slab = UInt64(experts.slotsPerSlab * PackStore.expertBytes)
-            ceiling = min(experts.cacheBytes, experts.prefillCacheBytes + (longest > this ? longest - this : 0) / slab * slab)
+            // The plan's prefill cache counts the whole arena; the key/value room this request cannot reach is lent too.
+            let lent = geometry.arenaBytes - min(heldArenaBytes ?? geometry.arenaBytes, geometry.arenaBytes)
+            ceiling = min(
+                experts.cacheBytes, experts.prefillCacheBytes + ((longest > this ? longest - this : 0) + lent) / slab * slab)
         }
         return try ConversationPhaseBudget.expertBytes(
             context: context, fileBacked: fileBacked, input: rows, residentBytes: residentBytes, experts: experts,
@@ -687,6 +693,10 @@ public final class SerialExecutor {
             pendingPLEPrefetch = nil
             pendingEmbeddingPrefetch = nil
             pairResidencyBackoff = .init()
+            if grownBackSlabs > 0 {
+                FileHandle.standardError.write(Data("origami: expert cache grew back by \(grownBackSlabs) slabs mid-reply\n".utf8))
+                grownBackSlabs = 0
+            }
             active = nil
             if invalidate { state.valid = false }
         }
@@ -703,7 +713,7 @@ public final class SerialExecutor {
         expertExecution?.completePendingTrim()
         if expertExecution?.isDecodePhase == true, let added = expertExecution?.attachGrowth(), added > 0 {
             pairResidencyBackoff = .init()
-            FileHandle.standardError.write(Data("origami: expert cache grew back by \(added) slabs mid-reply\n".utf8))
+            grownBackSlabs += added
         }
     }
     /// M-RoPE positions for a prompt with images; nil for text.

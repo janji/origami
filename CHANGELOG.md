@@ -4,6 +4,44 @@ Origami's releases, newest first. Each entry says whether replies at temperature
 
 Earlier releases (1.0.0 to 2.4.3) are in [docs/changelog-2.x.md](docs/changelog-2.x.md).
 
+## 3.2.0 (2026-11-28)
+
+**Replies:** changed once for requests with tools (the tool list and past tool calls are written into the prompt as
+Python writes JSON); otherwise unchanged. Saved prompts: GLM's and DeepSeek's carry over from 3.1.8.3; Qwen's are
+read again once.
+
+- **A turn after a tool call no longer reads part of the last reply again.** The chat templates' `tojson` wrote JSON
+  with sorted keys, no spaces, `\/` and escaped non-ASCII, and tool calls were served with nested argument keys
+  sorted; the models write (and were trained on) Python's form. After every call with a list or object argument (an
+  agent's `edit`) the next prompt differed from the saved one. Both now keep the model's own form, so the next turn
+  matches token for token (ROADMAP C2). A prompt that differs from a save is logged as `prefix_differs_at=K`, not
+  `save_not_finished`.
+- **Qwen keeps more experts in memory while it reads a prompt.** The prompt read's expert cache held back room for the
+  whole context's key/value storage (3.6 GB at 128K); it now holds back what the conversation has and the request can
+  add: about 2.5 GB more cache at 128K with a 28K conversation. GLM and DeepSeek already did this (ROADMAP C1').
+- **Saved prompts are keyed per engine** (Qwen MLX, Qwen with GGUF experts, GLM/DeepSeek): a change to code only one
+  engine runs no longer drops the others' saves. `origami refresh` keeps Qwen's saved prompts when every file reads
+  back unchanged (ROADMAP C4).
+- **Model aliases.** A request may name `qwen`, `glm` or `deepseek` and gets the default model of that family, else the
+  one added last, so replacing a model breaks no client; `model list`, `/v1/models` and the dashboard show where each
+  points.
+- **`origami model replace <name> <source>`** swaps in another build under a name, keeping its settings, presets and
+  default, while the server runs; it lists the old files' hot copy, saved prompts and counts with how to remove them.
+  **`origami model standalone <name>`** gives a low-bit Qwen variant its own byte-checked copy of its base's files, so
+  the base can be deleted.
+- **After a power cut the model loads as soon as its drive mounts.** A start that found the drive missing used to stay
+  failed until someone reloaded; the status now says it is waiting, and Stop ends the wait.
+- **Every line of the server log has a time**, the model process's own included; "expert cache grew back" is one line
+  per reply instead of one per token.
+- **The dashboard's recent requests survive** an idle unload, a model switch, Stop and Start.
+- **Now tab, memory:** the bar shows what Origami uses, what is free and what other apps and macOS hold; under it, how
+  far Origami may still grow within its budget and how much of its limit is held back, and why. `/v1/status` adds
+  `memory.owners`: reserved memory by owner.
+- **Models view:** every row under Other files and Saved prompts names its model (a removed or replaced one by its
+  last name, with the date), and an unused row says what deleting it loses. A model whose experts are read from a GGUF
+  outside its folder shows what it reads; its Delete lists the files that go and those that stay, and never deletes a
+  file another model reads.
+
 ## 3.1.8.3 (2026-11-26)
 
 **Replies:** unchanged.

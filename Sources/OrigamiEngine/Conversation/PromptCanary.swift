@@ -1,9 +1,9 @@
 import CryptoKit
 import Foundation
 
-/// Saved prompts across upgrades. A prompt-cache folder is keyed on the arithmetic digest (`ArithmeticDigest`: the sources
-/// that can change a saved state's or its logits' bits), not on the executable, so builds that compute the same bits
-/// share it. Its marker (`origami-epoch.json`, beside the model, key and build fields the command-line tool writes there)
+/// Saved prompts across upgrades. A prompt-cache folder is keyed on its engine's arithmetic digest (`ArithmeticDigest`:
+/// the sources that can change that engine's saved state's or its logits' bits), not on the executable, so builds that
+/// compute the same bits share it. Its marker (`origami-epoch.json`, beside the model, key and build fields the command-line tool writes there)
 /// records the arithmetic digest, the canary (the SHA-256 of the bits of a fixed probe run on the real model from a cold
 /// state: `qwenProbe`, `familyProbe`) and the builds (`build`: executable SHA-256 and macOS build) that reproduced it. A
 /// build not listed runs the probe before any saved prompt is read when the folder holds one (`PromptCache.settle`) and
@@ -24,15 +24,15 @@ public enum PromptCanary {
     }
     /// The folder's marker, shared with the command-line tool's fields (`FamilySetup.epochMarker`).
     package static let file = "origami-epoch.json"
-    /// The arithmetic digest of this build (`ArithmeticDigest.value`).
-    package static let arithmetic = ArithmeticDigest.value
+    /// This build's arithmetic digests, one per engine: a folder's marker names its engine's.
+    package static let arithmetics = Set(ArithmeticDigest.all.map(\.value))
     /// This executable's SHA-256 (read once).
     package static let executable = (try? OrigamiRuntime.executableDigest()) ?? "unknown-build"
     /// What must reproduce a canary: this executable on this macOS (whose update brings another Metal compiler and drivers).
     package static let build = executable + " " + ProcessInfo.processInfo.operatingSystemVersionString
 
-    /// A prompt cache's epoch: SHA-256 of the arithmetic digest and `settings` (model, tokenizer, context, modes).
-    package static func epoch(_ settings: String, arithmetic: String = arithmetic) -> String {
+    /// A prompt cache's epoch: SHA-256 of its engine's arithmetic digest and `settings` (model, tokenizer, context, modes).
+    package static func epoch(_ settings: String, arithmetic: String) -> String {
         OrigamiRuntime.hex(SHA256.hash(data: Data((arithmetic + settings).utf8)))
     }
     /// The folder a build uses after the shared folder `folder` refused its canary: a sibling named by 16 hex digits of
@@ -47,9 +47,9 @@ public enum PromptCanary {
     package static func marker(_ folder: URL) -> Marker? {
         (try? Data(contentsOf: folder.appendingPathComponent(file))).flatMap { try? JSONDecoder().decode(Marker.self, from: $0) }
     }
-    /// Writes `marker`'s fields into the folder's marker, keeping its other fields (staged and renamed over, 0600); false
-    /// when it could not.
-    package static func write(_ marker: Marker, to folder: URL) -> Bool {
+    /// Writes `marker`'s fields and `extra` into the folder's marker, keeping its other fields (staged and renamed over,
+    /// 0600); false when it could not.
+    package static func write(_ marker: Marker, extra: [String: String] = [:], to folder: URL) -> Bool {
         let url = folder.appendingPathComponent(file)
         var fields = (try? Data(contentsOf: url)).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
         guard let own = (try? JSONEncoder().encode(marker)).flatMap({ (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] })
@@ -57,6 +57,7 @@ public enum PromptCanary {
         // A field left out (nil) is removed, not kept from before.
         for key in ["canary", "refused"] { fields.removeValue(forKey: key) }
         fields.merge(own) { $1 }
+        fields.merge(extra) { $1 }
         guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]) else { return false }
         let staging = folder.appendingPathComponent(".\(file).\(UUID().uuidString)")
         guard FileManager.default.createFile(atPath: staging.path, contents: data, attributes: [.posixPermissions: 0o600]),
@@ -66,6 +67,45 @@ public enum PromptCanary {
             return false
         }
         return true
+    }
+
+    /// The identity a folder's saves were written under when `adopt` moved them there from an earlier key: that key's
+    /// epoch and the model identity it bound (Qwen's fingerprint; empty for GLM and DeepSeek, whose epoch holds it).
+    /// nil: the folder's own key.
+    package static func writtenAs(_ folder: URL) -> (epoch: String, model: String)? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent(file)),
+            let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let epoch = fields["written_epoch"] as? String, let model = fields["written_model"] as? String
+        else { return nil }
+        return (epoch, model)
+    }
+    /// Keeps saves whose key moved while their bits did not. `candidates`: the earlier keys of `folder`'s saves, each an
+    /// epoch with the model identity it binds: the same settings under 3.1.8.3's single digest while the engine's files
+    /// are unchanged since (`ArithmeticDigest.before`), and the model as it was before a refresh, move or Locate that
+    /// proved its bytes unchanged (`ModelRefresh.rebind`). When `folder` does not exist, the first candidate's folder
+    /// beside it that has a marker and no server holds is renamed to it; its marker records the identity its saves were
+    /// written under (`writtenAs`) and takes `arithmetic`. Its canary does not list this build, so the probe runs before
+    /// any of them is read (`PromptCache.settle`). Returns the identity this run reads and writes the folder's saves
+    /// under: `writtenAs`, else `epoch` and `model`.
+    package static func adopt(
+        _ folder: URL, epoch: String, model: String, arithmetic: String, from candidates: [(epoch: String, model: String)]
+    ) -> (epoch: String, model: String) {
+        if !FileManager.default.fileExists(atPath: folder.path) {
+            for candidate in candidates where candidate.epoch != epoch {
+                let source = folder.deletingLastPathComponent().appendingPathComponent(
+                    String(candidate.epoch.prefix(16)), isDirectory: true)
+                guard var found = marker(source), !PromptCache.inUse(source) else { continue }
+                let written = writtenAs(source) ?? candidate
+                // Recorded before the rename: the folder never holds saves under a key that does not say how they were written.
+                guard write(found, extra: ["written_epoch": written.epoch, "written_model": written.model], to: source),
+                    rename(source.path, folder.path) == 0
+                else { continue }
+                found.arithmetic = arithmetic
+                _ = write(found, to: folder)
+                break
+            }
+        }
+        return writtenAs(folder) ?? (epoch, model)
     }
 
     /// What a build knows of `folder` without running its probe.
@@ -104,16 +144,16 @@ public enum PromptCanary {
     /// arithmetic digest and a canary this build reproduced, or one not checked against it yet, `notCheckedYet`: a later
     /// probe may still prove it, so it is never removed as unusable), else why (`otherArithmetic`, `beforeUpgrades`). A
     /// folder for other settings of this build reads as readable: it is another model's, context's or mode's.
-    package static func whyUnreadable(_ folder: URL, build: String = build, arithmetic: String = arithmetic) -> String? {
+    package static func whyUnreadable(_ folder: URL, build: String = build, arithmetic: Set<String> = arithmetics) -> String? {
         guard let marker = marker(folder) else { return beforeUpgrades }
-        if marker.builds.contains(build) && marker.arithmetic == arithmetic { return nil }
+        if marker.builds.contains(build) && arithmetic.contains(marker.arithmetic) { return nil }
         // Another arithmetic; a build's own folder (its bits differed from its shared folder's); or a shared folder this
         // build's canary did not reproduce.
         let refused = known(folder, build: build) == .refused(ownFolder(folder, build: build))
-        return marker.arithmetic != arithmetic || marker.refused != nil || refused ? otherArithmetic : nil
+        return !arithmetic.contains(marker.arithmetic) || marker.refused != nil || refused ? otherArithmetic : nil
     }
     /// Words for a folder `whyUnreadable` keeps that this build has not been checked against yet (nil: none to say).
-    package static func notCheckedYet(_ folder: URL, build: String = build, arithmetic: String = arithmetic) -> String? {
+    package static func notCheckedYet(_ folder: URL, build: String = build, arithmetic: Set<String> = arithmetics) -> String? {
         guard whyUnreadable(folder, build: build, arithmetic: arithmetic) == nil, let marker = marker(folder),
             !marker.builds.contains(build)
         else { return nil }
@@ -123,8 +163,9 @@ public enum PromptCanary {
     }
 
     /// The text entries of the sibling folders of `root` this build cannot read (of this model: `sameModel` not false),
-    /// each with why (`whyUnreadable`), so a restore can say a save exists but cannot be used.
-    static func unreadableEntries(beside root: URL, build: String, sameModel: ((URL) -> Bool?)?)
+    /// each with why (`whyUnreadable` against `arithmetic`, the engine's digest), so a restore can say a save exists but
+    /// cannot be used.
+    static func unreadableEntries(beside root: URL, build: String, arithmetic: String, sameModel: ((URL) -> Bool?)?)
         -> [(tokens: Int, prefix: String, why: String)]
     {
         let siblings =
@@ -133,7 +174,7 @@ public enum PromptCanary {
             $0.lastPathComponent.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil
                 && $0.standardizedFileURL != root.standardizedFileURL && sameModel?($0) != false
         }.flatMap { folder -> [(tokens: Int, prefix: String, why: String)] in
-            guard let why = whyUnreadable(folder, build: build),
+            guard let why = whyUnreadable(folder, build: build, arithmetic: [arithmetic]),
                 let data = try? Data(contentsOf: folder.appendingPathComponent("index.json")),
                 let index = try? JSONDecoder().decode(PromptCache.Index.self, from: data)
             else { return [] }

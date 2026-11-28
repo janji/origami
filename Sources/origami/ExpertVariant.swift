@@ -42,6 +42,79 @@ enum ExpertVariant {
         return target
     }
 
+    /// `origami model standalone <name>`: the Qwen variant `entry`'s folder made whole in `target` (a folder not there yet):
+    /// each base file it links copied and compared byte for byte with its source, its config and `gguf-experts.json`
+    /// copied too, so its base can be removed. Refused, with nothing written, when `target`'s drive lacks the room
+    /// (`Models.conversionNeeds`: 10 GB kept free). A copy that fails or differs is deleted.
+    static func standalone(_ entry: [String: Any], into target: URL, settings: Settings) throws {
+        let name = entry["name"] as? String ?? "?"
+        guard entry["family"] == nil, entry["base"] != nil, let path = entry["path"] as? String, owns(path, settings: settings) else {
+            throw CLIError(
+                entry["family"] != nil
+                    ? "\(name) reads its base's GGUF itself; only a Qwen variant (`model add <experts.gguf> --base <model>`) is made standalone"
+                    : "\(name) is not a low-bit variant made with `model add <experts.gguf> --base <model>`: it has no base to copy")
+        }
+        let manager = FileManager.default
+        let folder = URL(fileURLWithPath: path, isDirectory: true)
+        guard !manager.fileExists(atPath: target.path) else {
+            throw CLIError("\(target.path) is already there; pass --to <another folder>")
+        }
+        var files: [(name: String, from: URL)] = []
+        for item in try manager.contentsOfDirectory(atPath: folder.path).sorted() where !item.hasPrefix(".") {
+            let url = folder.appendingPathComponent(item)
+            let from = (try? manager.destinationOfSymbolicLink(atPath: url.path)).map { URL(fileURLWithPath: $0) } ?? url
+            var directory: ObjCBool = false
+            guard manager.fileExists(atPath: from.path, isDirectory: &directory) else {
+                throw CLIError("\(from.path), which \(name) reads, is not there: put the base's files back first")
+            }
+            guard !directory.boolValue else { throw CLIError("\(from.path) is a folder; only files are copied") }
+            files.append((item, from))
+        }
+        let bytes = files.reduce(UInt64(0)) { $0 + Storage.size($1.from.path).allocated }
+        let parent = target.deletingLastPathComponent()
+        try manager.createDirectory(at: parent, withIntermediateDirectories: true)
+        let free = Stores.volume(parent).free
+        guard free >= Models.conversionNeeds(bytes) else {
+            throw CLIError(
+                "Making \(name) standalone copies \(OrigamiPlan.gigabytes(bytes)) of \(entry["base"]!)'s files into \(target.path) and needs "
+                    + "\(OrigamiPlan.gigabytes(Models.conversionNeeds(bytes))) free there, 10 GB to spare included "
+                    + "(\(OrigamiPlan.gigabytes(free)) now). Nothing was copied; pass --to with a folder on a bigger drive.")
+        }
+        print("Copying \(files.count) files (\(OrigamiPlan.gigabytes(bytes))) into \(target.path), each compared with its source.")
+        // Built beside it and renamed once every file matches, so a stop or a difference leaves no half model.
+        let staging = parent.appendingPathComponent(".\(target.lastPathComponent)-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: staging) }
+        let steps = Terminal.steps("copying")
+        for (index, file) in files.enumerated() {
+            let to = staging.appendingPathComponent(file.name)
+            try manager.copyItem(at: file.from, to: to)
+            guard try same(file.from, to) else {
+                throw CLIError("The copy of \(file.from.path) differs from it (a failing drive?); nothing was changed")
+            }
+            steps(index + 1, files.count)
+        }
+        try manager.moveItem(at: staging, to: target)
+    }
+
+    /// Whether two files hold the same bytes, read past the file cache (so the copy is read from its drive).
+    private static func same(_ a: URL, _ b: URL) throws -> Bool {
+        let one = try FileHandle(forReadingFrom: a)
+        let two = try FileHandle(forReadingFrom: b)
+        defer {
+            try? one.close()
+            try? two.close()
+        }
+        _ = fcntl(one.fileDescriptor, F_NOCACHE, 1)
+        _ = fcntl(two.fileDescriptor, F_NOCACHE, 1)
+        while true {
+            let x = try one.read(upToCount: 8 << 20) ?? Data()
+            let y = try two.read(upToCount: 8 << 20) ?? Data()
+            guard x == y else { return false }
+            if x.isEmpty { return true }
+        }
+    }
+
     /// The Qwen pairing `make` checks: the base model and the variant's `gguf-experts.json`; throws a refusal.
     private static func pairing(experts: URL, base spec: String, settings: Settings) throws -> (ModelSource, Data) {
         guard experts.pathExtension.lowercased() == "gguf", FileManager.default.fileExists(atPath: experts.path) else {
@@ -106,12 +179,13 @@ enum ExpertVariant {
 
     /// A model added again under its name keeps the settings saved for it (`Settings.modelKeys` in its old entry) when it
     /// is the same file or folder (and the same experts file); another one under that name starts without them. The line
-    /// saying which, or nil when the old entry kept none.
-    static func keepSettings(_ entry: inout [String: Any], from entries: [[String: Any]]) -> String? {
+    /// saying which, or nil when the old entry kept none. `always` (`model replace`): kept whatever files it now names.
+    static func keepSettings(_ entry: inout [String: Any], from entries: [[String: Any]], always: Bool = false) -> String? {
         guard let name = entry["name"] as? String, let old = entries.first(where: { $0["name"] as? String == name }) else { return nil }
         let keys = Settings.modelKeys.filter { old[$0] != nil && !(old[$0] is NSNull) }
         guard !keys.isEmpty else { return nil }
-        guard old["path"] as? String == entry["path"] as? String, old["experts"] as? String == entry["experts"] as? String else {
+        guard always || old["path"] as? String == entry["path"] as? String && old["experts"] as? String == entry["experts"] as? String
+        else {
             return "The settings saved for \(name) (\(keys.joined(separator: ", "))) were for \(old["path"] as? String ?? "another model")"
                 + " and are not kept: set them again with `origami config set <key> <value> --model \(name)`."
         }

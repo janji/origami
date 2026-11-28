@@ -107,6 +107,11 @@ origami serve --model flash-q2
   the default stay exact.
 - `origami model remove flash-q2` removes only the variant's small generated folder (in the data folder); the base
   model and the GGUF stay.
+- `origami model standalone flash-q2 [--to <folder>]` gives the variant its own copy of the base's files (about 36 GB,
+  most of it the PLE table), each compared byte for byte with its source, in `<folder>/flash-q2` (default
+  `<data_dir>/models`), so the base can be removed. It needs that much free there and 10 GB to spare, and copies
+  nothing otherwise. The name keeps its settings, as `model replace` keeps them; the usage counts carry over, and the
+  old hot copy and saved prompts (keyed by the files) are listed for removal.
 - Measured on one 32 GB Mac with the Q2_0 file and the experts on an external drive: 12 of 14 checkable tasks solved,
   the same as exact; 91% of exact's next tokens; about 12 tok/s on a first reply and 14 warm (exact: see the
   README's [What to expect](../README.md#what-to-expect)). With the IQ3_XXS file: 94.9% of exact's next tokens,
@@ -369,7 +374,16 @@ the vocabulary is refused. A teacher-forced reply is never saved to the prompt c
 origami model add ~/Models/my-fine-tune --name tuned          # a folder, a GGUF, or a Hugging Face repo id
 origami model list
 origami serve --model tuned                                    # or: origami model default tuned
+origami model replace tuned ~/Models/my-fine-tune-v2           # another build under the same name
 ```
+
+`origami model replace <name> <folder|file.gguf|owner/repo>` (with `--base <model>` for low-bit experts, as `model add`
+takes them) puts another build under a name already listed: its settings (context, quality, reasoning effort, memory
+limit, hot copy size and folder), the presets and the default that name it stay. A running server keeps answering: if
+it has that model loaded, it loads the new build after the current reply, else at the next request for it. What
+Origami kept for the old build's files cannot serve the new one (its hot copy, packs, saved prompts and usage counts are
+keyed by those files), so `replace` lists each with its size and how to remove it: the dashboard's Models view, or
+`origami cache prune` for saved prompts. A conversion is never written over the files of the model it replaces.
 
 `--to <folder>` writes a download
 or conversion there instead of `<data_dir>/models`. Removing a name never touches its files. `origami model move <name>
@@ -391,5 +405,11 @@ and each name from `origami model list`, with their `-<level>` ids, at `/v1/mode
 names another listed model loads it in place of the running one: running requests finish, the old model's process
 stops (all its memory comes back), and the new one starts, which takes as long as starting that model. One model is
 loaded at a time either way. `origami serve --single-model` serves just the configured model in one process.
+
+A request may also name a family instead of a model: `qwen`, `glm` or `deepseek` (with `-<level>` too, such as
+`qwen-fast`). It goes to the default model if that is of the family, else to the model of that family added last, so a
+client keeps working when the model behind it is replaced. A model registered under one of those names keeps it: an
+exact name always wins. `origami model list`, the dashboard's Models view and `/v1/models` (`origami.alias` on the
+model it names now) show where each alias points.
 
 [INTERNALS.md](../INTERNALS.md) explains how the engines work and how to add a quantization layout.

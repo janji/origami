@@ -70,8 +70,9 @@ The link puts `origami` on your `PATH`; a rebuild updates it. Keep the binary wh
 To keep a download on another drive, use `origami model add <owner/repo> --to /Volumes/MySSD/models`.
 
 `origami model list` shows your models, `origami model default <name>` picks the one `serve` uses, and
-`origami model remove <name>` unlists one (its files stay). `origami inspect <folder or file>` says whether Origami
-runs a model.
+`origami model remove <name>` unlists one (its files stay). `origami model replace <name> <folder or file>` swaps in
+another build under the same name, keeping its settings, while the server runs. `origami inspect <folder or file>` says
+whether Origami runs a model.
 
 ## First run
 
@@ -180,7 +181,8 @@ or a restart reads only what is new.
 - **After an update:** saved prompts are kept when the new build computes the same bits. When saved prompts exist,
   its first start with a model reads a short fixed probe (for Qwen about 600 tokens; for GLM and DeepSeek 18) and
   compares its bits with the folder's (written while the server was idle after the first save); equal, it restores the old saves, else it says so in the log and starts its own. An update
-  that changes the engine's arithmetic, and the first update to a version that keeps them, start empty once.
+  that changes the engine's arithmetic (each engine has its own: a change to GLM's and DeepSeek's code keeps Qwen's
+  saves, and the other way round), and the first update to a version that keeps them, start empty once.
 - **When it is removed:** prompts this build cannot read go after 14 days unused, or sooner when disk runs short.
   Pinned or named ones, and other models' prompts, are never removed automatically.
 - **Cleaning up:** `origami cache` lists them; `origami cache prune` removes old builds' prompts and those of model

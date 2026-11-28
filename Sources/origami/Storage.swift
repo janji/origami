@@ -31,6 +31,13 @@ enum Storage {
         var earlier: String?
         /// Every name its model is registered under (one folder or fingerprint, two names): a move stops any of them.
         var users: Set<String> = []
+        /// Files outside its path its routed experts are read from (a Qwen folder's `gguf-experts.json`) and the bytes it
+        /// reads of them, which its size counts; each one another model also reads, with that model (`delete` keeps those).
+        var elsewhere: [String] = [], elsewhereBytes: UInt64 = 0
+        var sharedWith: [String: String] = [:]
+        /// The identity it is keyed by (a Qwen fingerprint12, a GGUF key), and for an item of no registered model, the
+        /// model it was made for in the page's words (`ModelRegistry.formerName`, else its identity).
+        var id: String?, owner: String?
         /// The paths it is made of, each with its name in a destination folder (a split GGUF's parts, a family pack's
         /// `family-<key>/pack-<type>`); empty: the item's own path under its own name.
         var parts: [Part] = []
@@ -138,6 +145,7 @@ enum Storage {
                 let read = files.compactMap { ($0["path"] as? String).map { reachable($0) ? resolved($0) : $0 } }
                 needed += read
                 borrowed += read.map { ($0, name) }
+                if let outside = expertsElsewhere(path) { (item.elsewhere, item.elsewhereBytes) = outside }
             }
             if listed { items.append(item) }
         }
@@ -246,6 +254,8 @@ enum Storage {
             for sub in Commands.origamiFolders(in: URL(fileURLWithPath: folder, isDirectory: true)) {
                 let names = Set(children(sub.path))
                 let id = String(sub.lastPathComponent.suffix(12))
+                let first = items.count
+                defer { for index in first..<items.count { items[index].id = id } }
                 let model = fingerprints[id] ?? (fingerprintsKnown ? nil : "?")
                 var tracked = Set<String>()
                 for header in ["pack.json", "pack-3bit.json", "pack-2bit.json", "mirror.json"] where names.contains(header) {
@@ -319,6 +329,8 @@ enum Storage {
             for child in children(folder) where child.range(of: "^family-[0-9a-f]{16}$", options: .regularExpression) != nil {
                 let key = String(child.dropFirst(7))
                 let base = folder + "/" + child
+                let first = items.count
+                defer { for index in first..<items.count { items[index].id = key } }
                 let model = keysKnown || keys[key] != nil ? keys[key] : "?"
                 for pack in children(base)
                 where pack.hasPrefix("pack-") && manager.fileExists(atPath: base + "/" + pack + "/pack.json") {
@@ -348,6 +360,8 @@ enum Storage {
         let data = settings.dataDir.path
         for key in children(data + "/family") where isFolder(data + "/family/" + key) {
             let model = keysKnown || keys[key] != nil ? keys[key] : "?"
+            let first = items.count
+            defer { for index in first..<items.count { items[index].id = key } }
             if model == nil || keys[key] == nil && earlierModels[key] != nil {
                 items.append(
                     earlier(
@@ -368,6 +382,8 @@ enum Storage {
         }
         for key in children(data + "/support") where isFolder(data + "/support/" + key) {
             let model = keysKnown || keys[key] != nil ? keys[key] : "?"
+            let first = items.count
+            defer { for index in first..<items.count { items[index].id = key } }
             items.append(
                 earlier(
                     Item(
@@ -417,7 +433,9 @@ enum Storage {
                 && entries!.allSatisfy { $0["family"] != nil || ($0["manifest"] as? [String: Any])?["fingerprint"] != nil }
             builds = SavedPrompts.builds(
                 settings.promptCacheRoot,
-                owners: .init(qwen: fingerprints, family: keys, qwenKnown: known, familyKnown: keysKnown && entries != nil))
+                owners: .init(
+                    qwen: fingerprints, family: keys, qwenKnown: known, familyKnown: keysKnown && entries != nil,
+                    former: ModelRegistry.former(settings)))
             for item in prompts(settings.promptCacheRoot.path, unused: false, builds: builds) {
                 let id = PromptCache.modelFolder((item.path as NSString).lastPathComponent).map(String.init)
                 items.append(item.unused ? earlier(item, id.flatMap { earlierModels[$0] }) : item)
@@ -465,6 +483,15 @@ enum Storage {
         for index in items.indices {
             guard let model = items[index].model, let own = identities[model] else { continue }
             items[index].users = Set(identities.filter { !$0.value.isDisjoint(with: own) }.keys)
+            for file in items[index].elsewhere {
+                let real = reachable(file) ? resolved(file) : file
+                let other =
+                    borrowed.first { $0.path == real && !items[index].users.contains($0.reader) }?.reader
+                    ?? items.first { other in
+                        other.path != items[index].path && !other.unused && other.pieces.contains { overlaps(resolved($0.from), real) }
+                    }.map { $0.model ?? $0.name }
+                if let other { items[index].sharedWith[file] = other }
+            }
             // A conversion reads its experts from that GGUF by its path: moved, the conversion would read nothing.
             if items[index].move != nil,
                 let reader = borrowed.first(where: { pair in
@@ -496,6 +523,23 @@ enum Storage {
                 }
             }
             if item.role == "hot copy", items[index].move == nil, item.model != nil, item.model != "?" { items[index].move = "hot" }
+        }
+        // An item of no registered model names the one it was made for: an earlier Origami's, its last name
+        // (`ModelRegistry.retire`), one found on this Mac, or, for files older than that record, its identity. The saved
+        // prompts' folder names the models whose saves it holds.
+        let lastNames = ModelRegistry.former(settings)
+        for index in items.indices where items[index].model == nil || items[index].model == "?" {
+            let item = items[index]
+            if let name = item.earlier {
+                items[index].owner = name + " (an earlier Origami's)"
+            } else if let id = item.id {
+                let found: String? = owners[id].map { $0 + " (found on this Mac, not added)" }
+                let last: String? = lastNames[id].map(ModelRegistry.formerName)
+                let unknown = (item.model == "?" ? "a model not identified · " : "from a model no longer registered · ") + id
+                items[index].owner = waiting[id] ?? found ?? last ?? unknown
+            } else if item.role == "prompts", !item.unused, !builds.isEmpty {
+                items[index].owner = "for " + unique(builds.map { $0.owner ?? $0.model }).joined(separator: ", ")
+            }
         }
         var seen = Set<String>()
         return (items.filter { seen.insert($0.readable ? resolved($0.path) : $0.path).inserted }, builds)
@@ -576,8 +620,10 @@ enum Storage {
                 actions.append("forget")
                 actions.append("relink")
             }
+            // Its size is what it reads: an experts file elsewhere counts too (the drive's roles count only what is there).
             var entry: [String: Any] = [
-                "path": item.path, "name": item.name, "role": item.role, "bytes": item.bytes, "allocated_bytes": item.allocated,
+                "path": item.path, "name": item.name, "role": item.role, "bytes": item.bytes + item.elsewhereBytes,
+                "allocated_bytes": item.allocated + item.elsewhereBytes,
                 "in_use": inUse(item, running: running), "unused": item.unused, "actions": actions,
                 "readable": item.readable, "blocked": item.deleteBlocked ?? NSNull(),
                 "state": !item.readable
@@ -587,6 +633,8 @@ enum Storage {
             // "?": a family item whose model's drive did not answer, so it is neither matched nor an orphan.
             if let model = item.model, model != "?" { entry["model"] = model }
             if let note = item.note { entry["note"] = note }
+            if !item.elsewhere.isEmpty { entry["experts_from"] = item.elsewhere }
+            if let owner = item.owner { entry["owner"] = owner }
             guard var drive = drives[name] else { continue }
             var roles = drive["roles"] as? [String: UInt64] ?? [:]
             roles[item.role, default: 0] += item.allocated
@@ -1073,6 +1121,7 @@ enum Storage {
             try Commands.modelSettings(&changes, target: target)
             if !changes.isEmpty { try Settings.write(changes, to: settings.configFile) }
         }
+        if item.role == "model" { retire(item, settings: settings) }
         var kept: [String] = []
         for part in item.pieces {
             // A model's folder may hold files that are not the model's (notes, another download): only its own go.
@@ -1091,8 +1140,43 @@ enum Storage {
                 kept.append("\(part.from) (\(left.joined(separator: ", ")))")
             }
         }
+        let going = deletes(item).filter { !item.pieces.map(\.from).contains($0) }
+        for file in going where FileManager.default.fileExists(atPath: file) { try FileManager.default.removeItem(atPath: file) }
+        let staying = item.elsewhere.filter { item.sharedWith[$0] != nil }
         if item.role == "model" { try forget(item, settings: settings) }
-        return "Deleted " + item.name + (kept.isEmpty ? "" : "; kept its folder for the other files in it: " + kept.joined(separator: "; "))
+        return "Deleted " + item.name
+            + (going.isEmpty ? "" : " and " + going.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+            + (kept.isEmpty ? "" : "; kept its folder for the other files in it: " + kept.joined(separator: "; "))
+            + staying.map { "; kept \($0): \(item.sharedWith[$0]!) reads it too" }.joined()
+    }
+    /// What deleting `item` removes: its own paths, then each experts file elsewhere that no other model reads.
+    static func deletes(_ item: Item) -> [String] {
+        item.pieces.map(\.from) + (item.role == "model" ? item.elsewhere.filter { item.sharedWith[$0] == nil } : [])
+    }
+
+    /// The GGUF files outside the Qwen folder `folder` its routed experts are read from (`gguf-experts.json`), and the
+    /// bytes read of them: each bank's experts as the manifest records them, else the files' sizes; nil for none.
+    static func expertsElsewhere(_ folder: String) -> (files: [String], bytes: UInt64)? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: folder + "/" + GGUFExperts.file)), data.count <= 1 << 20,
+            let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let listed = root["files"] as? [[String: Any]]
+        else { return nil }
+        let inside = [folder, resolved(folder)].map { URL(fileURLWithPath: $0).standardizedFileURL.path + "/" }
+        let outside = listed.filter { file in
+            (file["path"] as? String).map { path in !inside.contains { URL(fileURLWithPath: path).standardizedFileURL.path.hasPrefix($0) } }
+                ?? false
+        }
+        guard !outside.isEmpty else { return nil }
+        let files = outside.compactMap { $0["path"] as? String }
+        func number(_ value: Any?) -> UInt64 { (value as? NSNumber)?.uint64Value ?? 0 }
+        let banks = (root["layers"] as? [[String: Any]] ?? []).flatMap { layer in
+            ["gate", "up", "down"].compactMap { layer[$0] as? [String: Any] }
+        }
+        let read = banks.filter { files.contains($0["path"] as? String ?? "") }.reduce(UInt64(0)) {
+            $0 + number($1["expert_bytes"]) * number(root["experts"])
+        }
+        let whole = outside.reduce(UInt64(0)) { $0 + number($1["size"]) }
+        return (files, read > 0 && read <= whole ? read : whole)
     }
     /// The files of the model in `folder`: its GGUF parts, or its safetensors shards (from the index) and the files that
     /// describe it (config, tokenizer, template, licence, Origami's own records, those a download fetched).
@@ -1134,11 +1218,9 @@ enum Storage {
     }
     static func forget(_ item: Item, settings: Settings) throws {
         guard item.role == "model" else { throw ServingFailure("Only a model can be removed from the library") }
-        // A low-bit variant registered on this path is another model: it stays unless named.
+        retire(item, settings: settings)
         let removed = try ModelRegistry.update(settings) { entries in
-            let removed = entries.filter {
-                $0["path"] as? String == item.path && $0["experts"] == nil || $0["name"] as? String == item.model
-            }
+            let removed = registered(item, in: entries)
             entries.removeAll { entry in removed.contains { NSDictionary(dictionary: $0).isEqual(to: entry) } }
             return removed
         }
@@ -1152,6 +1234,15 @@ enum Storage {
         if settings.model == item.model || settings.model.map(Settings.expand) == item.path {
             try Settings.write(["model": nil, "stopped": true], to: settings.configFile)
         }
+    }
+    /// The entries `forget` removes for the model `item`. A low-bit variant registered on its path is another model: it
+    /// stays unless named.
+    private static func registered(_ item: Item, in entries: [[String: Any]]) -> [[String: Any]] {
+        entries.filter { $0["path"] as? String == item.path && $0["experts"] == nil || $0["name"] as? String == item.model }
+    }
+    /// Keeps the names of the model `item`'s entries for its identities (`ModelRegistry.retire`), while its files are there.
+    private static func retire(_ item: Item, settings: Settings) {
+        for entry in registered(item, in: (try? ModelRegistry.entries(settings)) ?? []) { ModelRegistry.retire(entry, settings: settings) }
     }
     static func relink(_ item: Item, to path: String, settings: Settings) throws -> String {
         guard item.role == "model", let real = Folders.real(path), Folders.root(of: real, Folders.roots(settings)) != nil else {

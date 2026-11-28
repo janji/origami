@@ -1,7 +1,7 @@
 import Foundation
 import OrigamiEngine
 
-let version = "3.1.8.3"
+let version = "3.2.0"
 
 /// Options that set a setting; every command that reads settings accepts them. Help lists them in this order: the
 /// ones people change most first, the quality knobs last.
@@ -116,7 +116,7 @@ let help = """
 
     Models and drives:
       setup                 Find or download the model, measure the drives, build the expert copies
-      model list|add|remove|move|default
+      model list|add|replace|standalone|remove|move|default
                             Manage named models; `model add <experts.gguf> --base <model>` adds low-bit experts
       store list|add|remove Use folders on other drives for copies of the experts
       move list|recover     Finish or undo a move a stop interrupted
@@ -194,9 +194,9 @@ let commands: [String: CommandSpec] = [
         options: ["size", "yes", "no-pack", "full-pack"], arguments: 2),
     "model": .init(
         usage:
-            "model list [--json]\n       origami model add <folder|org/repo|file.gguf> [--name <name>] [--to <folder>] [--expert-bits 2|4|8] [--yes]\n       origami model add <experts.gguf> --base <model> [--name <name>] [--yes]\n       origami model remove <name>\n       origami model move <name> <folder>\n       origami model default <name>",
+            "model list [--json]\n       origami model add <folder|org/repo|file.gguf> [--name <name>] [--to <folder>] [--expert-bits 2|4|8] [--yes]\n       origami model add <experts.gguf> --base <model> [--name <name>] [--yes]\n       origami model replace <name> <folder|org/repo|file.gguf> [--base <model>] [--to <folder>] [--yes]\n       origami model standalone <name> [--to <folder>]\n       origami model remove <name>\n       origami model move <name> <folder>\n       origami model default <name>",
         summary:
-            "List, add, remove, move or choose the default of the models Origami knows by name; `origami serve --model <name>` serves one.\n`model add <experts.gguf> --base <model>` adds a faster variant of an exact model whose experts come from a low-bit file\n(replies differ from the exact model's). `model move` moves a model's files with the server quit, as the dashboard's Move:\nrenamed on the same drive, else copied, read back and compared before the original goes; its hot copy, counts and\nsaved prompts follow it",
+            "List, add, remove, move or choose the default of the models Origami knows by name; `origami serve --model <name>` serves one.\n`model add <experts.gguf> --base <model>` adds a faster variant of an exact model whose experts come from a low-bit file\n(replies differ from the exact model's). `model replace` puts another build under a name, keeping its settings, presets\nand default; the server keeps running and loads it at the next request; what was kept for the old files is named.\n`model standalone` copies a variant's base files into a folder of its own (compared byte for byte), so the base can go.\nA request may name `qwen`, `glm` or `deepseek`: the default model of that family, else the one added last. `model move` moves a model's files with the server quit, as the dashboard's Move:\nrenamed on the same drive, else copied, read back and compared before the original goes; its hot copy, counts and\nsaved prompts follow it",
         options: ["name", "to", "base", "expert-bits", "json", "yes"], arguments: 3),
     "move": .init(
         usage: "move [list]\n       origami move recover [<id>]",

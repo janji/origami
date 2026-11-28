@@ -53,7 +53,7 @@ for that request alone.
 | "this model does not fit this Mac at this context" | Even the largest limit this Mac allows is less than the model needs at this context. Use a smaller `context`, a model that needs less memory (Qwen needs the least), or a Mac with more memory. Qwen says the same when even this Mac's largest limit cannot start it. |
 | "Port 11439 is already in use" | Another program, often another `origami serve`, listens there. `origami status` shows whether it is Origami; quit that one, or start this one with `--port`. |
 | The model folder is refused | `origami inspect <folder>` shows what it holds; see [models.md](models.md). |
-| "the drive … is not connected" (`model list`, `setup`, `serve`) | The model's drive is unplugged or asleep. Connect it. If it is connected under another name (renamed, or `/Volumes/<name> 1`), `origami doctor` names the new place and `origami relink` uses it. |
+| "the drive … is not connected" (`model list`, `setup`, `serve`) | The model's drive is unplugged or asleep. Connect it. A server whose model's drive was not mounted when it started (after a power cut, say) waits for it (its status says "waiting for …") and loads the model as soon as the drive mounts; Stop ends the wait. If it is connected under another name (renamed, or `/Volumes/<name> 1`), `origami doctor` names the new place and `origami relink` uses it. |
 | The model's drive dropped off while serving (status `degraded`, requests fail with `drive_stalled` "The model drive is not connected") | Requests fail at once while it is gone; what is already in memory and the hot copy stay. Reconnect the drive: within about 5 s Origami opens the model's files again, checks they are the same files (size, modification time, inode, and 64 KiB of content), and reads continue with no reload (the log says "the model drive returned after N s"). If another drive or another model is now at that path, it stays `degraded` and says "A different file is at …": reconnect the right drive, or Reload to load what is there. The dashboard may still offer Reload after the drive is back; it is not needed once requests answer again. |
 | "… is shorter than its header says: the download is incomplete" | A GGUF was cut short (an interrupted download). Download it again. |
 | A move stopped part way (a crash, a sleep, a closed browser) | `origami move list` shows it; with the server quit, `origami move recover` finishes it (the copy was checked) or puts the original back, as the dashboard's **Recover…** does. A hot copy listed as "belongs to <model> before its move" waits for its model's files to be readable; `origami move recover` then carries it over. |
@@ -95,10 +95,9 @@ bytes, it stops and names the file, and nothing else changes: the file's bytes m
 the drive, download that file again and delete `refresh.json` (running the refresh again refuses until then).
 
 Rewriting changes the files' change time, which is part of how Origami recognises a model's files, so afterwards it
-moves the hot copy, further copies, usage counts, tuning and GLM or DeepSeek's saved prompts to the
-files' new identity. That is done only because the bytes were proven unchanged; a file replaced or edited meanwhile is
-treated as a new model (its copies are listed as orphans). Qwen's saved prompts cannot be moved: they are deleted, and
-the next long prompt is read again once. A model with low-bit experts (`model add --base`) depends on its base's files:
+moves the hot copy, further copies, usage counts, tuning and saved prompts to the files' new identity. That is done
+only because the bytes were proven unchanged; a file replaced or edited meanwhile is treated as a new model (its copies
+are listed as orphans, its saved prompts are not used). A model with low-bit experts (`model add --base`) depends on its base's files:
 refreshing the base moves the variant's copies and counts too, and `origami refresh --model <variant>` also rewrites
 its experts file. Copies on a drive that is not connected keep the old identity. The slowness
 can come back after many terabytes of reads; run it again then.

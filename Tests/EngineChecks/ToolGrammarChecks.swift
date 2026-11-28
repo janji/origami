@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OrigamiEngine
 
@@ -279,7 +280,8 @@ func familyToolTemplateRoundTrip() throws {
 /// GLM's `clear_thinking` and DeepSeek's `drop_thinking` would rewrite it). With ORIGAMI_MODEL (a model folder, or a
 /// family GGUF whose header gives the tokenizer and template), on that tokenizer and template too.
 func templateContinuationRoundTrip() throws {
-    let edits = "[{\"newText\":\"b\",\"oldText\":\"a\"}]"  // nested values render through the template's tojson: sorted, compact
+    // Nested values render through the template's `tojson`, Python's: the model's key order, `", "` and `": "`.
+    let edits = #"[{"oldText": "a/b", "newText": "b"}]"#
     let replies: [ModelFamily: (tool: String, plain: String)] = [
         .qwen: (
             "Looking.\n</think>\n\nI will edit it.\n\n<tool_call>\n<function=edit>\n<parameter=path>\nsrc/雪.txt\n</parameter>\n"
@@ -375,4 +377,76 @@ func templateContinuationRoundTrip() throws {
     let template = try String(contentsOf: model.appendingPathComponent("chat_template.jinja"), encoding: .utf8)
     let family: ModelFamily = template.contains("｜DSML｜") ? .deepseek : template.contains("<arg_key>") ? .glm : .qwen
     try check(family, box.stack!, "ORIGAMI_MODEL (\(family))")
+}
+
+/// `tojson` renders as transformers' does (`json.dumps(x, ensure_ascii=False)`): the three real templates
+/// (Tests/Fixtures/models) render a tool schema and a past call with nested, out-of-order, escaped and float arguments
+/// exactly as Python does, and the filter's options match it too. The expected texts and hashes come from jinja2 3.x with
+/// transformers' environment (ImmutableSandboxedEnvironment, trim_blocks, lstrip_blocks, loopcontrols, its `tojson`),
+/// rendering the same messages with `enable_thinking`, `thinking`, `reasoning_effort="medium"` and
+/// `clear_thinking`/`drop_thinking` false. Tool schemas reach the template with sorted keys (the request body is read
+/// with JSONSerialization), so the schema here is written sorted.
+func templateToJSONMatchesPython() throws {
+    let arguments =
+        #"{"path": "src/雪.txt", "edits": [{"oldText": "a/b <x> & 'q'", "newText": "ü\n\"z\"\t"}], "line": 12, "ratio": 1.0, "#
+        + #""tiny": 1e-05, "flags": {"dry": false, "note": null, "on": true}}"#
+    let schema =
+        #"{"description": "Edit a file under src/ (ü)", "name": "edit", "parameters": {"properties": {"edits": {"items": "#
+        + #"{"properties": {"newText": {"type": "string"}, "oldText": {"type": "string"}}, "type": "object"}, "type": "array"}, "#
+        + #""path": {"description": "Like src/a.txt", "type": "string"}}, "required": ["path", "edits"], "type": "object"}}"#
+    let body: [String: Any] = [
+        "model": "m", "reasoning_effort": "medium",
+        "tools": [["type": "function", "function": try JSONSerialization.jsonObject(with: Data(schema.utf8))]],
+        "messages": [
+            ["role": "system", "content": "Be brief."], ["role": "user", "content": "Fix it"],
+            [
+                "role": "assistant", "content": "I will edit it.", "reasoning_content": "Looking.",
+                "tool_calls": [["id": "call_1", "type": "function", "function": ["name": "edit", "arguments": arguments]]],
+            ],
+            ["role": "tool", "tool_call_id": "call_1", "content": "done"], ["role": "user", "content": "Next"],
+        ],
+    ]
+    let request = try ServingRequest.parse(JSONSerialization.data(withJSONObject: body), contextTier: 8192)
+    let parts = [
+        schema, #"[{"oldText": "a/b <x> & 'q'", "newText": "ü\n\"z\"\t"}]"#, #"{"dry": false, "note": null, "on": true}"#, "1.0",
+        "1e-05",
+    ]
+    for (folder, digest) in [
+        ("qwen3.8-flash-next", "6e89d12c560c30a3e9abb690472dee17bf33618bc3c2161a10ee3a0730cce42e"),
+        ("glm-5.3-flash", "d79ab3c7cb5b4e351b18851a5dbc4c751fe9262d0a6ffb592216ac126228aec1"),
+        ("deepseek-v4.1-flash", "76455cb575297a92e2f354f6c55f0ce868c09c16f29162bb8212cf130605d047"),
+    ] {
+        let stack = try tinyFamilyTokenizer(String(contentsOf: CheckFixtures.file("models/\(folder)/chat_template.jinja"), encoding: .utf8))
+        let rendered = try stack.decode(ServingPrompt.encode(request, tokenizer: stack))
+        for part in parts { try grammarAssert(rendered.contains(part), "\(folder) lacks Python's \(part) in:\n\(rendered)") }
+        let hash = SHA256.hash(data: Data(rendered.utf8)).map { String(format: "%02x", $0) }.joined()
+        try grammarAssert(hash == digest, "\(folder) renders other than Python (sha256 \(hash)):\n\(rendered)")
+    }
+    // The options, on arguments out of key order.
+    let options = try tinyFamilyTokenizer(
+        "{% set x = messages[0].tool_calls[0].function.arguments %}{{ x | tojson(indent=2) }}\n"
+            + "{{ x | tojson(ensure_ascii=True, sort_keys=True) }}\n{{ x | tojson(separators=[\",\", \":\"]) }}\n"
+            + "{{ x | tojson(indent=\"\\t\") }}\n{{ x.b | tojson(indent=0) }}")
+    let messages: [[String: TemplateValue]] = [
+        [
+            "role": .string("assistant"), "content": .string(""),
+            "tool_calls": .array([
+                .object([
+                    "id": .string("c"), "type": .string("function"),
+                    "function": .object([
+                        "name": .string("f"),
+                        "arguments": .string(#"{"d": {"y": null, "x": true}, "b": [1, 2.5, "é/<\u007f😀"], "a": {}, "c": []}"#),
+                    ]),
+                ])
+            ]),
+        ],
+        ["role": .string("tool"), "tool_call_id": .string("c"), "content": .string("")],
+    ]
+    let expected =
+        "{\n  \"d\": {\n    \"y\": null,\n    \"x\": true\n  },\n  \"b\": [\n    1,\n    2.5,\n    \"é/<\u{7F}😀\"\n  ],\n  \"a\": {},\n"
+        + "  \"c\": []\n}\n{\"a\": {}, \"b\": [1, 2.5, \"\\u00e9/<\\u007f\\ud83d\\ude00\"], \"c\": [], \"d\": {\"x\": true, \"y\": null}}\n"
+        + "{\"d\":{\"y\":null,\"x\":true},\"b\":[1,2.5,\"é/<\u{7F}😀\"],\"a\":{},\"c\":[]}\n{\n\t\"d\": {\n\t\t\"y\": null,\n\t\t\"x\": true\n\t},\n"
+        + "\t\"b\": [\n\t\t1,\n\t\t2.5,\n\t\t\"é/<\u{7F}😀\"\n\t],\n\t\"a\": {},\n\t\"c\": []\n}\n[\n1,\n2.5,\n\"é/<\u{7F}😀\"\n]"
+    let shown = try options.decode(options.encodeChat(messages: messages, reasoningEffort: "none"))
+    try grammarAssert(shown == expected, "tojson options render\n\(shown)\nnot Python's\n\(expected)")
 }

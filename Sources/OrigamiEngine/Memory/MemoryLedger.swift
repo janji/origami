@@ -23,6 +23,13 @@ public final class MemoryLedger: @unchecked Sendable {
         /// Measured process bytes outside materialized owners; allowances remain separately charged.
         public var physicalOverheadBytes: UInt64? = nil
         public var prospectiveAllowanceBytes: UInt64? = nil
+        /// The part of `categories` reserved as allowances (no buffer yet), by category.
+        public var allowanceCategories: [String: UInt64]? = nil
+        /// `/v1/status` `memory`: `owners`, the bytes each owner (category) holds reserved, which sum to `reserved`; and
+        /// `owners_without_buffer`, the part of them reserved ahead with no buffer yet.
+        public var ownersReport: [String: Any] {
+            ["owners": categories, "owners_without_buffer": (allowanceCategories ?? [:]).filter { $0.value > 0 }]
+        }
     }
     private struct Entry {
         let bytes: UInt64
@@ -244,7 +251,11 @@ public final class MemoryLedger: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var categories: [String: UInt64] = [:]
-        for entry in entries.values { categories[entry.category, default: 0] += entry.bytes }
+        var allowanceCategories: [String: UInt64] = [:]
+        for entry in entries.values {
+            categories[entry.category, default: 0] += entry.bytes
+            if entry.allowance { allowanceCategories[entry.category, default: 0] += entry.bytes }
+        }
         var result = Snapshot(
             ceiling: ceiling, transientMargin: transientMargin, reserved: reserved,
             reservationHighWater: highWater, physicalFootprint: origami_physical_footprint(),
@@ -254,6 +265,7 @@ public final class MemoryLedger: @unchecked Sendable {
         result.cacheRelief = cacheReliefLocked()
         result.physicalOverheadBytes = physicalOverhead
         result.prospectiveAllowanceBytes = allowances
+        result.allowanceCategories = allowanceCategories
         return result
     }
 

@@ -142,6 +142,26 @@ public enum JSONValue: Sendable, Equatable {
         return out + "\""
     }
 
+    /// Valid JSON text without the whitespace between its tokens: compact like `jsonText`, but objects keep the
+    /// text's key order and numbers their spelling.
+    static func compact(_ json: String) -> String {
+        var out = ""
+        var quoted = false
+        var escaped = false
+        for ch in json.unicodeScalars {
+            if quoted {
+                quoted = escaped || ch != "\""
+                escaped = !escaped && ch == "\\"
+            } else if [" ", "\t", "\n", "\r"].contains(ch) {
+                continue
+            } else {
+                quoted = ch == "\""
+            }
+            out.unicodeScalars.append(ch)
+        }
+        return out
+    }
+
     /// Parse text as JSON, or return nil. `fragmentsAllowed` so a bare number
     /// or string parses too.
     static func parse(_ text: String) -> JSONValue? {
@@ -197,18 +217,22 @@ public struct ParsedToolCall: Sendable, Equatable {
     /// order, which is most calls with more than one parameter. Emission order
     /// is also stable run to run, where Swift's dictionary order is not.
     public let order: [String]
+    /// A list or object argument's compact JSON as the model wrote it: its objects' keys stay in the model's order, so
+    /// the call a client sends back renders as generated (`jsonText` would sort them).
+    public let texts: [String: String]
 
-    public init(id: String, name: String, arguments: [String: JSONValue], order: [String] = []) {
+    public init(id: String, name: String, arguments: [String: JSONValue], order: [String] = [], texts: [String: String] = [:]) {
         self.id = id
         self.name = name
         self.arguments = arguments
         self.order = order.isEmpty ? arguments.keys.sorted() : order
+        self.texts = texts
     }
 
     /// The compact JSON object the wire carries as `input`.
     public var inputJSON: String {
         let body = order.compactMap { k in
-            arguments[k].map { JSONValue.quote(k) + ":" + $0.jsonText }
+            arguments[k].map { JSONValue.quote(k) + ":" + (texts[k] ?? $0.jsonText) }
         }
         return "{" + body.joined(separator: ",") + "}"
     }
@@ -322,6 +346,7 @@ public final class ToolCallSplitter {
     private var currentName = ""
     private var currentArgs: [String: JSONValue] = [:]
     private var currentOrder: [String] = []
+    private var currentTexts: [String: String] = [:]
     private var emittedAnyArg = false
     private var valueRaw = ""
     private var streamsString = false
@@ -509,12 +534,16 @@ public final class ToolCallSplitter {
                 let value = marked ?? Self.coerce(valueRaw, as: kind, framed: framed)
                 if currentArgs[param] == nil { currentOrder.append(param) }
                 currentArgs[param] = value
+                switch value {
+                case .array, .object: currentTexts[param] = JSONValue.compact(valueRaw.trimmingCharacters(in: .whitespacesAndNewlines))
+                default: currentTexts[param] = nil
+                }
                 out.append(
                     .toolInputDelta(
                         id: currentID,
                         delta: streamsString
                             ? "\""
-                            : (emittedAnyArg ? "," : "{") + JSONValue.quote(param) + ":" + value.jsonText))
+                            : (emittedAnyArg ? "," : "{") + JSONValue.quote(param) + ":" + (currentTexts[param] ?? value.jsonText)))
                 emittedAnyArg = true
                 state = .params
                 continue loop
@@ -569,6 +598,7 @@ public final class ToolCallSplitter {
         currentID = nextID()
         currentArgs = [:]
         currentOrder = []
+        currentTexts = [:]
         emittedAnyArg = false
         out.append(.toolInputStart(id: currentID, name: currentName))
         state = .params
@@ -583,7 +613,7 @@ public final class ToolCallSplitter {
             .toolCall(
                 ParsedToolCall(
                     id: currentID, name: currentName, arguments: currentArgs,
-                    order: currentOrder)))
+                    order: currentOrder, texts: currentTexts)))
         resetCall()
         return out
     }
@@ -593,6 +623,7 @@ public final class ToolCallSplitter {
         currentName = ""
         currentArgs = [:]
         currentOrder = []
+        currentTexts = [:]
         emittedAnyArg = false
         rawCall = ""
         valueRaw = ""
